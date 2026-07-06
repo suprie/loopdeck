@@ -142,3 +142,7 @@
 - **Consequences**: Adopted `@tanstack/react-router` v1 with `createMemoryHistory` (no browser URL bar in Tauri). Routes: `/`, `/activity`, `/agent`, `/decisions`, `/loops`, `/settings`, `/import`, `/project/$projectPath`. The root route is a layout component (`AppShellLayout`) with sidebar + `<Outlet />`. Zustand retains data state (`projects`, `selectedProject`, `detailTab`, `pendingAgentStart`) but no longer owns the current view. Project filesystem paths are URI-encoded in the route param (`encodeURIComponent`/`decodeURIComponent`). Navigation uses `<Link>` (sidebar) and `useNavigate()` (programmatic). The persisted Zustand slice was reduced from `{currentView, selectedProject, detailTab}` to `{selectedProject, detailTab}` — the router's memory history handles the current location.
 
 ## 2026-07-02 — Session heartbeat
+## 2026-07-06 — Session heartbeat
+- **Status**: proposed
+- **Context**: AI session active on LoopDeck development.
+
