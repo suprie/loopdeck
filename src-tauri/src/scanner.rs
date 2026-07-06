@@ -6,13 +6,13 @@ use std::time::Instant;
 
 /// Marker files and directories that indicate a project repository.
 const PROJECT_MARKERS: &[&str] = &[
-    ".git",           // directory — most common
-    "Cargo.toml",     // Rust
-    "package.json",   // Node.js / TypeScript
-    "go.mod",         // Go
-    "Package.swift",  // Swift
-    "Gemfile",        // Ruby
-    "Podfile",        // CocoaPods (iOS)
+    ".git",          // directory — most common
+    "Cargo.toml",    // Rust
+    "package.json",  // Node.js / TypeScript
+    "go.mod",        // Go
+    "Package.swift", // Swift
+    "Gemfile",       // Ruby
+    "Podfile",       // CocoaPods (iOS)
 ];
 
 /// Filename patterns that indicate an Xcode project (checked separately).
@@ -189,7 +189,7 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<Vec<DiscoveredRepo>,
             has_loopdeck,
             detected_stack,
             description_preview,
-            last_commit: git_info.last_commit,
+            last_commit: git_info.last_commit_date,
             last_modified: git_info.last_modified,
         });
     }
@@ -403,7 +403,10 @@ mod tests {
     #[test]
     fn test_detect_stack() {
         assert_eq!(detect_stack(&["Cargo.toml".into()]), "Rust");
-        assert_eq!(detect_stack(&["package.json".into()]), "JavaScript/TypeScript");
+        assert_eq!(
+            detect_stack(&["package.json".into()]),
+            "JavaScript/TypeScript"
+        );
         assert_eq!(
             detect_stack(&["Cargo.toml".into(), "package.json".into()]),
             "Rust, JavaScript/TypeScript"
@@ -420,7 +423,10 @@ mod tests {
 
         // With max_depth=3, the walker won't reach depth 4 (dir/a/b/c/d)
         let repos = scan_directory(&dir, 3).unwrap();
-        assert!(repos.is_empty(), "repo at depth 4 should not be found with max_depth=3");
+        assert!(
+            repos.is_empty(),
+            "repo at depth 4 should not be found with max_depth=3"
+        );
 
         // With max_depth=5, it should find it
         let repos = scan_directory(&dir, 5).unwrap();

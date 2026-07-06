@@ -2,12 +2,15 @@ use crate::error::AppError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub enum ProjectStatus {
     #[default]
     Active,
     Archived,
+    NonActive,
+    Warning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +26,9 @@ pub struct ProjectEntry {
     pub created_at: DateTime<Utc>,
     /// ISO 8601 timestamp of the last git commit (refreshed on startup).
     #[serde(default)]
-    pub last_commit: Option<String>,
+    pub last_commit_date: Option<String>,
+    #[serde(default)]
+    pub last_commit_message: Option<String>,
     /// ISO 8601 timestamp of the most recently modified file (refreshed on startup).
     #[serde(default)]
     pub last_modified: Option<String>,
@@ -150,9 +155,39 @@ fn dirs_sys_fallback() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Derive project status from git date freshness stored on the entry.
+/// Tries `last_commit` first, falls back to `last_modified`.
+/// 0–6 days → Active, 7–30 days → Warning, 30+ → NonActive.
+pub fn update_project_status(project: &mut ProjectEntry) {
+    let now = Utc::now();
+    let date_str = project
+        .last_commit_date
+        .as_deref()
+        .or(project.last_modified.as_deref());
+
+    if let Some(date_str) = date_str {
+        debug!("Last activity: {}", date_str);
+        if let Ok(date) = DateTime::parse_from_rfc3339(date_str) {
+            let days = now
+                .signed_duration_since(date.with_timezone(&Utc))
+                .num_days();
+            project.status = match days {
+                0..=6 => ProjectStatus::Active,
+                7..=30 => ProjectStatus::Warning,
+                _ => ProjectStatus::NonActive,
+            };
+            debug!(
+                "status: {:?} ({} days since last activity)",
+                project.status, days
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn test_config_roundtrip() {
@@ -164,7 +199,8 @@ mod tests {
                 status: ProjectStatus::Active,
                 last_opened: None,
                 created_at: Utc::now(),
-                last_commit: None,
+                last_commit_date: None,
+                last_commit_message: None,
                 last_modified: None,
             }],
             settings: Settings::default(),
@@ -192,7 +228,8 @@ mod tests {
             status: ProjectStatus::Active,
             last_opened: None,
             created_at: Utc::now(),
-            last_commit: None,
+            last_commit_date: None,
+            last_commit_message: None,
             last_modified: None,
         };
 
@@ -207,7 +244,8 @@ mod tests {
             status: ProjectStatus::Active,
             last_opened: None,
             created_at: Utc::now(),
-            last_commit: None,
+            last_commit_date: None,
+            last_commit_message: None,
             last_modified: None,
         };
         assert!(config.add_project(dup).is_err());
@@ -240,5 +278,101 @@ mod tests {
         assert!(parsed.projects.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── update_project_status tests ──
+
+    fn make_entry(last_commit_date: Option<String>, last_modified: Option<String>) -> ProjectEntry {
+        ProjectEntry {
+            path: PathBuf::from("/tmp/test-status"),
+            name: "Test".into(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            last_opened: None,
+            created_at: Utc::now(),
+            last_commit_date,
+            last_commit_message: None,
+            last_modified,
+        }
+    }
+
+    fn rfc3339_days_ago(days: i64) -> String {
+        (Utc::now() - Duration::days(days))
+            .format("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string()
+    }
+
+    #[test]
+    fn test_status_active_today() {
+        let mut entry = make_entry(Some(rfc3339_days_ago(0)), None);
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Active);
+    }
+
+    #[test]
+    fn test_status_active_6_days() {
+        let mut entry = make_entry(Some(rfc3339_days_ago(6)), None);
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Active);
+    }
+
+    #[test]
+    fn test_status_warning_7_days() {
+        let mut entry = make_entry(Some(rfc3339_days_ago(7)), None);
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Warning);
+    }
+
+    #[test]
+    fn test_status_warning_30_days() {
+        let mut entry = make_entry(Some(rfc3339_days_ago(30)), None);
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Warning);
+    }
+
+    #[test]
+    fn test_status_nonactive_31_days() {
+        let mut entry = make_entry(Some(rfc3339_days_ago(31)), None);
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::NonActive);
+    }
+
+    #[test]
+    fn test_status_falls_back_to_last_modified() {
+        let mut entry = make_entry(None, Some(rfc3339_days_ago(10)));
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Warning);
+    }
+
+    #[test]
+    fn test_status_prefers_last_commit_over_modified() {
+        // last_commit = 3 days (Active), last_modified = 20 days (Warning)
+        let mut entry = make_entry(Some(rfc3339_days_ago(3)), Some(rfc3339_days_ago(20)));
+        update_project_status(&mut entry);
+        // Should use last_commit (3 days → Active), not last_modified
+        assert_eq!(entry.status, ProjectStatus::Active);
+    }
+
+    #[test]
+    fn test_status_no_dates_unchanged() {
+        let mut entry = make_entry(None, None);
+        entry.status = ProjectStatus::Archived;
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Archived);
+    }
+
+    #[test]
+    fn test_status_invalid_date_unchanged() {
+        let mut entry = make_entry(Some("not-a-date".into()), None);
+        entry.status = ProjectStatus::Active;
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::Active);
+    }
+
+    #[test]
+    fn test_status_nonactive_365_days() {
+        let mut entry = make_entry(Some(rfc3339_days_ago(365)), None);
+        update_project_status(&mut entry);
+        assert_eq!(entry.status, ProjectStatus::NonActive);
     }
 }

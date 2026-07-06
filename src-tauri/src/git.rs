@@ -7,7 +7,8 @@ use std::time::UNIX_EPOCH;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitInfo {
     /// ISO 8601 timestamp of the last git commit, or None if no commits / no git.
-    pub last_commit: Option<String>,
+    pub last_commit_date: Option<String>,
+    pub last_commit_message: Option<String>,
     /// Whether the working tree has uncommitted changes.
     pub is_dirty: bool,
     /// ISO 8601 timestamp of the most recently modified tracked file.
@@ -19,20 +20,43 @@ pub struct GitInfo {
 pub fn check_git_info(path: &Path) -> GitInfo {
     let has_git = path.join(".git").exists();
 
-    let (last_commit, is_dirty) = if has_git {
-        let commit = last_commit_date(path);
+    let (last_commit_date, last_commit_message, is_dirty) = if has_git {
+        let last_commit_date = last_commit_date(path);
         let dirty = has_uncommitted_changes(path);
-        (commit, dirty)
+        let last_commit_message = last_commit_message(path);
+        (last_commit_date, last_commit_message, dirty)
     } else {
-        (None, false)
+        (None, None, false)
     };
 
     let last_modified = last_modified_time(path);
-
     GitInfo {
-        last_commit,
+        last_commit_date,
+        last_commit_message,
         is_dirty,
         last_modified,
+    }
+}
+/// Get the commit message from last git commit.
+fn last_commit_message(repo_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(repo_path)
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let date = stdout.trim().to_string();
+
+    if date.is_empty() {
+        None
+    } else {
+        Some(date)
     }
 }
 
@@ -140,8 +164,7 @@ mod tests {
     use std::io::Write;
 
     fn create_temp_dir() -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("loopdeck-git-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-git-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -152,7 +175,7 @@ mod tests {
         fs::write(dir.join("README.md"), "# Test").unwrap();
 
         let info = check_git_info(&dir);
-        assert!(info.last_commit.is_none());
+        assert!(info.last_commit_date.is_none());
         assert!(!info.is_dirty);
         // Should have a last_modified from the file we just wrote
         assert!(info.last_modified.is_some());
@@ -202,7 +225,7 @@ mod tests {
             .unwrap();
 
         let info = check_git_info(&dir);
-        assert!(info.last_commit.is_some());
+        assert!(info.last_commit_date.is_some());
         assert!(!info.is_dirty); // clean working tree
 
         fs::remove_dir_all(&dir).unwrap();
@@ -251,7 +274,7 @@ mod tests {
         file.write_all(b"dirty").unwrap();
 
         let info = check_git_info(&dir);
-        assert!(info.last_commit.is_some());
+        assert!(info.last_commit_date.is_some());
         assert!(info.is_dirty); // has untracked/uncommitted file
 
         fs::remove_dir_all(&dir).unwrap();

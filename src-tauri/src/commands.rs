@@ -1,4 +1,4 @@
-use crate::config::{GlobalConfig, ProjectEntry, ProjectStatus};
+use crate::config::{self, GlobalConfig, ProjectEntry, ProjectStatus};
 use crate::error::AppError;
 use crate::git;
 use crate::memory::{self, Decision, LoopStatus};
@@ -83,7 +83,8 @@ pub async fn import_project(
         status: ProjectStatus::Active,
         last_opened: Some(Utc::now()),
         created_at: Utc::now(),
-        last_commit: git_info.last_commit,
+        last_commit_date: git_info.last_commit_date,
+        last_commit_message: git_info.last_commit_message,
         last_modified: git_info.last_modified,
     };
 
@@ -99,9 +100,7 @@ pub async fn import_project(
 
 /// List all registered projects.
 #[tauri::command]
-pub async fn list_projects(
-    state: State<'_, AppState>,
-) -> Result<Vec<ProjectEntry>, AppError> {
+pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntry>, AppError> {
     debug!("list_projects called");
     let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
     let mut changed = false;
@@ -115,12 +114,16 @@ pub async fn list_projects(
 
         let git_info = git::check_git_info(&entry.path);
 
-        if entry.last_commit != git_info.last_commit {
-            entry.last_commit = git_info.last_commit;
+        if entry.last_commit_date != git_info.last_commit_date {
+            entry.last_commit_date = git_info.last_commit_date;
             changed = true;
         }
         if entry.last_modified != git_info.last_modified {
             entry.last_modified = git_info.last_modified;
+            changed = true;
+        }
+        if entry.last_commit_message != git_info.last_commit_message {
+            entry.last_commit_message = git_info.last_commit_message;
             changed = true;
         }
     }
@@ -177,10 +180,7 @@ pub async fn update_description(
 /// Remove a project from the registry.
 /// Does NOT delete the `.loopdeck/` directory or any project files.
 #[tauri::command]
-pub async fn remove_project(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<(), AppError> {
+pub async fn remove_project(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("remove_project called for path: {path}");
 
     let repo_path = PathBuf::from(&path);
@@ -354,8 +354,10 @@ pub async fn rescan_project(
 
     // Refresh git info
     let git_info = git::check_git_info(&entry.path);
-    entry.last_commit = git_info.last_commit;
-    entry.last_modified = git_info.last_modified;
+    entry.last_commit_date = git_info.last_commit_date.clone();
+    entry.last_modified = git_info.last_modified.clone();
+
+    config::update_project_status(entry);
 
     let result = entry.clone();
     config.save()?;
@@ -416,10 +418,7 @@ pub async fn get_decisions(
 /// Get loop status from `.loopdeck/loops.md`.
 /// Returns an empty/default LoopStatus if the file does not exist.
 #[tauri::command]
-pub async fn get_loops(
-    path: String,
-    _state: State<'_, AppState>,
-) -> Result<LoopStatus, AppError> {
+pub async fn get_loops(path: String, _state: State<'_, AppState>) -> Result<LoopStatus, AppError> {
     debug!("get_loops called for path: {path}");
 
     let repo_path = PathBuf::from(&path);
