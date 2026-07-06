@@ -12,6 +12,7 @@ import type {
   ConversationSummary,
   ApprovalDecision,
   AskUserQuestionAnswers,
+  AskUserQuestionSpec,
 } from "../types";
 
 /**
@@ -352,4 +353,38 @@ export async function agentResetSession(path: string): Promise<void> {
  */
 export async function agentIsBusy(path: string): Promise<boolean> {
   return invoke<boolean>("agent_is_busy", { path });
+}
+
+/**
+ * Read the pending manual-approval payload for a project, if any.
+ *
+ * Does NOT consume the sender — only the payload. Used by AgentPanel to
+ * re-render the Allow/Deny card after navigating away and back: the original
+ * permission_request event arrived on a Tauri Channel whose subscriber
+ * unmounted, so this is the only source of truth for the parked prompt.
+ * Rust: agent_pending_permission(path: String) -> Result<Option<PendingPermissionInfo>, AppError>
+ */
+export async function agentPendingPermission(
+  path: string,
+): Promise<{ requestId: string; toolName: string; input: string } | null> {
+  return invoke<{ requestId: string; toolName: string; input: string } | null>(
+    "agent_pending_permission",
+    { path },
+  );
+}
+
+/**
+ * Read the pending AskUserQuestion payload for a project, if any.
+ *
+ * Counterpart of `agentPendingPermission` for the question card. Does NOT
+ * consume the sender.
+ * Rust: agent_pending_question(path: String) -> Result<Option<PendingQuestionInfo>, AppError>
+ */
+export async function agentPendingQuestion(
+  path: string,
+): Promise<{ requestId: string; questions: AskUserQuestionSpec[] } | null> {
+  return invoke<{ requestId: string; questions: AskUserQuestionSpec[] } | null>(
+    "agent_pending_question",
+    { path },
+  );
 }

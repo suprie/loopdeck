@@ -237,6 +237,51 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         if (!cancelled) setLoading(false);
       }
 
+      // Reconcile parked prompts (manual approval / AskUserQuestion). The
+      // backend stores the parking payload in AppState.pending_* alongside
+      // the oneshot sender (not just as a ClaudeEvent on the streaming
+      // channel), so we can re-materialize the cards here even when the
+      // previous mount's channel subscriber is gone. Only seed the store
+      // when it doesn't already hold the entry — the channel-event path
+      // remains the source of truth when it's working.
+      if (!cancelled) {
+        try {
+          const pendingStore = usePendingInteractions.getState();
+          const [perm, q] = await Promise.all([
+            api.agentPendingPermission(projectPath),
+            api.agentPendingQuestion(projectPath),
+          ]);
+          if (perm && !pendingStore.permissions[projectPath]) {
+            setPendingPermission(projectPath, {
+              requestId: perm.requestId,
+              toolName: perm.toolName,
+              input: perm.input,
+            });
+          } else if (!perm && pendingStore.permissions[projectPath]) {
+            // Backend says nothing pending but the store does — clear the
+            // stale entry (turn ended while the user was away).
+            clearPendingPermission(projectPath);
+          }
+          if (q && !pendingStore.questions[projectPath]) {
+            setPendingQuestion(projectPath, {
+              requestId: q.requestId,
+              questions: q.questions,
+            });
+          } else if (!q && pendingStore.questions[projectPath]) {
+            clearPendingQuestion(projectPath);
+          }
+        } catch {
+          // Best-effort reconciliation — don't fail the mount on a probe error.
+        }
+      }
+
+      // Recompute parking state after the reconciliation above may have
+      // populated the store. Used below to decide whether to also poll for
+      // a non-parked in-flight turn.
+      const hasPendingParkingAfter =
+        !!usePendingInteractions.getState().permissions[projectPath] ||
+        !!usePendingInteractions.getState().questions[projectPath];
+
       // Reconcile a turn that's in flight but NOT parked on the user. This
       // happens when the previous mount unmounted mid-streaming: the Tauri
       // Channel it subscribed to is gone, so streaming events from the
@@ -246,7 +291,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       // backend reports idle. We snapshot the turn count to detect landing
       // (the assistant turn only appears in `active.jsonl` once the backend
       // finishes writing it).
-      if (cancelled || hasPendingParking) return;
+      if (cancelled || hasPendingParkingAfter) return;
       let busy = false;
       try {
         busy = await api.agentIsBusy(projectPath);

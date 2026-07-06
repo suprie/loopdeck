@@ -833,7 +833,9 @@ pub async fn agent_answer_question(
     let repo_path = PathBuf::from(&path);
 
     // Pop the sender for this project. There's at most one pending question at
-    // a time (Claude blocks on each), so this is a single take.
+    // a time (Claude blocks on each), so this is a single take of the sender
+    // field — the slot entry is cleared entirely so `agent_pending_question`
+    // stops reporting it as pending.
     let sender = {
         let guard = state
             .pending_answers
@@ -846,6 +848,7 @@ pub async fn agent_answer_question(
                     .ok()
                     .and_then(|mut g| g.take())
             })
+            .and_then(|pending| pending.sender)
             .ok_or_else(|| {
                 AppError::Agent(
                     "no pending question for this project (it may have timed out or already been answered)".into(),
@@ -917,7 +920,9 @@ pub async fn agent_answer_permission(
     let repo_path = PathBuf::from(&path);
 
     // Pop the sender for this project. At most one pending approval at a time
-    // (Claude blocks on each control_request), so this is a single take.
+    // (Claude blocks on each control_request), so this is a single take of the
+    // sender field — the slot entry is cleared entirely so
+    // `agent_pending_permission` stops reporting it as pending.
     let sender = {
         let guard = state
             .pending_permissions
@@ -926,6 +931,7 @@ pub async fn agent_answer_permission(
         guard
             .get(&repo_path)
             .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+            .and_then(|pending| pending.sender)
             .ok_or_else(|| {
                 AppError::Agent(
                     "no pending permission approval for this project (it may have timed out or already been answered)".into(),
@@ -1252,6 +1258,81 @@ fn project_busy(state: &AppState, path: &Path) -> bool {
 #[tauri::command]
 pub async fn agent_is_busy(path: String, state: State<'_, AppState>) -> Result<bool, AppError> {
     Ok(project_busy(&state, &PathBuf::from(&path)))
+}
+
+// ── Pending-interaction payloads (reconciliation after navigation) ───────────
+//
+// When an AskUserQuestion or manual-approval request parks the turn, the
+// request payload now lives in `AppState.pending_*` alongside the oneshot
+// sender (see `PendingQuestion` / `PendingPermission`). These commands expose
+// the payload without consuming the sender, so a freshly-mounted AgentPanel —
+// whose predecessor's Tauri Channel (and thus the original parking event) was
+// lost on unmount — can re-materialize the card.
+
+/// Serializable payload for a pending manual-approval request.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingPermissionInfo {
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: String,
+}
+
+/// Serializable payload for a pending AskUserQuestion request.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingQuestionInfo {
+    pub request_id: String,
+    pub questions: Vec<crate::agents::AskUserQuestionSpec>,
+}
+
+/// Read the pending manual-approval payload for a project, if any.
+///
+/// Does NOT consume the sender — only the payload. The frontend uses this to
+/// re-render the Allow/Deny card after navigating away and back. Returns `None`
+/// when no approval is pending.
+#[tauri::command]
+pub async fn agent_pending_permission(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PendingPermissionInfo>, AppError> {
+    let repo_path = PathBuf::from(&path);
+    let guard = state
+        .pending_permissions
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard.get(&repo_path).and_then(|slot| {
+        slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingPermissionInfo {
+                request_id: p.request_id.clone(),
+                tool_name: p.tool_name.clone(),
+                input: p.input.clone(),
+            })
+        })
+    }))
+}
+
+/// Read the pending AskUserQuestion payload for a project, if any.
+///
+/// Does NOT consume the sender — only the payload. The frontend uses this to
+/// re-render the question card after navigating away and back. Returns `None`
+/// when no question is pending.
+#[tauri::command]
+pub async fn agent_pending_question(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PendingQuestionInfo>, AppError> {
+    let repo_path = PathBuf::from(&path);
+    let guard = state
+        .pending_answers
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard.get(&repo_path).and_then(|slot| {
+        slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingQuestionInfo {
+                request_id: p.request_id.clone(),
+                questions: p.questions.clone(),
+            })
+        })
+    }))
 }
 
 /// Shared send pipeline used by `agent_start_loop` and `agent_send_message`.

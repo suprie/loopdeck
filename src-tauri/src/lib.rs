@@ -70,6 +70,8 @@ pub fn run() {
             commands::agent_answer_permission,
             commands::agent_interrupt,
             commands::agent_is_busy,
+            commands::agent_pending_permission,
+            commands::agent_pending_question,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

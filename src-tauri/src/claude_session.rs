@@ -1,6 +1,7 @@
 use crate::agents::{
-    apply_agent_config, parse_ask_user_questions, parse_stream_line, AgentResponse, ClaudeEvent,
-    ContentBlock, ControlRequestBody, ControlResponsePayload, ResponseAccumulator, StreamEvent,
+    apply_agent_config, parse_ask_user_questions, parse_stream_line, AgentResponse,
+    AskUserQuestionSpec, ClaudeEvent, ContentBlock, ControlRequestBody, ControlResponsePayload,
+    ResponseAccumulator, StreamEvent,
 };
 use crate::config::AgentConfig;
 use crate::error::AppError;
@@ -87,36 +88,52 @@ impl QuestionAnswer {
 /// correlate answers back to questions (`answers: { "<question>": ... }`).
 pub type QuestionAnswers = HashMap<String, QuestionAnswer>;
 
-/// A shared, single-slot bridge between the read loop and the
-/// `agent_answer_question` IPC command.
+/// A pending `AskUserQuestion` request parked in the read loop, awaiting the
+/// user's answers.
 ///
-/// When an `AskUserQuestion` arrives, the read loop stores the oneshot
-/// `Sender` here and `.await`s the receiver. The `agent_answer_question`
-/// command — which can't lock the session (the read loop holds it for the
-/// whole turn) — instead takes the shared `QuestionSlot`, pops the sender, and
-/// sends the user's answers, waking the parked read loop.
-///
-/// Shared via `Arc<StdMutex<…>>` rather than `tokio::sync::Mutex` because the
-/// critical sections are trivially short (take + clear) and never span an
-/// `.await` — the std mutex avoids the borrow-lifetime tangles an async mutex
-/// would create across the IPC boundary.
-pub type QuestionSlot = Arc<StdMutex<Option<oneshot::Sender<QuestionAnswers>>>>;
+/// Carries both the oneshot `Sender` (which `agent_answer_question` pops to
+/// deliver the answers and wake the parked turn) AND the request payload
+/// (`request_id`, the parsed `questions`). The payload is stored here — not
+/// just emitted as a `ClaudeEvent` on the streaming channel — so that a freshly
+/// mounted frontend (after the user navigated away and back mid-question) can
+/// reconcile the card via `agent_pending_question` even though the original
+/// channel event was lost when its AgentPanel unmounted.
+pub struct PendingQuestion {
+    /// Correlates the answer with the originating control_request.
+    pub request_id: String,
+    /// The structured questions to surface to the user.
+    pub questions: Vec<AskUserQuestionSpec>,
+    /// Resolves the parked turn. `None` after `agent_answer_question` consumed it.
+    pub sender: Option<oneshot::Sender<QuestionAnswers>>,
+}
 
-/// Shared, single-slot bridge between the read loop and the
-/// `agent_answer_permission` IPC command — the manual-approval counterpart of
-/// `QuestionSlot`.
+/// Shared wrapper around `Option<PendingQuestion>` — see `PendingQuestion` for
+/// why this carries the payload alongside the sender. Same `Arc<StdMutex<…>>`
+/// discipline as the other slots: short critical sections, never held across
+/// an `.await`.
+pub type QuestionSlot = Arc<StdMutex<Option<PendingQuestion>>>;
+
+/// A pending manual tool-approval request parked in the read loop, awaiting
+/// the user's Allow / Deny verdict. The manual-approval counterpart of
+/// `PendingQuestion`.
 ///
-/// When a `can_use_tool` control request arrives for a tool in
-/// `MANUAL_APPROVAL_TOOLS`, the read loop stores the oneshot `Sender` here and
-/// `.await`s the receiver. The `agent_answer_permission` command — which can't
-/// lock the session (the read loop holds it for the whole turn) — pops the
-/// shared slot, sends the user's `Decision`, and the parked turn resumes,
-/// writing the matching `control_response` (allow or deny).
-///
-/// Carries a `Decision` (Allow / Deny(reason)) rather than the raw
-/// `behavior`+`reason` pair so the policy's vocabulary is the single source
-/// of truth at this layer too.
-pub type PermissionSlot = Arc<StdMutex<Option<oneshot::Sender<Decision>>>>;
+/// Carries the oneshot `Sender` (which `agent_answer_permission` pops to
+/// deliver the verdict) AND the request payload (`request_id`, `tool_name`,
+/// `input`) so a freshly-mounted frontend can reconcile the card via
+/// `agent_pending_permission` after navigation.
+pub struct PendingPermission {
+    /// Correlates the verdict with the originating control_request.
+    pub request_id: String,
+    /// Tool name, e.g. "Bash", "Edit".
+    pub tool_name: String,
+    /// Raw tool input as a JSON string.
+    pub input: String,
+    /// Resolves the parked turn. `None` after `agent_answer_permission` consumed it.
+    pub sender: Option<oneshot::Sender<Decision>>,
+}
+
+/// Shared wrapper around `Option<PendingPermission>`. See `PendingPermission`.
+pub type PermissionSlot = Arc<StdMutex<Option<PendingPermission>>>;
 
 /// Shared, single-slot bridge between the read loop and the
 /// `agent_interrupt` IPC command.
@@ -414,15 +431,22 @@ impl ClaudeSession {
                 .await;
         }
 
-        // Create the oneshot and stash the sender in the shared slot. The
-        // `agent_answer_question` command pops this sender to deliver answers.
+        // Create the oneshot and stash the sender AND the payload in the
+        // shared slot. `agent_answer_question` pops the sender to deliver
+        // answers; `agent_pending_question` reads the payload (without
+        // consuming the sender) so a freshly-mounted frontend can reconcile
+        // the card after navigation.
         let (tx, rx) = oneshot::channel::<QuestionAnswers>();
         {
             let mut guard = question_slot.lock().map_err(|_| AppError::LockError)?;
             // There is at most one outstanding request at a time (Claude
-            // blocks on each), so any pre-existing sender here would be a
+            // blocks on each), so any pre-existing entry here would be a
             // dropped/leaked one — overwrite it.
-            *guard = Some(tx);
+            *guard = Some(PendingQuestion {
+                request_id: request_id.to_string(),
+                questions: questions.clone(),
+                sender: Some(tx),
+            });
         }
 
         tracing::info!(
@@ -549,13 +573,20 @@ impl ClaudeSession {
             });
         }
 
-        // Stash the sender for `agent_answer_permission` to resolve. Same
-        // single-slot invariant as AskUserQuestion: at most one outstanding
-        // request at a time (Claude blocks on each).
+        // Stash the sender AND the payload for `agent_answer_permission` to
+        // resolve (and for `agent_pending_permission` to surface to a
+        // freshly-mounted frontend after navigation). Same single-slot
+        // invariant as AskUserQuestion: at most one outstanding request at a
+        // time (Claude blocks on each).
         let (tx, rx) = oneshot::channel::<Decision>();
         {
             let mut guard = permission_slot.lock().map_err(|_| AppError::LockError)?;
-            *guard = Some(tx);
+            *guard = Some(PendingPermission {
+                request_id: request_id.to_string(),
+                tool_name: request.tool_name.clone(),
+                input: input_str.to_string(),
+                sender: Some(tx),
+            });
         }
 
         tracing::info!(
