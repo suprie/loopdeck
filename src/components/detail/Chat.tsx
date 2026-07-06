@@ -954,7 +954,7 @@ export function Chat({
   const isEmpty = turns.length === 0 && !isStreaming && !busy;
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-1 flex-col">
       {/* ── Error banner ── */}
       {error && (
         <div className="flex items-start gap-2 mb-3 p-3 rounded-lg bg-[color-mix(in_oklab,var(--destructive)_10%,transparent)] border border-[color-mix(in_oklab,var(--destructive)_28%,transparent)] text-destructive text-xs leading-relaxed shrink-0">

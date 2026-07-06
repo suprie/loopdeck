@@ -130,30 +130,40 @@ export function ProjectDetail() {
           })}
         </nav>
 
-        {/* Content panel */}
-        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-8">
-          {activeTab === "overview" && (
-            <OverviewTab
-              project={project}
-              isEditing={isEditing}
-              onEdit={() => setIsEditing(true)}
-              onCancelEdit={() => setIsEditing(false)}
-              onRegenerate={handleRegenerate}
-              onRescan={handleRescan}
-              onFinder={() => openInFinder(project.path)}
-              onTerminal={() => openInTerminal(project.path)}
-              onRemove={() => setShowRemoveConfirm(true)}
-            />
-          )}
+        {/* Content panel.
+            Overview / Decisions / Loops use a scroll container (their content
+            flows like a document). The Agent tab needs an inner-scroll layout
+            instead: its Chat surface has its own transcript scroller, so the
+            wrapper must be a bounded flex child — NOT an overflow-y-auto
+            container, which would give the Chat root an unbounded height and
+            break the inner scroll. */}
+        {activeTab === "agent" ? (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
+            <AgentPanel projectPath={project.path} />
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-8">
+            {activeTab === "overview" && (
+              <OverviewTab
+                project={project}
+                isEditing={isEditing}
+                onEdit={() => setIsEditing(true)}
+                onCancelEdit={() => setIsEditing(false)}
+                onRegenerate={handleRegenerate}
+                onRescan={handleRescan}
+                onFinder={() => openInFinder(project.path)}
+                onTerminal={() => openInTerminal(project.path)}
+                onRemove={() => setShowRemoveConfirm(true)}
+              />
+            )}
 
-          {activeTab === "decisions" && (
-            <DecisionsPanel projectPath={project.path} />
-          )}
+            {activeTab === "decisions" && (
+              <DecisionsPanel projectPath={project.path} />
+            )}
 
-          {activeTab === "loops" && <LoopsPanel projectPath={project.path} />}
-
-          {activeTab === "agent" && <AgentPanel projectPath={project.path} />}
-        </div>
+            {activeTab === "loops" && <LoopsPanel projectPath={project.path} />}
+          </div>
+        )}
       </div>
 
       {showRemoveConfirm && (
