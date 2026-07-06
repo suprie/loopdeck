@@ -1,1 +1,1 @@
-UI restyling — Tailwind CSS v4, OKLCH dark palette, sidebar layout, Inter+JetBrains Mono fonts
+Persistent Claude sessions — async/tokio ClaudeSession over stream-json; per-project spawn

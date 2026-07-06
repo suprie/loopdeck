@@ -2,14 +2,23 @@
 
 ## Current
 
-- **Started**: 2026-06-30
-- **Goal**: Global agent configuration — move hardcoded API keys, model, and
-  provider settings from `agents.rs` into `~/.config/loopdeck/config.yaml`.
-  One agent config shared across all projects (per-project overrides deferred).
+- **Started**: 2026-07-02
+- **Goal**: Persistent Claude agent sessions via `ClaudeSession` — spawn `claude
+  --input-format stream-json` once per project and keep stdin open so multi-turn
+  context lives inside the process (no per-turn `--resume`). Foundation for the
+  in-app agent chat UI. See [docs/researchs/agent-spawn.md](../../docs/researchs/agent-spawn.md)
+  and [docs/researchs/agent-spawn-implementation.md](../../docs/researchs/agent-spawn-implementation.md).
 - **Status**: in_progress
-- **PRD**: [docs/PRD-agent-config.md](../../docs/PRD-agent-config.md)
 
 ## Next Steps
+- [ ] Add stderr-drain task (`tokio::spawn` reading claude stderr line-by-line) so verbose output doesn't deadlock; currently `Stdio::null()` throws it away
+- [ ] Wrap `send_message` in `tokio::time::timeout` so a stuck peer fails loudly instead of hanging the caller
+- [ ] Replace single session slot with `Mutex<HashMap<PathBuf, ClaudeSession>>` keyed by project (parallel across projects, serial within)
+- [ ] Add per-project turn lock (`Arc<tokio::sync::Mutex<()>>`) so concurrent sends to the same project queue rather than spawning duplicate processes
+- [ ] Build `with_session` helper (get-or-spawn + run closure + return result; session never leaves the helper)
+- [ ] Wire `agent_send_message(project_path, prompt)` Tauri command on top of `with_session`
+- [ ] Streaming variant: `ClaudeEvent` enum + `send_message_streaming` emitting via Tauri `Channel<T>`
+- [ ] Frontend chat UI (net-new — no `listen()`/Channel/Chat component exists yet)
 - [ ] Add Agent Runner view (`/agent`) — terminal-based AI agent runner UI
 - [ ] Add Activity Feed view (`/activity`) — chronological event feed
 - [ ] Add standalone Decisions page (currently only accessible via project detail)
@@ -26,6 +35,36 @@
 - [ ] **Move agent control into LoopDeck app** — When LoopDeck can spawn/manage AI agents from within the app (not just the terminal), it should own all agent configuration: CLAUDE.md, skills, hooks, and memory conventions. The current `.claude/settings.local.json` hooks (PreToolUse dirty flag, Stop hook reminder) are temporary workarounds that only work in the Claude Code terminal context. Once LoopDeck controls the agent runtime, it can intelligently decide when to prompt for memory updates, apply project-specific instructions, and manage skills — without relying on external hook files.
 
 ## History
+
+### 2026-07-02 — ClaudeSession async/tokio migration (checkpoint 3)
+- **Status**: completed
+- **Completed**: 2026-07-02
+
+Migrated `ClaudeSession` from `std::process` to `tokio::process` to prepare for
+concurrent multi-project sessions and streaming. `send_message` is now `async`,
+reading stdout via `AsyncBufReadExt::read_line().await` and writing stdin via
+`AsyncWriteExt::write_all().await`. `Drop` rewritten for tokio: `start_kill()`
+plus a bounded `try_wait()` reap loop (no `.await` in `Drop`).
+
+Two bugs fixed along the way: (1) missing `\n` on NDJSON writes — lost when
+`writeln!` became `write_all` during the migration, it silently broke the input
+protocol and stalled reads; surfaced by removing a stray `.ok()` that was
+swallowing the write error. (2) `Stdio::piped()` stderr with no reader — latent
+deadlock risk, switched to `Stdio::null()` for now (proper drain task is a
+next step).
+
+Also introduced a `CommandEnv` trait so `apply_agent_config` is generic over
+both std and tokio `Command` — keeps the offline env-var inspection tests
+working via std's `get_envs()` while production uses tokio. `spawn` now takes
+`project_path` and calls `cmd.current_dir(project_path)` so claude runs in the
+project, not in loopdeck's cwd.
+
+Live integration tests pass against the provider (single-turn, current-directory,
+and cross-turn context retention). Commits `4a10df9` (config foundation) and
+`192ac8a` (ClaudeSession) on `feat/claude-session`.
+
+Files changed: src-tauri/src/{claude_session.rs, agents.rs, commands.rs, lib.rs,
+config.rs}, src/{types/index.ts, lib/tauri.ts, App.tsx, components/{layout/AppShell.tsx, settings/Settings.tsx}}.
 
 ### 2026-06-22 — V2 Agent Memory Layer
 - **Status**: completed

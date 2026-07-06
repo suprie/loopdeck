@@ -1,3 +1,4 @@
+use crate::claude_session::ClaudeSession;
 use crate::config::{self, AgentConfig, GlobalConfig, ProjectEntry, ProjectStatus};
 use crate::error::AppError;
 use crate::git;
@@ -5,6 +6,7 @@ use crate::memory::{self, Decision, LoopStatus};
 use crate::project::{self, ProjectMeta};
 use crate::scanner::{self, DiscoveredRepo};
 use chrono::Utc;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
@@ -13,6 +15,7 @@ use tracing::{debug, info};
 /// Shared application state managed by Tauri.
 pub struct AppState {
     pub config: Mutex<GlobalConfig>,
+    pub claude_sessions: Mutex<HashMap<PathBuf, ClaudeSession>>,
 }
 
 /// Scan a directory for project repositories.

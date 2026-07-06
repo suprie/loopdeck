@@ -1,7 +1,33 @@
 use crate::config::AgentConfig;
-use crate::error::AppError;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use tokio::process::Command;
+
+pub(crate) trait CommandEnv {
+    fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
+    where
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>;
+}
+
+impl CommandEnv for std::process::Command {
+    fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
+    where
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>,
+    {
+        std::process::Command::env(self, key, val)
+    }
+}
+
+impl CommandEnv for tokio::process::Command {
+    fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
+    where
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>,
+    {
+        tokio::process::Command::env(self, key, val)
+    }
+}
 
 /// Structured result from a `call_agents` invocation.
 #[derive(Debug, Clone, Serialize)]
@@ -193,7 +219,7 @@ fn parse_response(ndjson: &str) -> Option<AgentResponse> {
 /// Extracted for testability — allows verifying env vars without spawning.
 /// Also reused by `ClaudeSession::spawn`, so both the single-shot
 /// (`call_agents`) and persistent (`ClaudeSession`) paths stay in sync.
-pub(crate) fn apply_agent_config(cmd: &mut Command, agent_config: &AgentConfig) {
+pub(crate) fn apply_agent_config<C: CommandEnv>(cmd: &mut C, agent_config: &AgentConfig) {
     if let Some(auth_token) = &agent_config.auth_token {
         cmd.env("ANTHROPIC_AUTH_TOKEN", auth_token);
     }
@@ -211,77 +237,12 @@ pub(crate) fn apply_agent_config(cmd: &mut Command, agent_config: &AgentConfig) 
     }
 }
 
-/// Call claude with a prompt and return the structured response.
-///
-/// Uses `--print` for non-interactive mode and `--output-format stream-json --verbose`
-/// to get structured JSON output that can be parsed for the response text.
-pub fn call_agents(prompt: String, agent_config: &AgentConfig) -> Result<AgentResponse, AppError> {
-    let mut cmd = Command::new("claude");
-    // NOTE: do NOT pass --input-format stream-json — it makes claude read from stdin,
-    // and Command::output() provides /dev/null on stdin, yielding zero output.
-    cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
-    cmd.arg(&prompt);
-
-    // Provider / model configuration via environment variables
-    apply_agent_config(&mut cmd, agent_config);
-
-    debug_command(&cmd);
-
-    let output = cmd
-        .output()
-        .map_err(|e| AppError::Agent(format!("failed to spawn claude: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Agent(format!(
-            "claude exited with error: {}",
-            stderr
-        )));
-    }
-
-    let raw = String::from_utf8(output.stdout)
-        .map_err(|e| AppError::Agent(format!("non-UTF8 output: {}", e)))?;
-    // stderr typically contains warnings (e.g. connector notices) — log them
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.is_empty() {
-        eprintln!("[claude stderr] {}", stderr);
-    }
-
-    let response =
-        parse_response(&raw).ok_or_else(|| AppError::Agent("no response from claude".into()))?;
-
-    println!("response:");
-    println!("  text:      {}", response.text);
-    println!(
-        "  thinking:  {:?}",
-        response.thinking.as_deref().unwrap_or("—")
-    );
-    println!("  result:    {}", response.result);
-    println!("  is_error:  {}", response.is_error);
-    println!("  duration:  {}ms", response.duration_ms);
-    if let Some(ref u) = response.usage {
-        println!("  tokens:    in={} out={}", u.input_tokens, u.output_tokens);
-        println!("  cost:      ${:.6}", u.total_cost_usd);
-    }
-
-    Ok(response)
-}
-
-fn debug_command(cmd: &Command) {
-    let program = cmd.get_program().to_string_lossy();
-    let args: Vec<String> = cmd
-        .get_args()
-        .map(|arg| format!("{:?}", arg.to_string_lossy()))
-        .collect();
-
-    println!("executing {} {}", program, args.join(" "));
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn test_parse_response_extracts_text_blocks() {
@@ -467,10 +428,7 @@ mod tests {
             "ANTHROPIC_BASE_URL".into(),
             "https://api.deepseek.com/anthropic".into()
         )));
-        assert!(envs.contains(&(
-            "ANTHROPIC_MODEL".into(),
-            "deepseek-v4-pro[1m]".into()
-        )));
+        assert!(envs.contains(&("ANTHROPIC_MODEL".into(), "deepseek-v4-pro[1m]".into())));
 
         // Should NOT contain auth_token or effort
         let env_keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();

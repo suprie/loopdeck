@@ -1,10 +1,11 @@
 use crate::agents::{apply_agent_config, parse_stream_line, AgentResponse, ResponseAccumulator};
 use crate::config::AgentConfig;
 use crate::error::AppError;
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 /// A long-lived `claude --input-format stream-json` process.
 ///
@@ -29,16 +30,14 @@ impl ClaudeSession {
             "--output-format",
             "stream-json",
             "--verbose",
-            "--add-dir",
-            &project_path.to_string_lossy().into_owned(),
         ]);
         // Reuse the same env-var wiring as call_agents so the single-shot and
         // persistent paths can't drift out of sync.
         apply_agent_config(&mut cmd, agent_config);
-
+        cmd.current_dir(project_path);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped()); // don't inherit — keep stdout clean for parsing
+        cmd.stderr(Stdio::null()); // don't inherit — keep stdout clean for parsing
 
         let mut child = cmd
             .spawn()
@@ -66,7 +65,7 @@ impl ClaudeSession {
     /// buffered until the turn completes — this is the batch (non-streaming)
     /// variant; a future version can emit each `StreamEvent` to the frontend
     /// as it arrives.
-    pub fn send_message(&mut self, text: &str) -> Result<AgentResponse, AppError> {
+    pub async fn send_message(&mut self, text: &str) -> Result<AgentResponse, AppError> {
         // ---- write the user turn to stdin ----
         let stdin = self
             .stdin
@@ -80,13 +79,16 @@ impl ClaudeSession {
                 "content": [{"type": "text", "text": text}]
             }
         });
-
-        writeln!(stdin, "{}", input)
+        let json_str = format!("{}\n", input);
+        stdin
+            .write_all(json_str.as_bytes())
+            .await
             .map_err(|e| AppError::Agent(format!("write failed: {}", e)))?;
+
         stdin
             .flush()
+            .await
             .map_err(|e| AppError::Agent(format!("flush failed: {}", e)))?;
-
         // ---- read stdout until the terminal `result` event ----
         let mut acc = ResponseAccumulator::new();
         let mut line = String::new();
@@ -97,7 +99,9 @@ impl ClaudeSession {
             let n = self
                 .stdout
                 .read_line(&mut line)
+                .await
                 .map_err(|e| AppError::Agent(format!("read failed: {}", e)))?;
+
             if n == 0 {
                 return Err(AppError::Agent(
                     "claude closed stdout before sending a result event".into(),
@@ -189,27 +193,33 @@ mod tests {
     /// Validates the full pipeline end-to-end: spawn (env vars, piped stdio)
     /// → write a user-turn JSON line to stdin → read the stream back → stop at
     /// the Result event → parse into AgentResponse.
-    #[test]
+    #[tokio::test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
-    fn test_session_single_turn() {
-        let mut session = ClaudeSession::spawn(&test_path(), &test_config())
-            .expect("failed to spawn claude session");
+    async fn test_session_single_turn() {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let mut session = ClaudeSession::spawn(&test_path(), &test_config())
+                .expect("failed to spawn claude session");
 
-        let response = session
-            .send_message("reply with exactly: hello")
-            .expect("send_message failed");
+            let response = session
+                .send_message("reply with exactly: hello")
+                .await
+                .expect("send_message failed");
 
-        assert!(!response.result.is_empty(), "result should not be empty");
-        assert!(
-            !response.is_error,
-            "turn should not be an error, got: {:?}",
-            response
-        );
-        assert!(
-            response.result.to_lowercase().contains("hello"),
-            "result should contain 'hello', got: {}",
-            response.result
-        );
+            assert!(!response.result.is_empty(), "result should not be empty");
+            assert!(
+                !response.is_error,
+                "turn should not be an error, got: {:?}",
+                response
+            );
+            assert!(
+                response.result.to_lowercase().contains("hello"),
+                "result should contain 'hello', got: {}",
+                response.result
+            );
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
 
         // `session` drops here → Drop closes stdin → claude exits gracefully.
     }
@@ -219,14 +229,17 @@ mod tests {
     /// Validates the full pipeline end-to-end: spawn (env vars, piped stdio)
     /// → write a user-turn JSON line to stdin → read the stream back → stop at
     /// the Result event → parse into AgentResponse.
-    #[test]
+    #[tokio::test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
-    fn test_session_current_directory() {
+    async fn test_session_current_directory() {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+
         let mut session = ClaudeSession::spawn(&test_path(), &test_config())
             .expect("failed to spawn claude session");
 
         let response = session
             .send_message("is there a Cargo.toml in this directory, response with YES or NO only, No preamble")
+            .await
             .expect("send_message failed");
 
         assert!(!response.result.is_empty(), "result should not be empty");
@@ -240,6 +253,8 @@ mod tests {
             "result should contain 'YES', got: {}",
             response.result
         );
+    }).await;
+        assert!(result.is_ok(), "Test timed out");
 
         // `session` drops here → Drop closes stdin → claude exits gracefully.
     }
@@ -251,22 +266,25 @@ mod tests {
     /// docs/researchs/agent-spawn.md). If this passes, the persistent-process
     /// approach is validated; if only single-turn passes but this fails,
     /// context is being lost somewhere.
-    #[test]
+    #[tokio::test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
-    fn test_session_retains_context_across_turns() {
-        let mut session = ClaudeSession::spawn(&test_path(), &test_config())
+    async fn test_session_retains_context_across_turns() {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let mut session = ClaudeSession::spawn(&test_path(), &test_config())
             .expect("failed to spawn claude session");
 
         // Turn 1 — plant a distinctive fact the model could only repeat by
         // remembering it (not by guessing from turn 2's question alone).
         let first = session
             .send_message("I'm telling you a secret codeword. The codeword is: ZUCCHINI. Reply with exactly: understood.")
+            .await
             .expect("turn 1 (send_message) failed");
         assert!(!first.is_error, "turn 1 should not error, got: {:?}", first);
 
         // Turn 2 — recall it. Same process, same session, no --resume.
         let second = session
             .send_message("What is the secret codeword I just told you? Reply with only the codeword, nothing else.")
+            .await
             .expect("turn 2 (send_message) failed");
 
         assert!(
@@ -282,7 +300,9 @@ mod tests {
              context is NOT surviving across turns. Got: {}",
             second.result
         );
+}).await;
 
+        assert!(result.is_ok(), "Test timed out");
         // `session` drops here → Drop closes stdin → claude exits gracefully.
     }
 }

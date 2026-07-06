@@ -11,7 +11,7 @@ mod skills;
 
 use commands::AppState;
 use config::GlobalConfig;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 pub fn run() {
     // Load config — if it fails, start with a clean default and persist it
@@ -30,6 +30,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             config: Mutex::new(config),
+            claude_sessions: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             commands::scan_directory,
