@@ -1,10 +1,5 @@
 # Loops
 
-## Current
-- **Started**: 2026-06-24
-- **Goal**: UI restyling — match AI Project Command aesthetic (Tailwind CSS v4, OKLCH dark palette, sidebar layout, gradient accents, Inter+JetBrains Mono fonts)
-- **Status**: in_progress
-
 ## Next Steps
 - [ ] Add Agent Runner view (`/agent`) — terminal-based AI agent runner UI
 - [ ] Add Activity Feed view (`/activity`) — chronological event feed

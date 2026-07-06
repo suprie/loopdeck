@@ -1,0 +1,1 @@
+../../templates/hooks/loopdeck-memory-write.sh

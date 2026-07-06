@@ -29,9 +29,6 @@ pub enum AppError {
 
     #[error("Project already exists at: {0}")]
     ProjectAlreadyExists(String),
-
-    #[error("No projects found in: {0}")]
-    NoProjectsFound(String),
 }
 
 impl Serialize for AppError {
@@ -54,7 +51,6 @@ impl Serialize for AppError {
                 AppError::Config(_) => "config",
                 AppError::LockError => "lockError",
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
-                AppError::NoProjectsFound(_) => "noProjectsFound",
             },
         )?;
         state.end()

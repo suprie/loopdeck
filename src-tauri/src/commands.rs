@@ -20,6 +20,10 @@ pub struct AppState {
 /// Recursively walks the directory tree looking for marker files
 /// (`.git`, `Cargo.toml`, `package.json`, etc.). Returns discovered
 /// repos with metadata — does NOT modify any files.
+///
+/// Cross-references with the global config: `has_loopdeck` is only
+/// true if the project is actually registered, not just if a
+/// `.loopdeck/` directory exists on disk.
 #[tauri::command]
 pub async fn scan_directory(
     path: String,
@@ -34,7 +38,18 @@ pub async fn scan_directory(
     };
 
     // Heavy I/O — scanner does recursive directory walking
-    let repos = scanner::scan_directory(&scan_root, max_depth)?;
+    let mut repos = scanner::scan_directory(&scan_root, max_depth)?;
+
+    // Cross-reference with global config: override `has_loopdeck` so it
+    // reflects actual registration status, not just filesystem state.
+    // This prevents repos that were removed from the registry but still
+    // have a .loopdeck/ directory from appearing as "Imported".
+    {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        for repo in &mut repos {
+            repo.has_loopdeck = config.find_by_path(&repo.path).is_some();
+        }
+    }
 
     info!("scan_directory found {} repos", repos.len());
     Ok(repos)
@@ -52,21 +67,22 @@ pub async fn import_project(
     debug!("import_project called with path: {path}");
 
     let repo_path = PathBuf::from(&path);
-    let repo_path_clone = repo_path.clone();
 
-    // Check if already registered
+    // Canonicalize early so config lookups use the same path form
+    let canonical = repo_path
+        .canonicalize()
+        .map_err(|e| AppError::Scan(format!("Failed to resolve path: {e}")))?;
+
+    // Check if already registered (use canonical path for lookup)
     {
         let config = state.config.lock().map_err(|_| AppError::LockError)?;
-        if let Some(existing) = config.find_by_path(&repo_path) {
+        if let Some(existing) = config.find_by_path(&canonical) {
+            eprintln!("existing");
             return Ok(existing.clone());
         }
     }
 
     // Quick-scan the directory for markers and README
-    let canonical = repo_path_clone
-        .canonicalize()
-        .map_err(|e| AppError::Scan(format!("Failed to resolve path: {e}")))?;
-
     let (name, markers, has_readme) = scanner::quick_scan_directory(&canonical);
 
     // Bootstrap .loopdeck/project.yaml
@@ -74,6 +90,7 @@ pub async fn import_project(
 
     // Gather git info
     let git_info = git::check_git_info(&canonical);
+    let current_loop = project::read_current_loop(canonical.as_path()); 
 
     // Build project entry and add to config
     let entry = ProjectEntry {
@@ -81,6 +98,7 @@ pub async fn import_project(
         name: project_meta.name,
         description: project_meta.description,
         status: ProjectStatus::Active,
+        current_loop,
         last_opened: Some(Utc::now()),
         created_at: Utc::now(),
         last_commit_date: git_info.last_commit_date,
@@ -126,6 +144,8 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
             entry.last_commit_message = git_info.last_commit_message;
             changed = true;
         }
+
+        entry.current_loop = project::read_current_loop(entry.path.as_path());
     }
 
     if changed {
@@ -184,9 +204,15 @@ pub async fn remove_project(path: String, state: State<'_, AppState>) -> Result<
     debug!("remove_project called for path: {path}");
 
     let repo_path = PathBuf::from(&path);
+
+    // Canonicalize so we match the stored path (which is always canonical)
+    let canonical = repo_path
+        .canonicalize()
+        .map_err(|e| AppError::Scan(format!("Failed to resolve path: {e}")))?;
+
     let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
 
-    if !config.remove_project(&repo_path) {
+    if !config.remove_project(&canonical) {
         return Err(AppError::ProjectNotFound(path));
     }
 
@@ -240,8 +266,12 @@ pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
         let terminals: &[(&str, fn(&str) -> std::process::Command)] = &[
             // Ghostty: `open -a Ghostty --args --dir=<path>`
             ("Ghostty", |p| {
-                let mut cmd = std::process::Command::new("open");
-                cmd.args(["-a", "Ghostty", "--args", "--dir="]).arg(p);
+                use std::process::Stdio;
+
+                let mut cmd = std::process::Command::new("ghostty");
+                cmd.arg(format!("--working-directory={}", p));
+                cmd.stdout(Stdio::null());
+                cmd.stderr(Stdio::null());
                 cmd
             }),
             // iTerm2: AppleScript to create a new window

@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use crate::scanner::{detect_stack, DiscoveredRepo};
+use crate::skills;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -44,29 +45,35 @@ pub fn bootstrap_project(
     let loopdeck_dir = repo_path.join(".loopdeck");
     let project_file = loopdeck_dir.join("project.yaml");
 
+    let meta: ProjectMeta;
     // Check if already bootstrapped
-    if project_file.exists() {
-        // Load existing instead of overwriting
-        return load_project(repo_path);
+    if !project_file.exists() {
+        // Generate description
+        let description = generate_description(repo_path, repo_name, markers, has_readme)?;
+
+        meta = ProjectMeta::new(repo_name, &description);
+
+        // Write project.yaml
+        let contents = serde_yaml::to_string(&meta)?;
+        std::fs::write(&project_file, contents)?;
+
+        tracing::info!(
+            "Bootstrapped project at {} in {:?}",
+            repo_path.display(),
+            start.elapsed()
+        );
+    } else {
+        meta = load_project(repo_path)?;
     }
 
     // Create .loopdeck directory
     std::fs::create_dir_all(&loopdeck_dir)?;
 
-    // Generate description
-    let description = generate_description(repo_path, repo_name, markers, has_readme)?;
+    // Copy relevant skill templates to .claude/skills/
+    skills::copy_skills(repo_path, markers)?;
 
-    let meta = ProjectMeta::new(repo_name, &description);
-
-    // Write project.yaml
-    let contents = serde_yaml::to_string(&meta)?;
-    std::fs::write(&project_file, contents)?;
-
-    tracing::info!(
-        "Bootstrapped project at {} in {:?}",
-        repo_path.display(),
-        start.elapsed()
-    );
+    // Set up hooks (Stop + PreToolUse) in .claude/settings.json
+    skills::setup_hooks(repo_path)?;
 
     Ok(meta)
 }
@@ -88,7 +95,10 @@ pub fn load_project(repo_path: &Path) -> Result<ProjectMeta, AppError> {
 }
 
 /// Update the description in an existing `.loopdeck/project.yaml`.
-pub fn update_description(repo_path: &Path, new_description: &str) -> Result<ProjectMeta, AppError> {
+pub fn update_description(
+    repo_path: &Path,
+    new_description: &str,
+) -> Result<ProjectMeta, AppError> {
     let loopdeck_dir = repo_path.join(".loopdeck");
     let project_file = loopdeck_dir.join("project.yaml");
 
@@ -125,6 +135,21 @@ pub fn regenerate_description(
     }
 
     Ok(description)
+}
+
+pub fn read_current_loop(path: &Path) -> Option<String> {
+    let mut path: std::path::PathBuf = path.to_path_buf();
+    path.push(".loopdeck");
+    path.push("current-loop.md");
+    if path.exists() {
+        if let Ok(buf) = std::fs::read_to_string(&path) {
+            let trimmed = buf.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
 }
 
 /// Generate a project description.
@@ -466,6 +491,67 @@ mod tests {
 
         // Removing non-existent is not an error
         assert!(remove_project_memory(&dir).is_ok());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_bootstrap_copies_skills_and_hooks() {
+        let (dir, name) = create_temp_repo();
+        let markers = vec!["Cargo.toml".to_string(), "package.json".to_string()];
+        // Create src-tauri/ so Tauri detection passes
+        fs::create_dir_all(dir.join("src-tauri")).unwrap();
+
+        bootstrap_project(&dir, &name, &markers, false).unwrap();
+
+        // Verify skills were copied
+        let skills_dir = dir.join(".claude").join("skills");
+        assert!(skills_dir.exists());
+        assert!(skills_dir
+            .join("loopdeck-orchestrator")
+            .join("SKILL.md")
+            .exists());
+        assert!(skills_dir
+            .join("loopdeck-rust-expert")
+            .join("SKILL.md")
+            .exists());
+        assert!(skills_dir
+            .join("loopdeck-vite-senior-engineer")
+            .join("SKILL.md")
+            .exists());
+        assert!(skills_dir
+            .join("loopdeck-tauri-expert")
+            .join("SKILL.md")
+            .exists());
+
+        // Verify hooks were set up (Claude Code format: matcher groups -> hooks array)
+        let settings_path = dir.join(".claude").join("settings.json");
+        assert!(settings_path.exists());
+        let raw = fs::read_to_string(&settings_path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // Stop: 1 matcher group, 2 command hooks inside
+        let stop_groups = root["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop_groups.len(), 1);
+        let stop_hooks = stop_groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(stop_hooks.len(), 2);
+
+        // PreToolUse: 1 matcher group with matcher "Skill", 1 command hook inside
+        let ptuse_groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(ptuse_groups.len(), 1);
+        assert_eq!(ptuse_groups[0]["matcher"].as_str().unwrap(), "Skill");
+        let ptuse_hooks = ptuse_groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(ptuse_hooks.len(), 1);
+        assert_eq!(
+            ptuse_hooks[0]["command"].as_str().unwrap(),
+            "python3 .loopdeck/hooks/orchestrator-start.py"
+        );
+
+        // Verify hook scripts were copied to .loopdeck/hooks/
+        let hooks_dir = dir.join(".loopdeck").join("hooks");
+        assert!(hooks_dir.join("loopdeck-stop-hook.py").exists());
+        assert!(hooks_dir.join("loopdeck-memory-write.sh").exists());
+        assert!(hooks_dir.join("orchestrator-start.py").exists());
 
         fs::remove_dir_all(&dir).unwrap();
     }

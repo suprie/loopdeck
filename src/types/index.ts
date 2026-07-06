@@ -24,6 +24,8 @@ export interface ProjectEntry {
   name: string;
   description: string;
   status: ProjectStatus;
+  /** Content of .loopdeck/current-loop.md, if present. */
+  current_loop?: string;
   last_opened: string | null;
   created_at: string;
   /** ISO 8601 timestamp of the last git commit (refreshed on startup/rescan). */
@@ -54,8 +56,7 @@ export interface AppError {
     | "scan"
     | "config"
     | "lockError"
-    | "projectAlreadyExists"
-    | "noProjectsFound";
+    | "projectAlreadyExists";
 }
 
 /** Internal app view routing. */

@@ -1724,6 +1724,7 @@ dependencies = [
  "chrono",
  "directories",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tauri",
  "tauri-build",

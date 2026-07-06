@@ -142,7 +142,7 @@ Based on the PRD and clarified answers, produce a multi-stack phase plan:
 ### Phase 6: Stitch & Verify
 | Task | Agent |
 |------|-------|
-| DI wiring, navigation, contract alignment check | 1 |
+| DI wiring, navigation, contract alignment check with the PRD | 1 |
 | Full test suite run | 1 |
 ```
 
@@ -288,6 +288,105 @@ Based on integration results:
 | PRD gap discovered | Flag to user — the PRD may need an amendment. Do not guess. |
 
 If the feature spans multiple PRDs or epics, return to Phase 1 with the next PRD.
+
+# LoopDeck Memory Convention
+
+This project uses `.loopdeck/` for persistent project memory. The standard AI workflow writes to these files so LoopDeck's UI displays them.
+
+## Files
+
+| File | Purpose | When to Write |
+|------|---------|---------------|
+| `.loopdeck/current-loop.md` | Active loop snapshot (created by hook on orchestrator start) | Auto-created by `orchestrator-start` PreToolUse hook |
+| `.loopdeck/decisions.md` | Lightweight ADRs (architectural decision records) | After any significant design/architecture decision |
+| `.loopdeck/loops.md` | Current loop status, next steps, history | At the end of every session |
+
+## Auto-Write Convention
+
+### decisions.md Format
+
+Write decisions as level-2 headings with date and title, followed by key-value bullets and body text:
+
+```markdown
+# Decisions
+
+## YYYY-MM-DD — Title of the decision
+- **Status**: proposed | accepted | superseded
+- **Context**: Why this decision was needed.
+- **Consequences**: What follows from this decision.
+
+Additional body text explaining the decision in more detail.
+```
+
+**Rules:**
+- Use `## YYYY-MM-DD — Title` format (em dash preferred, hyphen accepted)
+- `Status` must be one of: `proposed`, `accepted`, `superseded`
+- `Context` explains the situation that prompted the decision
+- `Consequences` captures what changed because of this decision
+- Body text after the bullets adds detail
+- **Append** new decisions — never delete old ones
+- **Append to the file after each phase** — do this as part of the Phase 6 "Decide Next Phase" step
+
+### current-loop.md Format
+
+A single line of plain text — the high-level summary of the active loop. Displayed on the LoopDeck dashboard project card.
+
+```markdown
+UI restyling — Tailwind CSS v4, OKLCH dark palette, sidebar layout
+```
+
+**Rules:**
+- **Max 100 characters** — this is a dashboard card label, not a detailed description
+- **Single line** — no markdown bullets, no headings, no newlines
+- **High-level summary only** — what is being worked on right now, in one sentence
+- Keep details (start date, status, next steps) in `loops.md`
+
+### loops.md Format
+
+Write loops as level-2 sections for Current/Next Steps/History, with level-3 entries for historical loops:
+
+```markdown
+# Loops
+
+## Current
+- **Started**: YYYY-MM-DD
+- **Goal**: What this loop aims to accomplish
+- **Status**: in_progress
+
+## Next Steps
+- [ ] Task one
+- [ ] Task two
+
+## History
+
+### YYYY-MM-DD — Completed loop title
+- **Status**: completed
+- **Completed**: YYYY-MM-DD
+```
+
+**Rules:**
+- `## Current` contains the active loop (or `_No active loop._` if none)
+- `## Next Steps` is a checklist of `- [ ]` items for the current loop
+- `## History` contains completed/abandoned loops as `### YYYY-MM-DD — Title` entries
+- At the end of every session, update the Current loop status and Next Steps
+- When a loop completes, move it to History and start a new Current loop
+
+## Phase Actions
+
+After each phase completes:
+1. If you made an architectural decision → append to `.loopdeck/decisions.md`
+2. At the end of each phase → update `.loopdeck/loops.md` Next Steps
+
+At the end of the session (Phase 6 or equivalent):
+1. Update `.loopdeck/loops.md` Current status and Next Steps
+2. Append any unrecorded decisions to `.loopdeck/decisions.md`
+3. If a loop completed, move it to History and set the next Current loop
+
+## Integration with Phase 6
+
+In the final "Decide Next Phase" step, after reporting results:
+- Write/update the files as described above
+- Ensure the next loop's goal is recorded in loops.md so the next session picks it up
 
 ## Important Rules
 

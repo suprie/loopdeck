@@ -166,7 +166,21 @@ export const ProjectCard = memo(function ProjectCard({
             </div>
           </div>
         )}
-      </div>
+        {/* Current Loop */}
+        {project.current_loop && (
+          <div
+            className={`flex items-start gap-2 rounded-md border px-2.5 py-1.5 ${commitCfg.bg}`}
+          >
+            <Clock className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Current Loop
+              </div>
+              <div className="text-xs">{ project.current_loop}</div>
+            </div>
+          </div>
+        )}
+       </div>
 
       {/* Status badge */}
       <div className="flex items-center gap-1.5 text-[11px] mt-auto mb-3">

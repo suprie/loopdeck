@@ -5,6 +5,7 @@ mod git;
 mod memory;
 mod project;
 mod scanner;
+mod skills;
 
 use commands::AppState;
 use config::GlobalConfig;

@@ -22,6 +22,8 @@ pub struct ProjectEntry {
     #[serde(default)]
     pub status: ProjectStatus,
     #[serde(default)]
+    /// High-level summary of .loopdeck/current-loop.md (≤100 chars by convention).
+    pub current_loop: Option<String>,
     pub last_opened: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// ISO 8601 timestamp of the last git commit (refreshed on startup).
@@ -202,6 +204,7 @@ mod tests {
                 last_commit_date: None,
                 last_commit_message: None,
                 last_modified: None,
+                current_loop: None,
             }],
             settings: Settings::default(),
         };
@@ -231,6 +234,7 @@ mod tests {
             last_commit_date: None,
             last_commit_message: None,
             last_modified: None,
+            current_loop: None,
         };
 
         config.add_project(entry).unwrap();
@@ -247,6 +251,7 @@ mod tests {
             last_commit_date: None,
             last_commit_message: None,
             last_modified: None,
+            current_loop: None,
         };
         assert!(config.add_project(dup).is_err());
 
@@ -293,6 +298,7 @@ mod tests {
             last_commit_date,
             last_commit_message: None,
             last_modified,
+            current_loop: None,
         }
     }
 
