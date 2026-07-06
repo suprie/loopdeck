@@ -18,8 +18,10 @@ const PROJECT_MARKERS: &[&str] = &[
 /// Filename patterns that indicate an Xcode project (checked separately).
 const XCODE_PATTERNS: &[&str] = &[".xcodeproj", ".xcworkspace"];
 
-/// Directories to skip during traversal.
-const IGNORED_DIRS: &[&str] = &[
+/// Directories to skip during traversal. Public so other modules (e.g. the
+/// file-mention `list_dir_entries` command) can reuse the same ignore list and
+/// stay consistent with project scanning.
+pub const IGNORED_DIRS: &[&str] = &[
     "node_modules",
     "target",
     ".git",

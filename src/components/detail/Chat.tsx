@@ -23,10 +23,14 @@ import type {
   ApprovalDecision,
 } from "../../types";
 import { Markdown } from "../shared/Markdown";
+import { FileMentionMenu, useFileMention } from "./FileMentionMenu";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface ChatProps {
+  /** Canonical project root path — used to resolve `@`-mention file paths in
+   *  the composer's autocomplete (relative to this directory). */
+  projectPath: string;
   /** Completed conversation turns to display. */
   turns: ConversationTurn[];
   /**
@@ -42,6 +46,14 @@ export interface ChatProps {
    * still visible (arrives before the transcript reload replaces it). Carries
    * usage, duration, and is_error for the meta row. */
   streamingResult: (ClaudeEvent & { type: "result" }) | null;
+  /**
+   * The user's message for the in-flight turn, rendered as an ephemeral user
+   * bubble above the streaming bubble. This is carried OUTSIDE `turns` (which
+   * only holds canonical disk records) so the optimistic display can't race
+   * with the transcript reload and double the bubble. Clears when the turn ends
+   * and the canonical user turn lands in `turns`. `null` for loop starts.
+   */
+  pendingUserText: string | null;
   /** Whether a request is currently in flight (Start or Send). */
   busy: boolean;
   /** Error message to show as a banner above the transcript. */
@@ -127,7 +139,8 @@ function sanitise(text: string): string {
 function loopPromptSubject(text: string): string {
   const m = text.match(/next unchecked step is:\s*"([^"]+)"/i);
   if (m) return m[1];
-  if (/propose and start the next loop/i.test(text)) return "Propose & start next loop";
+  if (/propose and start the next loop/i.test(text))
+    return "Propose & start next loop";
   // Fallback: trim and elide the long boilerplate to a reasonable preview.
   const trimmed = text.trim();
   return trimmed.length > 120 ? trimmed.slice(0, 117) + "…" : trimmed;
@@ -199,8 +212,18 @@ function describeTool(name: string, rawInput: string): string {
     typeof v === "string" ? v : JSON.stringify(v);
 
   // Order matters: check the most informative field for each tool shape.
-  const candidate = input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.query ?? input.url;
-  const detail = candidate ? str(candidate) : (rawInput && rawInput !== "{}" ? rawInput : "");
+  const candidate =
+    input.file_path ??
+    input.path ??
+    input.command ??
+    input.pattern ??
+    input.query ??
+    input.url;
+  const detail = candidate
+    ? str(candidate)
+    : rawInput && rawInput !== "{}"
+      ? rawInput
+      : "";
 
   return detail ? `${name} · ${detail}` : name;
 }
@@ -344,35 +367,29 @@ function TurnBubble({ turn }: { turn: ConversationTurn }) {
         {/* Assistant body. Prefer the ordered `blocks` view (arrival-order
             rendering) when the turn recorded it; otherwise fall back to the
             legacy fixed grouping (thinking → tools → text) so old transcripts
-            keep rendering exactly as before. User turns always render their
-            `text` directly. Task lifecycle rows are intentionally NOT rendered
-            here — tasks have their own dedicated floating TaskPanel during a
-            live turn, and a per-row list in the transcript just duplicated
-            that surface as clutter. The `turn.tasks` array is still persisted
-            on disk for a future Tasks panel. */}
-        {!isUser && turn.blocks && turn.blocks.length > 0 ? (
-          <BlockList blocks={turn.blocks} />
-        ) : (
-          <>
-            {!isUser && <ThinkingBlock thinking={turn.thinking ?? ""} />}
-            {!isUser && <ToolList tools={turn.tool_calls ?? []} />}
-            {!isUser ? (
-              <div className="text-sm leading-relaxed break-words">
-                <Markdown>{sanitise(turn.text)}</Markdown>
-              </div>
-            ) : (
-              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                {sanitise(turn.text)}
-              </p>
-            )}
-          </>
-        )}
-
-        {/* User turns render their prompt text directly. */}
-        {isUser && (
+            keep rendering exactly as before. User turns render their `text`
+            directly via the `isUser` branch below. Task lifecycle rows are
+            intentionally NOT rendered here — tasks have their own dedicated
+            floating TaskPanel during a live turn, and a per-row list in the
+            transcript just duplicated that surface as clutter. The `turn.tasks`
+            array is still persisted on disk for a future Tasks panel. */}
+        {isUser ? (
+          // User turns: render the prompt text once. (Previously this was
+          // duplicated — the fallback ternary below also rendered user text,
+          // so every user bubble showed its message twice.)
           <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
             {sanitise(turn.text)}
           </p>
+        ) : turn.blocks && turn.blocks.length > 0 ? (
+          <BlockList blocks={turn.blocks} />
+        ) : (
+          <>
+            <ThinkingBlock thinking={turn.thinking ?? ""} />
+            <ToolList tools={turn.tool_calls ?? []} />
+            <div className="text-sm leading-relaxed break-words">
+              <Markdown>{sanitise(turn.text)}</Markdown>
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -399,9 +416,7 @@ function ThinkingBlock({ thinking }: { thinking: string }) {
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <Brain size={11} />
-        <span>
-          {open ? "Hide thinking" : "Show thinking"}
-        </span>
+        <span>{open ? "Hide thinking" : "Show thinking"}</span>
         {!open && (
           <span className="text-[9px] opacity-50">
             ({thinking.length.toLocaleString()} chars)
@@ -460,7 +475,9 @@ function ToolUseBlock({ name, input }: { name: string; input: string }) {
   return (
     <div className="mb-2 flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed">
       <span className="text-[var(--primary)] mt-0.5">›</span>
-      <span className="font-mono break-all">{sanitise(describeTool(name, input))}</span>
+      <span className="font-mono break-all">
+        {sanitise(describeTool(name, input))}
+      </span>
     </div>
   );
 }
@@ -696,7 +713,9 @@ function AskUserQuestionCard({
                 {q.header}
               </span>
             </div>
-            <p className="text-sm text-foreground leading-relaxed">{q.question}</p>
+            <p className="text-sm text-foreground leading-relaxed">
+              {q.question}
+            </p>
 
             <div className="space-y-1.5">
               {q.options.map((opt, oi) => {
@@ -724,7 +743,13 @@ function AskUserQuestionCard({
                   >
                     <div className="flex items-start gap-2">
                       <span className="text-primary text-xs mt-0.5 shrink-0">
-                        {q.multiSelect ? (selected ? "☑" : "☐") : selected ? "●" : "○"}
+                        {q.multiSelect
+                          ? selected
+                            ? "☑"
+                            : "☐"
+                          : selected
+                            ? "●"
+                            : "○"}
                       </span>
                       <div className="min-w-0">
                         <div className="text-sm font-medium">{opt.label}</div>
@@ -765,7 +790,10 @@ function AskUserQuestionCard({
                     disabled={disabled}
                     value={otherText[q.question] ?? ""}
                     onChange={(e) =>
-                      setOtherText((p) => ({ ...p, [q.question]: e.target.value }))
+                      setOtherText((p) => ({
+                        ...p,
+                        [q.question]: e.target.value,
+                      }))
                     }
                     // Single-select: typing Other clears the canned selection.
                     onFocus={() => {
@@ -781,7 +809,9 @@ function AskUserQuestionCard({
             </div>
 
             {!answered && (
-              <p className="text-[10px] text-muted-foreground/60">Please select an option or type an answer.</p>
+              <p className="text-[10px] text-muted-foreground/60">
+                Please select an option or type an answer.
+              </p>
             )}
           </div>
         );
@@ -926,9 +956,11 @@ function PermissionApprovalCard({
  * the parent can set up a new streaming Channel.
  */
 export function Chat({
+  projectPath,
   turns,
   streamingBlocks,
   streamingResult,
+  pendingUserText,
   busy,
   error,
   onSend,
@@ -946,6 +978,24 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isStreaming = streamingBlocks !== null;
+
+  // ── `@`-mention autocomplete ──
+  // The caret index mirrors the textarea's selectionStart so the mention hook
+  // can re-parse the active `@…` token as the user types/moves. Kept in state
+  // (not just a ref) because the trigger-detection effect keys off it.
+  const [caret, setCaret] = useState(0);
+  const mention = useFileMention({
+    projectPath,
+    draft,
+    caret,
+    textareaRef: inputRef,
+    setDraft,
+    setCaret,
+    // Disable while parked on an approval/question, busy, read-only, etc. —
+    // mirrors the composer's own `composerDisabled` gate below.
+    disabled:
+      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission,
+  });
 
   // Whether auto-scroll is armed — i.e. the user is parked at the bottom and
   // wants new content to scroll into view. Flips to false the moment the user
@@ -1004,14 +1054,11 @@ export function Chat({
 
   // Whether either parking affordance is active — the composer is disabled
   // while the agent waits on the user (not free-form input).
-  const hasPendingQuestion = pendingQuestion != null && pendingQuestion.length > 0;
+  const hasPendingQuestion =
+    pendingQuestion != null && pendingQuestion.length > 0;
   const hasPendingPermission = pendingPermission != null;
   const composerDisabled =
-    disabled ||
-    busy ||
-    readOnly ||
-    hasPendingQuestion ||
-    hasPendingPermission;
+    disabled || busy || readOnly || hasPendingQuestion || hasPendingPermission;
 
   const isEmpty = turns.length === 0 && !isStreaming && !busy;
 
@@ -1094,6 +1141,29 @@ export function Chat({
           ),
         )}
 
+        {/* Ephemeral user bubble for the in-flight turn. The backend writes the
+            user turn to disk BEFORE streaming starts, so a mid-stream reload
+            can pull it into `turns` while the turn is still running. To avoid
+            showing two bubbles (the canonical one in `turns` + this one), we
+            hide the ephemeral bubble as soon as `turns` already ends with the
+            same user text. That gives exactly one bubble at all times:
+            ephemeral in the brief pre-reload window, canonical thereafter. */}
+        {pendingUserText &&
+          !turns.some(
+            (t) =>
+              t.role === "user" &&
+              (t.text ?? "").trim() === pendingUserText.trim(),
+          ) && (
+            <TurnBubble
+              turn={{
+                ts: new Date().toISOString(),
+                role: "user",
+                source: "user",
+                text: pendingUserText,
+              }}
+            />
+          )}
+
         {/* Streaming bubble — live token accumulation via Channel */}
         {isStreaming && (
           <StreamingBubble
@@ -1142,7 +1212,10 @@ export function Chat({
               onAlwaysAllow={
                 onAlwaysAllow
                   ? () =>
-                      onAlwaysAllow(pendingPermission.toolName, pendingPermission.input)
+                      onAlwaysAllow(
+                        pendingPermission.toolName,
+                        pendingPermission.input,
+                      )
                   : undefined
               }
             />
@@ -1161,12 +1234,39 @@ export function Chat({
             messages.
           </div>
         ) : (
-          <div className="flex items-end gap-2">
+          <div className="relative flex items-end gap-2">
+            {/* `@`-mention popup — anchored to the textarea caret. Rendered as
+                a child of this `relative` row so the caret-local coordinates
+                from caretCoords (whose origin is the textarea's top-left, which
+                coincides with this row's top-left) line up directly. The popup
+                is absolute-positioned so it doesn't disturb the flex layout. */}
+            <FileMentionMenu
+              open={mention.open}
+              items={mention.items}
+              loading={mention.loading}
+              selectedIndex={mention.selectedIndex}
+              position={mention.position}
+              onHover={mention.setSelectedIndex}
+              onPick={mention.pick}
+            />
             <textarea
               ref={inputRef}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setCaret(e.target.selectionStart);
+              }}
+              onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
+              onClick={(e) => setCaret(e.currentTarget.selectionStart)}
+              onSelect={(e) =>
+                setCaret((e.target as HTMLTextAreaElement).selectionStart)
+              }
               onKeyDown={(e) => {
+                // Mention nav consumes the key first (arrows, Enter, Esc, Tab).
+                // Only when it doesn't (returns false) do we fall through to
+                // the normal Enter-to-send — so an open popup's Enter inserts
+                // the mention instead of sending the message.
+                if (mention.onKeyDown(e)) return;
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   handleSend();
@@ -1174,11 +1274,12 @@ export function Chat({
               }}
               placeholder={
                 turns.length === 0
-                  ? "Start a new conversation… (Enter to send, Shift+Enter for newline)"
-                  : "Send a follow-up message… (Enter to send, Shift+Enter for newline)"
+                  ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files)"
+                  : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files)"
               }
               rows={2}
               disabled={composerDisabled}
+              onBlur={() => mention.close()}
               className="flex-1 resize-none rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
             />
             <button

@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   AgentConfig,
+  DirEntry,
   DiscoveredRepo,
   ProjectEntry,
   ProjectMeta,
@@ -406,4 +407,49 @@ export async function agentPendingQuestion(
     "agent_pending_question",
     { path },
   );
+}
+
+/**
+ * List the direct children of a directory inside a project, for the chat
+ * composer's `@`-mention autocomplete.
+ *
+ * `subdir` is project-relative (`""` = project root); the user navigates into
+ * subfolders by selecting folders, which the frontend turns into successive
+ * calls with deeper `subdir` values. Hidden entries and build/dependency
+ * directories are filtered out server-side; the result is sorted
+ * directories-first then alphabetical.
+ *
+ * Rust: list_dir_entries(path: String, subdir: String) -> Result<Vec<DirEntry>, AppError>
+ */
+export async function listDirEntries(
+  path: string,
+  subdir: string,
+): Promise<DirEntry[]> {
+  return invoke<DirEntry[]>("list_dir_entries", { path, subdir });
+}
+
+/**
+ * Recursively search the project tree for files/folders matching `query`
+ * (substring, case-insensitive), ranked by match quality (exact basename >
+ * basename prefix > basename contains > path contains) then by path depth.
+ *
+ * Used by the `@`-mention autocomplete once the user types a filter after the
+ * `@` — it searches the whole project at once instead of listing one folder.
+ * `node_modules`, `target`, dotfiles etc. are pruned server-side. Capped at
+ * `maxResults` (default 50).
+ *
+ * Rust: search_project_files(
+ *   path: String, query: String, max_results: Option<usize>
+ * ) -> Result<Vec<DirEntry>, AppError>
+ */
+export async function searchProjectFiles(
+  path: string,
+  query: string,
+  maxResults?: number,
+): Promise<DirEntry[]> {
+  return invoke<DirEntry[]>("search_project_files", {
+    path,
+    query,
+    maxResults,
+  });
 }
