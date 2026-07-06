@@ -13,6 +13,7 @@ import type {
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
 import { usePendingInteractions } from "../../store/pendingInteractions";
+import { useStreamingState } from "../../store/streamingState";
 import { Chat } from "./Chat";
 
 interface AgentPanelProps {
@@ -83,20 +84,22 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   const [selectedId, setSelectedId] = useState<string>("active");
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  // ── Streaming state ──
-  // `streamingBlocks` is a single ordered accumulator — each text/thinking
-  // delta appends to the tail (coalescing consecutive same-type deltas) and
-  // each tool_use pushes a new block. Preserving arrival order across block
-  // types is the whole point: the bubble renders exactly how the turn unfolded
-  // (e.g. thinking → text → tool_use → thinking → text) rather than a fixed
-  // grouping. `null` means "no turn streaming" and hides the streaming bubble.
-  const [busy, setBusy] = useState(false);
-  const [streamingBlocks, setStreamingBlocks] = useState<ContentBlock[] | null>(null);
-  const [streamingResult, setStreamingResult] =
-    useState<(ClaudeEvent & { type: "result" }) | null>(null);
-
-  // ── Error ──
-  const [error, setError] = useState<string | null>(null);
+  // ── Streaming state (navigation-stable) ──
+  // Lifted OUT of React state into a Zustand store keyed by project path.
+  // `AgentPanel` unmounts when the user navigates away from the agent surface;
+  // the in-flight streaming bubble + busy flag must survive that unmount so
+  // (a) coming back shows the partial assistant reply, and (b) the Tauri
+  // Channel callback (owned by whoever kicked off the turn) can keep writing
+  // events to the store even with no panel mounted — including the terminal
+  // `result` that triggers the transcript reload.
+  const busy = useStreamingState((s) => (s.byPath[projectPath]?.busy) ?? false);
+  const streamingBlocks = useStreamingState(
+    (s) => s.byPath[projectPath]?.streamingBlocks ?? null,
+  );
+  const streamingResult = useStreamingState(
+    (s) => s.byPath[projectPath]?.streamingResult ?? null,
+  );
+  const error = useStreamingState((s) => s.byPath[projectPath]?.error ?? null);
 
   // ── Composer focus nonce — bumped to ask Chat to focus its composer. ──
   // Used by "New conversation": after archiving the transcript we want the
@@ -129,6 +132,41 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // synchronously, closing that race. Stays true through end-of-turn cleanup
   // (the reload swap) so a new turn can't preempt the persisted write.
   const busyRef = useRef(false);
+
+  // ── Streaming-state mutators (write through to the navigation-stable store). ──
+  // Thin wrappers so the orchestration code below keeps reading like the old
+  // useState version — every setX here is a store patch keyed by projectPath.
+  const setBusy = useCallback(
+    (b: boolean) => useStreamingState.getState().patch(projectPath, { busy: b }),
+    [projectPath],
+  );
+  const setError = useCallback(
+    (e: string | null) => useStreamingState.getState().patch(projectPath, { error: e }),
+    [projectPath],
+  );
+  const setStreamingResult = useCallback(
+    (r: (ClaudeEvent & { type: "result" }) | null) =>
+      useStreamingState.getState().patch(projectPath, { streamingResult: r }),
+    [projectPath],
+  );
+  /** Replace the streaming blocks. Pass null to clear (hide the bubble). */
+  const setStreamingBlocks = useCallback(
+    (
+      next:
+        | ContentBlock[]
+        | null
+        | ((prev: ContentBlock[] | null) => ContentBlock[] | null),
+    ) => {
+      const store = useStreamingState.getState();
+      if (typeof next === "function") {
+        const prev = store.byPath[projectPath]?.streamingBlocks ?? null;
+        store.patch(projectPath, { streamingBlocks: next(prev) });
+      } else {
+        store.patch(projectPath, { streamingBlocks: next });
+      }
+    },
+    [projectPath],
+  );
 
   // Track whether the component is mounted so channel events arriving after
   // unmount (user navigated away mid-turn) don't set state.
@@ -403,7 +441,14 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     let resultHandled = false;
 
     channel.onmessage = (event: ClaudeEvent) => {
-      if (!mountedRef.current) return;
+      // NOTE: we deliberately do NOT bail on `!mountedRef.current` here.
+      // Streaming state lives in the navigation-stable store, so we keep
+      // accumulating blocks / busy / result even when no panel is mounted —
+      // that's the whole point of lifting it out of React state. A freshly-
+      // mounted panel picks up the in-flight bubble verbatim, and the
+      // terminal `result` triggers the transcript reload regardless of whether
+      // the originating panel is still on screen. React-state writes (turns,
+      // conversations) below are guarded individually.
 
       switch (event.type) {
         case "text_delta":
@@ -543,8 +588,13 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // bubble with the canonical record — then drop the streaming bubble
           // and the busy flag together. busyRef stays true across the reload so
           // a new turn can't preempt the persisted write.
+          //
+          // We clear the streaming state unconditionally (even if this panel
+          // unmounted) — the store is navigation-stable, so leaving the bubble
+          // mounted forever would resurface a stale reply on next visit. The
+          // transcript reload inside `reload()` guards its own React-state
+          // writes against unmounted components.
           void reload().finally(() => {
-            if (!mountedRef.current) return;
             setStreamingBlocks(null);
             setStreamingResult(null);
             busyRef.current = false;
@@ -561,7 +611,8 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       }
 
       // Fallback: if the Result event hasn't fired yet (unlikely), reload.
-      if (!resultHandled && mountedRef.current) {
+      // Unconditional on streaming state — see the result arm above.
+      if (!resultHandled) {
         setStreamingBlocks(null);
         setStreamingResult(null);
         setBusy(false);
@@ -572,18 +623,19 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       }
     } catch (err) {
       // Infra-level error: timeout, no agent config, spawn failure, etc.
-      if (mountedRef.current) {
-        setError(describeError(err));
-        setStreamingBlocks(null);
-        setStreamingResult(null);
-        setBusy(false);
-        clearPendingQuestion(projectPath);
-        clearPendingPermission(projectPath);
-        busyRef.current = false;
-        // Best-effort reload — a failed turn may still have been partially
-        // recorded (user turn appended before send).
-        void reload();
-      }
+      // Streaming-state cleanup is unconditional so a stale error / bubble
+      // doesn't resurface on next visit; React-state writes inside reload()
+      // guard themselves against unmounted components.
+      setError(describeError(err));
+      setStreamingBlocks(null);
+      setStreamingResult(null);
+      setBusy(false);
+      clearPendingQuestion(projectPath);
+      clearPendingPermission(projectPath);
+      busyRef.current = false;
+      // Best-effort reload — a failed turn may still have been partially
+      // recorded (user turn appended before send).
+      void reload();
     }
   }
 
@@ -742,7 +794,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-3xl flex flex-col h-full">
+    <div className="max-w-3xl flex h-full min-h-0 flex-1 flex-col">
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-2 pb-3 mb-3 border-b border-border shrink-0">
         <button

@@ -162,7 +162,7 @@ export function AgentRunner() {
           </aside>
 
           {/* ── Chat surface ── */}
-          <main className="min-w-0 flex-1 p-6">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
             {selected ? (
               <AgentPanel key={selected.path} projectPath={selected.path} />
             ) : (
