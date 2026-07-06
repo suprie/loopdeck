@@ -2,6 +2,7 @@ use crate::agents::{apply_agent_config, parse_stream_line, AgentResponse, Respon
 use crate::config::AgentConfig;
 use crate::error::AppError;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ pub struct ClaudeSession {
 }
 
 impl ClaudeSession {
-    pub fn spawn(agent_config: &AgentConfig) -> Result<Self, AppError> {
+    pub fn spawn(project_path: &PathBuf, agent_config: &AgentConfig) -> Result<Self, AppError> {
         let mut cmd = Command::new("claude");
         cmd.args([
             "--input-format",
@@ -28,6 +29,8 @@ impl ClaudeSession {
             "--output-format",
             "stream-json",
             "--verbose",
+            "--add-dir",
+            &project_path.to_string_lossy().into_owned(),
         ]);
         // Reuse the same env-var wiring as call_agents so the single-shot and
         // persistent paths can't drift out of sync.
@@ -110,6 +113,7 @@ impl ClaudeSession {
                 Some(event) => acc.ingest_event(event),
                 None => continue, // not a recognized event line — skip silently
             };
+
             if is_result {
                 break;
             }
@@ -172,8 +176,12 @@ mod tests {
             base_url: Some(String::from("https://api.deepseek.com/anthropic")),
             model: Some(String::from("deepseek-v4-pro[1m]")),
             auth_token: Some(String::from("sk-64a7220f24e241dc8139ba445cd634f0")),
-            effort: Some(String::from("max")),
+            effort: Some(String::from("low")),
         }
+    }
+
+    fn test_path() -> PathBuf {
+        std::env::current_dir().expect("cannot found current directory")
     }
 
     /// Smoke test: spawn one session, send one message, get a structured reply.
@@ -184,8 +192,8 @@ mod tests {
     #[test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     fn test_session_single_turn() {
-        let mut session =
-            ClaudeSession::spawn(&test_config()).expect("failed to spawn claude session");
+        let mut session = ClaudeSession::spawn(&test_path(), &test_config())
+            .expect("failed to spawn claude session");
 
         let response = session
             .send_message("reply with exactly: hello")
@@ -206,6 +214,36 @@ mod tests {
         // `session` drops here → Drop closes stdin → claude exits gracefully.
     }
 
+    /// Smoke test: spawn one session, send one message, get a structured reply.
+    ///
+    /// Validates the full pipeline end-to-end: spawn (env vars, piped stdio)
+    /// → write a user-turn JSON line to stdin → read the stream back → stop at
+    /// the Result event → parse into AgentResponse.
+    #[test]
+    #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
+    fn test_session_current_directory() {
+        let mut session = ClaudeSession::spawn(&test_path(), &test_config())
+            .expect("failed to spawn claude session");
+
+        let response = session
+            .send_message("is there a Cargo.toml in this directory, response with YES or NO only, No preamble")
+            .expect("send_message failed");
+
+        assert!(!response.result.is_empty(), "result should not be empty");
+        assert!(
+            !response.is_error,
+            "turn should not be an error, got: {:?}",
+            response
+        );
+        assert!(
+            response.result.to_lowercase().contains("yes"),
+            "result should contain 'YES', got: {}",
+            response.result
+        );
+
+        // `session` drops here → Drop closes stdin → claude exits gracefully.
+    }
+
     /// The thesis test: prove the conversation context survives across turns
     /// on the SAME process, WITHOUT `--resume`.
     ///
@@ -216,19 +254,15 @@ mod tests {
     #[test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     fn test_session_retains_context_across_turns() {
-        let mut session =
-            ClaudeSession::spawn(&test_config()).expect("failed to spawn claude session");
+        let mut session = ClaudeSession::spawn(&test_path(), &test_config())
+            .expect("failed to spawn claude session");
 
         // Turn 1 — plant a distinctive fact the model could only repeat by
         // remembering it (not by guessing from turn 2's question alone).
         let first = session
             .send_message("I'm telling you a secret codeword. The codeword is: ZUCCHINI. Reply with exactly: understood.")
             .expect("turn 1 (send_message) failed");
-        assert!(
-            !first.is_error,
-            "turn 1 should not error, got: {:?}",
-            first
-        );
+        assert!(!first.is_error, "turn 1 should not error, got: {:?}", first);
 
         // Turn 2 — recall it. Same process, same session, no --resume.
         let second = session
