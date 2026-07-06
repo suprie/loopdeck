@@ -1,3 +1,15 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
+import { cn } from "@/lib/utils";
+
 interface ConfirmDialogProps {
   title: string;
   message: string;
@@ -8,6 +20,16 @@ interface ConfirmDialogProps {
   danger?: boolean;
 }
 
+/**
+ * Thin wrapper over the shadcn `AlertDialog` primitive.
+ *
+ * Keeps the original prop signature ({@link ConfirmDialogProps}) so existing
+ * call sites don't change — only the implementation swaps to the shared
+ * primitive, which gives us focus trapping, Esc-to-cancel, scroll lock, and
+ * consistent dialog styling for free.
+ *
+ * `danger` tints the confirm button destructive.
+ */
 export function ConfirmDialog({
   title,
   message,
@@ -18,37 +40,27 @@ export function ConfirmDialog({
   danger = false,
 }: ConfirmDialogProps) {
   return (
-    <div
-      className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]"
-      onClick={onCancel}
-    >
-      <div
-        className="bg-surface border border-border rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="text-sm font-semibold text-foreground mb-1.5">{title}</h3>
-        <p className="text-sm text-muted-foreground mb-5 leading-relaxed">
-          {message}
-        </p>
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onCancel}
-            className="inline-flex items-center h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-          >
-            {cancelLabel}
-          </button>
-          <button
+    <AlertDialog open onOpenChange={(open) => !open && onCancel()}>
+      <AlertDialogContent className="max-w-sm">
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription className="leading-relaxed">
+            {message}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>{cancelLabel}</AlertDialogCancel>
+          <AlertDialogAction
             onClick={onConfirm}
-            className={
-              danger
-                ? "inline-flex items-center h-8 px-3 rounded-md text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_12%,transparent)] transition"
-                : "inline-flex items-center h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
-            }
+            className={cn(
+              danger &&
+                "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+            )}
           >
             {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
