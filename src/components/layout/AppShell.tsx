@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { LayoutGrid, GitBranch, Command } from "lucide-react";
+import { LayoutGrid, GitBranch, Settings2, Command } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import type { AppView } from "../../types";
@@ -79,6 +79,23 @@ export function AppShell({ children }: AppShellProps) {
               </button>
             );
           })}
+          {/* Settings — always last */}
+          {(() => {
+            const active = currentView === "settings";
+            return (
+              <button
+                onClick={() => setCurrentView("settings")}
+                className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors w-full text-left ${
+                  active
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                }`}
+              >
+                <Settings2 className="size-4" />
+                Settings
+              </button>
+            );
+          })()}
         </nav>
 
         {/* Footer */}

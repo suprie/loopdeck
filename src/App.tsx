@@ -5,6 +5,7 @@ import { AppShell } from "./components/layout/AppShell";
 import { Dashboard } from "./components/dashboard/Dashboard";
 import { ImportFlow } from "./components/import/ImportFlow";
 import { ProjectDetail } from "./components/detail/ProjectDetail";
+import { Settings } from "./components/settings/Settings";
 import "./styles.css";
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
       {currentView === "dashboard" && <Dashboard />}
       {currentView === "import" && <ImportFlow />}
       {currentView === "detail" && <ProjectDetail />}
+      {currentView === "settings" && <Settings />}
     </AppShell>
   );
 }

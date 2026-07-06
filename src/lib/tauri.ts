@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DiscoveredRepo, ProjectEntry, ProjectMeta, Decision, LoopStatus } from "../types";
+import type { AgentConfig, DiscoveredRepo, ProjectEntry, ProjectMeta, Decision, LoopStatus } from "../types";
 
 /**
  * Scan a directory for project repositories.
@@ -98,4 +98,20 @@ export async function getDecisions(path: string): Promise<Decision[]> {
  */
 export async function getLoops(path: string): Promise<LoopStatus> {
   return invoke<LoopStatus>("get_loops", { path });
+}
+
+/**
+ * Get the global agent configuration.
+ * Rust: get_agent_config() -> Result<Option<AgentConfig>, AppError>
+ */
+export async function getAgentConfig(): Promise<AgentConfig | null> {
+  return invoke<AgentConfig | null>("get_agent_config");
+}
+
+/**
+ * Set (create or update) the global agent configuration.
+ * Rust: set_agent_config(agent_config: AgentConfig) -> Result<AgentConfig, AppError>
+ */
+export async function setAgentConfig(config: AgentConfig): Promise<AgentConfig> {
+  return invoke<AgentConfig>("set_agent_config", { agentConfig: config });
 }

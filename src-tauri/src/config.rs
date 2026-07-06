@@ -4,6 +4,37 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+// ── Public response types ──────────────────────────────────────────────────
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field(
+                "auth_token",
+                if self.auth_token.is_some() {
+                    &"***REDACTED***"
+                } else {
+                    &"None"
+                },
+            )
+            .field("effort", &self.effort)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub enum ProjectStatus {
     #[default]
@@ -56,6 +87,8 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalConfig {
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
     #[serde(default)]
@@ -194,6 +227,7 @@ mod tests {
     #[test]
     fn test_config_roundtrip() {
         let config = GlobalConfig {
+            agent: None,
             projects: vec![ProjectEntry {
                 path: PathBuf::from("/tmp/test-project"),
                 name: "Test Project".into(),
@@ -271,6 +305,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let config = GlobalConfig {
+            agent: None,
             projects: vec![],
             settings: Settings::default(),
         };
@@ -380,5 +415,136 @@ mod tests {
         let mut entry = make_entry(Some(rfc3339_days_ago(365)), None);
         update_project_status(&mut entry);
         assert_eq!(entry.status, ProjectStatus::NonActive);
+    }
+
+    // ── AgentConfig tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_with_agent_block() {
+        let yaml = r#"
+settings:
+  scan_depth: 3
+agent:
+  auth_token: sk-test-123
+  base_url: https://api.anthropic.com
+  model: claude-sonnet-4-6
+  effort: high
+projects: []
+"#;
+        let config: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        let agent = config.agent.expect("agent block should be present");
+        assert_eq!(agent.auth_token.as_deref(), Some("sk-test-123"));
+        assert_eq!(
+            agent.base_url.as_deref(),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(agent.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_config_without_agent_block_is_none() {
+        let yaml = r#"
+settings:
+  scan_depth: 2
+projects:
+  - path: /tmp/foo
+    name: Foo
+    description: ""
+    status: Active
+    last_opened: null
+    created_at: "2025-01-01T00:00:00Z"
+"#;
+        let config: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.agent.is_none(), "agent should be None when missing");
+        assert_eq!(config.settings.scan_depth, 2);
+        assert_eq!(config.projects.len(), 1);
+    }
+
+    #[test]
+    fn test_config_empty_is_default() {
+        let config: GlobalConfig = serde_yaml::from_str("").unwrap();
+        assert!(config.agent.is_none());
+        assert!(config.projects.is_empty());
+        assert_eq!(config.settings.scan_depth, 5); // default
+    }
+
+    #[test]
+    fn test_agent_config_roundtrip() {
+        let agent = AgentConfig {
+            auth_token: Some("sk-round-trip-test".into()),
+            base_url: Some("https://api.example.com/v1".into()),
+            model: Some("claude-opus-4-8".into()),
+            effort: Some("max".into()),
+        };
+
+        let config = GlobalConfig {
+            agent: Some(agent.clone()),
+            projects: vec![],
+            settings: Settings::default(),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: GlobalConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        let round_tripped = parsed.agent.expect("agent should survive round-trip");
+        assert_eq!(round_tripped.auth_token, agent.auth_token);
+        assert_eq!(round_tripped.base_url, agent.base_url);
+        assert_eq!(round_tripped.model, agent.model);
+        assert_eq!(round_tripped.effort, agent.effort);
+    }
+
+    #[test]
+    fn test_agent_config_serialize_skips_none() {
+        // Only set model — other fields should be absent from YAML output
+        let agent = AgentConfig {
+            auth_token: None,
+            base_url: None,
+            model: Some("claude-haiku-4-5".into()),
+            effort: None,
+        };
+
+        let config = GlobalConfig {
+            agent: Some(agent),
+            projects: vec![],
+            settings: Settings::default(),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+
+        // These keys should NOT appear in the output
+        assert!(!yaml.contains("auth_token"));
+        assert!(!yaml.contains("base_url"));
+        assert!(!yaml.contains("effort"));
+        // Model SHOULD appear
+        assert!(yaml.contains("model"));
+        assert!(yaml.contains("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn test_agent_config_debug_redacts_auth_token() {
+        let agent = AgentConfig {
+            auth_token: Some("sk-super-secret".into()),
+            base_url: Some("https://api.anthropic.com".into()),
+            model: None,
+            effort: None,
+        };
+
+        let debug_str = format!("{:?}", agent);
+
+        // Must NOT leak the real token
+        assert!(!debug_str.contains("sk-super-secret"));
+        // Must show that a token IS set (redacted)
+        assert!(debug_str.contains("***REDACTED***"));
+
+        // Without a token
+        let agent_no_token = AgentConfig {
+            auth_token: None,
+            base_url: None,
+            model: None,
+            effort: None,
+        };
+        let debug_no_token = format!("{:?}", agent_no_token);
+        assert!(debug_no_token.contains("None"));
     }
 }

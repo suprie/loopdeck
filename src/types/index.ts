@@ -56,11 +56,20 @@ export interface AppError {
     | "scan"
     | "config"
     | "lockError"
-    | "projectAlreadyExists";
+    | "projectAlreadyExists"
+    | "agent";
+}
+
+/** Global agent configuration (mirrors Rust AgentConfig). */
+export interface AgentConfig {
+  auth_token?: string;
+  base_url?: string;
+  model?: string;
+  effort?: string;
 }
 
 /** Internal app view routing. */
-export type AppView = "dashboard" | "import" | "detail";
+export type AppView = "dashboard" | "import" | "detail" | "settings";
 
 /** A single architectural decision record from .loopdeck/decisions.md. */
 export interface Decision {

@@ -1,3 +1,4 @@
+mod agents;
 mod commands;
 mod config;
 mod error;
@@ -6,7 +7,6 @@ mod memory;
 mod project;
 mod scanner;
 mod skills;
-mod agents;
 
 use commands::AppState;
 use config::GlobalConfig;
@@ -43,6 +43,8 @@ pub fn run() {
             commands::rescan_project,
             commands::get_decisions,
             commands::get_loops,
+            commands::get_agent_config,
+            commands::set_agent_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

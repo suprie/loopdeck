@@ -1,20 +1,8 @@
+use crate::config::AgentConfig;
+use crate::error::AppError;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
-
-use crate::error::AppError;
-
-// ── Public response types ──────────────────────────────────────────────────
-#[derive(Debug)]
-pub struct AgentConfig {
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    pub auth_token: Option<String>,
-    pub effort: Option<String>,
-}
-
-/// Structured result from a `call_agents` invocation.
-#[derive(Debug, Clone, Serialize)]
 pub struct AgentResponse {
     /// The concatenated text from assistant `text` blocks (streaming deltas).
     pub text: String,

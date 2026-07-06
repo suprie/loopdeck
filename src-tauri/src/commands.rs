@@ -1,4 +1,4 @@
-use crate::config::{self, GlobalConfig, ProjectEntry, ProjectStatus};
+use crate::config::{self, AgentConfig, GlobalConfig, ProjectEntry, ProjectStatus};
 use crate::error::AppError;
 use crate::git;
 use crate::memory::{self, Decision, LoopStatus};
@@ -77,7 +77,6 @@ pub async fn import_project(
     {
         let config = state.config.lock().map_err(|_| AppError::LockError)?;
         if let Some(existing) = config.find_by_path(&canonical) {
-            eprintln!("existing");
             return Ok(existing.clone());
         }
     }
@@ -90,7 +89,7 @@ pub async fn import_project(
 
     // Gather git info
     let git_info = git::check_git_info(&canonical);
-    let current_loop = project::read_current_loop(canonical.as_path()); 
+    let current_loop = project::read_current_loop(canonical.as_path());
 
     // Build project entry and add to config
     let entry = ProjectEntry {
@@ -153,6 +152,29 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
     }
 
     Ok(config.projects.clone())
+}
+
+/// Get the global agent configuration.
+///
+/// Returns `None` if no agent config has been saved yet.
+#[tauri::command]
+pub async fn get_agent_config(state: State<'_, AppState>) -> Result<Option<AgentConfig>, AppError> {
+    let config = state.config.lock().map_err(|_| AppError::LockError)?;
+    Ok(config.agent.clone())
+}
+
+/// Set (create or update) the global agent configuration.
+///
+/// Persists to `~/.config/loopdeck/config.yaml` and returns the saved config.
+#[tauri::command]
+pub async fn set_agent_config(
+    agent_config: AgentConfig,
+    state: State<'_, AppState>,
+) -> Result<AgentConfig, AppError> {
+    let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+    config.agent = Some(agent_config.clone());
+    config.save()?;
+    Ok(agent_config)
 }
 
 /// Get a single project by path.
