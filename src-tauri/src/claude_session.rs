@@ -23,7 +23,20 @@ use tokio::task::JoinHandle;
 /// but bounded so a stuck peer fails loudly instead of hanging the caller.
 /// A timed-out session is left in an inconsistent state — the caller should
 /// drop it (Drop cleans up) rather than send again.
-const SEND_MESSAGE_TIMEOUT: Duration = Duration::from_secs(180);
+/// Per-`read_line` idle timeout. Bounds how long we'll wait for the next line
+/// of stdout from claude with no activity. Distinct from the legacy
+/// SEND_MESSAGE_TIMEOUT, which used to bound the *whole* turn — including the
+/// time spent parked on a manual approval / AskUserQuestion. Parking for a
+/// user decision can legitimately take many minutes (the user stepped away,
+/// navigated to another page, etc.), so the turn-level timeout was wrong: it
+/// would fire mid-park, drop the session, and surface as
+/// "agent timed out / missing requestId" on the next answer attempt.
+///
+/// The per-read timeout preserves the original "stuck peer" guard (no stdout
+/// activity for N seconds ⇒ fail loudly) while excluding the parked phase —
+/// when we're parked on `rx` we're not awaiting `read_line`, so this timeout
+/// doesn't fire.
+const READ_LINE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The tool name Claude uses when it wants to ask the user a clarifying
 /// question. We intercept this *before* the auto-permission policy so the
@@ -772,7 +785,13 @@ impl ClaudeSession {
         // hanging the caller. On timeout the session is left mid-turn (a late
         // `result` could still arrive) — the caller should drop it rather than
         // send again. See SEND_MESSAGE_TIMEOUT doc comment above.
-        tokio::time::timeout(SEND_MESSAGE_TIMEOUT, async {
+        // No outer turn-level timeout: that used to bound the *whole* turn
+        // (including the parked phase) and would fire mid-approval, dropping
+        // the session out from under a user who'd stepped away. Instead we
+        // bound each individual `read_line` with READ_LINE_TIMEOUT — when
+        // parked on a control_request we're awaiting the oneshot, not reading
+        // stdout, so the per-read timeout naturally excludes the parked phase.
+        let result = async {
             // ---- write the user turn to stdin ----
             let stdin = self
                 .stdin
@@ -803,11 +822,25 @@ impl ClaudeSession {
                 line.clear();
                 // read_line returns 0 only on EOF. With a persistent process that
                 // means it died — treat as an error rather than a turn boundary.
-                let n = self
-                    .stdout
-                    .read_line(&mut line)
-                    .await
-                    .map_err(|e| AppError::Agent(format!("read failed: {}", e)))?;
+                // The per-read timeout catches a stuck peer (no stdout for
+                // READ_LINE_TIMEOUT seconds) without bounding the parked phase.
+                let n = match tokio::time::timeout(
+                    READ_LINE_TIMEOUT,
+                    self.stdout.read_line(&mut line),
+                )
+                .await
+                {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => {
+                        return Err(AppError::Agent(format!("read failed: {}", e)));
+                    }
+                    Err(_) => {
+                        return Err(AppError::Agent(format!(
+                            "claude produced no stdout for {}s — assuming stuck",
+                            READ_LINE_TIMEOUT.as_secs()
+                        )));
+                    }
+                };
 
                 if n == 0 {
                     return Err(AppError::Agent(
@@ -850,14 +883,17 @@ impl ClaudeSession {
 
             acc.finish()
                 .ok_or_else(|| AppError::Agent("no result event from claude".into()))
-        })
-        .await
-        .map_err(|_| {
-            AppError::Agent(format!(
-                "send_message timed out after {}s",
-                SEND_MESSAGE_TIMEOUT.as_secs()
-            ))
-        })?
+        }
+        .await;
+
+        // Defensive: clear any stale parking entries left by an errored /
+        // timed-out turn. Best-effort; locks can't deadlock (no await).
+        // Done unconditionally on every exit (success or error) so a phantom
+        // prompt can't survive into the next turn.
+        let _ = question_slot.lock().ok().and_then(|mut g| g.take());
+        let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
+
+        result
     }
 
     /// Send one user turn and stream events to the frontend as they arrive.
@@ -880,7 +916,10 @@ impl ClaudeSession {
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
-        tokio::time::timeout(SEND_MESSAGE_TIMEOUT, async {
+        // No outer turn-level timeout — see `send_message` for the rationale.
+        // The per-read timeout lives in the select below (READ_LINE_TIMEOUT
+        // branch) so the parked phase is naturally excluded.
+        let result = async {
             // ---- write the user turn to stdin ----
             let stdin = self
                 .stdin
@@ -937,6 +976,16 @@ impl ClaudeSession {
                     res = &mut interrupt_rx => match res {
                         Ok(()) => ReadOutcome::Interrupted,
                         Err(_) => ReadOutcome::Read, // sender dropped w/o firing — keep reading
+                    },
+                    // Per-read idle timeout: catches a stuck peer (no stdout for
+                    // READ_LINE_TIMEOUT seconds) without bounding the parked
+                    // phase — when parked on a control_request we're awaiting
+                    // the oneshot in answer_control_request, not this select.
+                    _ = tokio::time::sleep(READ_LINE_TIMEOUT) => {
+                        return Err(AppError::Agent(format!(
+                            "claude produced no stdout for {}s — assuming stuck",
+                            READ_LINE_TIMEOUT.as_secs()
+                        )));
                     },
                     res = self.stdout.read_line(&mut line) => match res {
                         Ok(n) => ReadOutcome::ReadResult(n),
@@ -1077,14 +1126,19 @@ impl ClaudeSession {
             let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
 
             Ok(response)
-        })
-        .await
-        .map_err(|_| {
-            AppError::Agent(format!(
-                "send_message_streaming timed out after {}s",
-                SEND_MESSAGE_TIMEOUT.as_secs()
-            ))
-        })?
+        }
+        .await;
+
+        // Defensive: clear any stale parking entries. A normal turn end already
+        // cleared them via the result/answer paths, but an errored / timed-out /
+        // interrupted turn may have left a pending approval or question whose
+        // oneshot will never resolve. Without this, agent_pending_* would keep
+        // reporting a phantom prompt. Runs on every exit (Ok and Err).
+        let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
+        let _ = question_slot.lock().ok().and_then(|mut g| g.take());
+        let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
+
+        result
     }
 }
 

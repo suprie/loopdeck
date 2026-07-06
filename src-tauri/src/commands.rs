@@ -1271,6 +1271,7 @@ pub async fn agent_is_busy(path: String, state: State<'_, AppState>) -> Result<b
 
 /// Serializable payload for a pending manual-approval request.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingPermissionInfo {
     pub request_id: String,
     pub tool_name: String,
@@ -1279,6 +1280,7 @@ pub struct PendingPermissionInfo {
 
 /// Serializable payload for a pending AskUserQuestion request.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingQuestionInfo {
     pub request_id: String,
     pub questions: Vec<crate::agents::AskUserQuestionSpec>,
