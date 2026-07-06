@@ -1,11 +1,12 @@
+import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { Plus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { ProjectCard } from "./ProjectCard";
 import { EmptyState } from "./EmptyState";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { PageHeader } from "../layout/AppShell";
-import { Plus } from "lucide-react";
 
 export function Dashboard() {
   const navigate = useNavigate();
@@ -16,6 +17,9 @@ export function Dashboard() {
   const setPendingAgentStart = useAppStore((s) => s.setPendingAgentStart);
   const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } =
     useProjects();
+
+  /** Demo toggle: preview the empty state without removing data. */
+  const [previewEmpty, setPreviewEmpty] = useState(false);
 
   /** Navigate to a project's detail view. */
   const handleSelect = (path: string) => {
@@ -59,36 +63,44 @@ export function Dashboard() {
     );
   }
 
-  if (projects.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col">
-        <PageHeader title="Dashboard" subtitle="No projects yet" />
-        <div className="flex-1 flex items-center justify-center">
-          <EmptyState onScan={handleScan} />
-        </div>
-      </div>
-    );
-  }
-
+  const showEmpty = projects.length === 0 || previewEmpty;
   const activeCount = projects.filter((p) => p.status === "active").length;
+  const subtitle = previewEmpty
+    ? "Previewing empty state"
+    : `${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex flex-1 flex-col min-h-0">
       <PageHeader
         title="Dashboard"
-        subtitle={`${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`}
+        subtitle={subtitle}
         actions={
-          <button
-            onClick={handleScan}
-            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
-          >
-            <Plus className="size-3.5" />
-            Import Repository
-          </button>
+          <>
+            {projects.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setPreviewEmpty((s) => !s)}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                {previewEmpty ? "Show projects" : "Preview empty state"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleScan}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
+            >
+              <Plus className="size-3.5" />
+              Import Repo
+            </button>
+          </>
         }
       />
-      <div className="flex-1 min-h-0 overflow-y-auto p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+
+      {showEmpty ? (
+        <EmptyState onScan={handleScan} />
+      ) : (
+        <div className="grid flex-1 auto-rows-max grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4 overflow-y-auto p-8">
           {projects.map((project) => (
             <ProjectCard
               key={project.path}
@@ -102,7 +114,7 @@ export function Dashboard() {
             />
           ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }

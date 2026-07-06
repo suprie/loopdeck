@@ -1,13 +1,13 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
+import { useParams, useNavigate, Link } from "@tanstack/react-router";
 import {
   ArrowLeft,
   Pencil,
   RefreshCw,
-  Folder,
+  FolderOpen,
   Terminal,
   Trash2,
-  GitCommit,
+  GitCommitHorizontal,
   Clock,
   LayoutDashboard,
   Lightbulb,
@@ -22,7 +22,10 @@ import { DecisionsPanel } from "./DecisionsPanel";
 import { LoopsPanel } from "./LoopsPanel";
 import { AgentPanel } from "./AgentPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { StatusBadge } from "../shared/StatusBadge";
 import { PageHeader } from "../layout/AppShell";
+import { Section, IconButton, ActionButton } from "./Section";
+import { cn } from "../../lib/utils";
 import type { DetailTab } from "../../types";
 
 const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
@@ -78,206 +81,76 @@ export function ProjectDetail() {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex flex-1 flex-col min-h-0">
       <PageHeader
-        title={project.name}
-        subtitle={project.path}
-        actions={
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => navigate({ to: "/" })}
-              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-              title="Back to dashboard"
+        title={
+          <span className="flex items-center gap-2">
+            <Link
+              to="/"
+              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              onClick={(e) => {
+                // Use the navigate() path so memory-history back works the same.
+                e.preventDefault();
+                navigate({ to: "/" });
+              }}
+              aria-label="Back to dashboard"
             >
-              <ArrowLeft size={14} />
-            </button>
-          </div>
+              <ArrowLeft className="size-4" />
+            </Link>
+            {project.name}
+          </span>
         }
+        subtitle={<span className="font-mono text-[11px]">{project.path}</span>}
+        actions={<StatusBadge status={project.status} />}
       />
 
-      {/* Body: sidebar + content */}
+      {/* Body: tab rail + content */}
       <div className="flex flex-1 min-h-0">
         {/* Sidebar nav */}
-        <nav className="w-[180px] shrink-0 border-r border-border p-3 space-y-0.5">
-          <div className="px-2 py-1.5 mb-2">
-            <div className="text-xs font-semibold text-foreground truncate">
-              {project.name}
-            </div>
-            <div className="text-[10px] text-muted-foreground font-mono truncate mt-0.5">
-              {project.path}
-            </div>
+        <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-border p-3">
+          <div className="mb-1 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {project.name}
           </div>
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors w-full text-left ${
-                activeTab === tab.id
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-              }`}
-            >
-              {tab.icon}
-              {tab.label}
-            </button>
-          ))}
+          {TABS.map((tab) => {
+            const active = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  "relative rounded-md px-3 py-1.5 text-left text-sm transition-colors",
+                  active
+                    ? "nav-active-bar bg-accent font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                )}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
         </nav>
 
         {/* Content panel */}
-        <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-6">
+        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-8">
           {activeTab === "overview" && (
-            <div className="max-w-2xl space-y-4">
-              {/* Overview card */}
-              <div className="rounded-xl border border-border bg-card p-5 space-y-5">
-                {/* Path */}
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
-                    Path
-                  </div>
-                  <div className="text-sm font-mono text-muted-foreground break-all">
-                    {project.path}
-                  </div>
-                </div>
-
-                {/* Description */}
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
-                    Description
-                  </div>
-                  {isEditing ? (
-                    <EditDescription
-                      path={project.path}
-                      initialDescription={project.description}
-                      onSaved={() => setIsEditing(false)}
-                      onCancel={() => setIsEditing(false)}
-                    />
-                  ) : (
-                    <div className="flex items-start justify-between gap-3">
-                      <p
-                        className={
-                          project.description
-                            ? "text-sm text-foreground leading-relaxed"
-                            : "text-sm text-muted-foreground italic leading-relaxed"
-                        }
-                      >
-                        {project.description || "No description set."}
-                      </p>
-                      <div className="flex gap-1 shrink-0">
-                        <button
-                          onClick={() => setIsEditing(true)}
-                          className="inline-flex items-center gap-1 h-7 px-2 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-                          title="Edit description"
-                        >
-                          <Pencil size={12} />
-                        </button>
-                        <button
-                          onClick={handleRegenerate}
-                          className="inline-flex items-center gap-1 h-7 px-2 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-                          title="Regenerate from README"
-                        >
-                          <RefreshCw size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Details */}
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
-                    Details
-                  </div>
-                  <div className="flex flex-wrap gap-3 text-sm">
-                    <span className="text-muted-foreground">
-                      Status: <strong className="text-foreground">{project.status}</strong>
-                    </span>
-                    <span className="text-muted-foreground">
-                      Created:{" "}
-                      <strong className="text-foreground">
-                        {new Date(project.created_at).toLocaleDateString()}
-                      </strong>
-                    </span>
-                    {project.last_opened && (
-                      <span className="text-muted-foreground">
-                        Last opened:{" "}
-                        <strong className="text-foreground">
-                          {new Date(project.last_opened).toLocaleDateString()}
-                        </strong>
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Repository Activity */}
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
-                    Repository Activity
-                  </div>
-                  <div className="flex flex-wrap gap-3 text-sm">
-                    <span className="text-muted-foreground inline-flex items-center gap-1.5">
-                      <GitCommit size={13} />
-                      Last commit:{" "}
-                      <strong className="text-foreground">
-                        {project.last_commit_date
-                          ? relativeTime(project.last_commit_date)
-                          : "Uncommitted"}
-                      </strong>
-                      {project.last_commit_message && (
-                        <span className="text-muted-foreground font-mono text-xs truncate max-w-[200px]">
-                          — {project.last_commit_message}
-                        </span>
-                      )}
-                    </span>
-                    {project.last_modified && (
-                      <span className="text-muted-foreground inline-flex items-center gap-1.5">
-                        <Clock size={13} />
-                        Last modified:{" "}
-                        <strong className="text-foreground">
-                          {relativeTime(project.last_modified)}
-                        </strong>
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Actions */}
-              <div className="flex gap-2 flex-wrap">
-                <button
-                  onClick={handleRescan}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-                >
-                  <RefreshCw size={13} /> Rescan
-                </button>
-                <button
-                  onClick={() => openInFinder(project.path)}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-                >
-                  <Folder size={13} /> Open in Finder
-                </button>
-                <button
-                  onClick={() => openInTerminal(project.path)}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
-                >
-                  <Terminal size={13} /> Open in Terminal
-                </button>
-                <button
-                  onClick={() => setShowRemoveConfirm(true)}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_12%,transparent)] transition"
-                >
-                  <Trash2 size={13} /> Remove from Registry
-                </button>
-              </div>
-            </div>
+            <OverviewTab
+              project={project}
+              isEditing={isEditing}
+              onEdit={() => setIsEditing(true)}
+              onCancelEdit={() => setIsEditing(false)}
+              onRegenerate={handleRegenerate}
+              onRescan={handleRescan}
+              onFinder={() => openInFinder(project.path)}
+              onTerminal={() => openInTerminal(project.path)}
+              onRemove={() => setShowRemoveConfirm(true)}
+            />
           )}
 
           {activeTab === "decisions" && (
             <DecisionsPanel projectPath={project.path} />
           )}
 
-          {activeTab === "loops" && (
-            <LoopsPanel projectPath={project.path} />
-          )}
+          {activeTab === "loops" && <LoopsPanel projectPath={project.path} />}
 
           {activeTab === "agent" && <AgentPanel projectPath={project.path} />}
         </div>
@@ -293,6 +166,139 @@ export function ProjectDetail() {
           danger
         />
       )}
+    </div>
+  );
+}
+
+// ── Overview tab ─────────────────────────────────────────────────────────────
+
+function OverviewTab({
+  project,
+  isEditing,
+  onEdit,
+  onCancelEdit,
+  onRegenerate,
+  onRescan,
+  onFinder,
+  onTerminal,
+  onRemove,
+}: {
+  project: ReturnType<typeof useAppStore.getState>["selectedProject"];
+  isEditing: boolean;
+  onEdit: () => void;
+  onCancelEdit: () => void;
+  onRegenerate: () => void;
+  onRescan: () => void;
+  onFinder: () => void;
+  onTerminal: () => void;
+  onRemove: () => void;
+}) {
+  if (!project) return null;
+  const hasChanges = project.uncommitted.files > 0;
+
+  return (
+    <div className="mx-auto max-w-2xl">
+      <h2 className="mb-5 text-sm font-semibold tracking-tight">Overview</h2>
+
+      <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-sm)]">
+        <Section label="Path">
+          <p className="font-mono text-xs text-muted-foreground break-all">{project.path}</p>
+        </Section>
+
+        <Section
+          label="Description"
+          actions={
+            <>
+              <IconButton label="Edit description" onClick={onEdit}>
+                <Pencil className="size-3.5" />
+              </IconButton>
+              <IconButton label="Regenerate from README" onClick={onRegenerate}>
+                <RefreshCw className="size-3.5" />
+              </IconButton>
+            </>
+          }
+        >
+          {isEditing ? (
+            <EditDescription
+              path={project.path}
+              initialDescription={project.description}
+              onSaved={onCancelEdit}
+              onCancel={onCancelEdit}
+            />
+          ) : (
+            <p className="text-sm leading-relaxed">
+              {project.description || (
+                <span className="italic text-muted-foreground">No description set.</span>
+              )}
+            </p>
+          )}
+        </Section>
+
+        <Section label="Details">
+          <dl className="grid grid-cols-3 gap-4 text-xs">
+            <div>
+              <dt className="text-muted-foreground">Status</dt>
+              <dd className="mt-1">
+                <StatusBadge status={project.status} />
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Created</dt>
+              <dd className="mt-1 font-medium">
+                {new Date(project.created_at).toLocaleDateString()}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Opened</dt>
+              <dd className="mt-1 font-medium">
+                {project.last_opened ? relativeTime(project.last_opened) : "—"}
+              </dd>
+            </div>
+          </dl>
+        </Section>
+
+        <Section label="Repository Activity">
+          <div className="space-y-2 text-xs">
+            <div className="flex items-start gap-2">
+              <GitCommitHorizontal className="mt-0.5 size-3.5 text-muted-foreground" />
+              <div>
+                <span className="text-muted-foreground">Last commit · </span>
+                <span>
+                  {project.last_commit_date ? relativeTime(project.last_commit_date) : "none"}
+                </span>
+                {project.last_commit_message && (
+                  <div className="font-mono text-[11px] text-muted-foreground">
+                    {project.last_commit_message}
+                  </div>
+                )}
+              </div>
+            </div>
+            {project.last_modified && (
+              <div className="flex items-center gap-2">
+                <Clock className="size-3.5 text-muted-foreground" />
+                <span className="text-muted-foreground">Last modified · </span>
+                <span>{relativeTime(project.last_modified)}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Clock className="size-3.5 text-muted-foreground" />
+              <span className="text-muted-foreground">Uncommitted · </span>
+              <span>
+                {hasChanges
+                  ? `${project.uncommitted.files} ${project.uncommitted.files === 1 ? "file" : "files"} · +${project.uncommitted.added} −${project.uncommitted.deleted}`
+                  : "clean"}
+              </span>
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      <div className="mt-6 flex flex-wrap items-center gap-2">
+        <ActionButton icon={RefreshCw} label="Rescan" onClick={onRescan} />
+        <ActionButton icon={FolderOpen} label="Finder" onClick={onFinder} />
+        <ActionButton icon={Terminal} label="Terminal" onClick={onTerminal} />
+        <ActionButton icon={Trash2} label="Remove" onClick={onRemove} destructive />
+      </div>
     </div>
   );
 }

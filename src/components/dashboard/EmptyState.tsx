@@ -6,21 +6,25 @@ interface EmptyStateProps {
 
 export function EmptyState({ onScan }: EmptyStateProps) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 px-6 text-center gap-4">
-      <FolderOpen size={64} className="text-muted-foreground/40" />
-      <div>
-        <h2 className="text-lg font-semibold text-foreground">No projects found</h2>
-        <p className="text-sm text-muted-foreground max-w-sm mt-1.5 leading-relaxed">
-          Scan a folder to discover repositories and create project memory.
-          LoopDeck stores project context directly inside each repository.
+    <div className="flex flex-1 items-center justify-center px-4 py-24">
+      <div className="flex max-w-sm flex-col items-center text-center">
+        <div className="mb-6 flex size-20 items-center justify-center rounded-2xl border border-dashed border-border bg-muted/30 opacity-70">
+          <FolderOpen className="size-10 text-muted-foreground opacity-60" />
+        </div>
+        <h2 className="text-base font-semibold tracking-tight">No projects found</h2>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+          Scan a folder to discover repositories and create project memory. LoopDeck stores
+          context inside each repository.
         </p>
+        <button
+          type="button"
+          onClick={onScan}
+          className="mt-6 inline-flex h-9 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        >
+          <FolderOpen className="size-4" />
+          Scan Folder
+        </button>
       </div>
-      <button
-        onClick={onScan}
-        className="inline-flex items-center gap-2 h-9 px-5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
-      >
-        Scan Folder
-      </button>
     </div>
   );
 }

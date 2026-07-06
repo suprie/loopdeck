@@ -25,7 +25,7 @@ export function EditDescription({
   return (
     <div className="space-y-2">
       <textarea
-        className="w-full min-h-[80px] px-3 py-2 rounded-md border border-border bg-surface text-sm text-foreground placeholder:text-muted-foreground resize-y focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/30 font-sans"
+        className="w-full min-h-[80px] px-3 py-2 rounded-md border border-input bg-transparent text-sm text-foreground placeholder:text-muted-foreground resize-y focus:outline-none focus:border-primary/50 focus:ring-2 focus:ring-ring/20 font-sans"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder="Enter a project description..."
