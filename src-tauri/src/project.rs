@@ -1,10 +1,9 @@
 use crate::error::AppError;
-use crate::scanner::{detect_stack, DiscoveredRepo};
+use crate::scanner::detect_stack;
 use crate::skills;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 /// Content of `.loopdeck/project.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,41 +40,45 @@ pub fn bootstrap_project(
     markers: &[String],
     has_readme: bool,
 ) -> Result<ProjectMeta, AppError> {
-    let start = Instant::now();
+    eprintln!("Bootstraping project");
     let loopdeck_dir = repo_path.join(".loopdeck");
     let project_file = loopdeck_dir.join("project.yaml");
-
     let meta: ProjectMeta;
     // Check if already bootstrapped
     if !project_file.exists() {
         // Generate description
+        create_files_and_diretories(repo_path)?;
         let description = generate_description(repo_path, repo_name, markers, has_readme)?;
-
+        setup_skills(repo_path, markers)?;
         meta = ProjectMeta::new(repo_name, &description);
 
         // Write project.yaml
         let contents = serde_yaml::to_string(&meta)?;
         std::fs::write(&project_file, contents)?;
-
-        tracing::info!(
-            "Bootstrapped project at {} in {:?}",
-            repo_path.display(),
-            start.elapsed()
-        );
+        tracing::info!("Bootstrapped project at {:?}", repo_path.display());
     } else {
+        create_files_and_diretories(repo_path)?;
         meta = load_project(repo_path)?;
+        setup_skills(repo_path, markers)?;
     }
 
-    // Create .loopdeck directory
-    std::fs::create_dir_all(&loopdeck_dir)?;
+    Ok(meta)
+}
 
+fn create_files_and_diretories(loopdeck_dir: &Path) -> Result<(), AppError> {
+    // Create .loopdeck directory
+    std::fs::create_dir_all(loopdeck_dir)?;
+    Ok(())
+}
+
+fn setup_skills(repo_path: &Path, markers: &[String]) -> Result<(), AppError> {
     // Copy relevant skill templates to .claude/skills/
+    eprintln!("Copying skills");
     skills::copy_skills(repo_path, markers)?;
 
     // Set up hooks (Stop + PreToolUse) in .claude/settings.json
     skills::setup_hooks(repo_path)?;
-
-    Ok(meta)
+    Ok(())
 }
 
 /// Load an existing `.loopdeck/project.yaml`.
@@ -165,6 +168,7 @@ pub fn generate_description(
 ) -> Result<String, AppError> {
     if has_readme {
         if let Some(readme_description) = extract_readme_paragraph(repo_path)? {
+            eprintln!("Readme {:?}", readme_description);
             return Ok(readme_description);
         }
     }
@@ -304,21 +308,6 @@ fn extract_readme_paragraph(repo_path: &Path) -> Result<Option<String>, AppError
     // Join lines into a single paragraph (markdown soft-wrap)
     let paragraph = paragraph_lines.join(" ");
     Ok(Some(paragraph))
-}
-
-/// Convenience: bootstrap from a DiscoveredRepo.
-pub fn bootstrap_from_discovery(repo: &DiscoveredRepo) -> Result<ProjectMeta, AppError> {
-    bootstrap_project(&repo.path, &repo.name, &repo.markers, repo.has_readme)
-}
-
-/// Remove project memory (deletes `.loopdeck/` directory).
-/// Only removes the directory if it exists; does not error if absent.
-pub fn remove_project_memory(repo_path: &Path) -> Result<(), AppError> {
-    let loopdeck_dir = repo_path.join(".loopdeck");
-    if loopdeck_dir.exists() {
-        std::fs::remove_dir_all(&loopdeck_dir)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
