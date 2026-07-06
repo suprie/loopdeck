@@ -75,7 +75,70 @@
 - **Context**: AI session active on LoopDeck development.
 
 
-## 2026-07-02 — Session heartbeat
-- **Status**: proposed
-- **Context**: AI session active on LoopDeck development.
+## 2026-07-03 — Per-content-block streaming granularity for `ClaudeEvent`
 
+- **Status**: accepted
+- **Context**: The `--output-format stream-json` stream produces one NDJSON line per `assistant` message, and each message can contain multiple `content` blocks (text, thinking, tool_use). We had a choice: emit one `ClaudeEvent` per NDJSON line (the entire message), or break messages apart and emit one event per content block.
+- **Consequences**: Chose per-content-block emission (`TextDelta`, `ThinkingDelta` per block). This gives the frontend the most natural granularity — each delta is a complete text fragment ready to render. The accumulator (`ResponseAccumulator`) still processes the full message in one `ingest_event` call, keeping aggregation consistent with the batch path.
+
+## 2026-07-03 — Separate batch and streaming `send_message` paths (not refactored into one)
+
+- **Status**: accepted
+- **Context**: After adding `send_message_streaming`, we considered refactoring `send_message` to call `send_message_streaming` with a no-op or dropped channel, so the read loop lives in one place. The two paths share `ResponseAccumulator` but differ meaningfully: the batch path is simpler (just accumulate), while the streaming path adds per-block event emission and a terminal `Result` event.
+- **Consequences**: Kept them separate (~15 lines of stdin-write duplication). The batch path avoids allocating channel overhead and remains the simpler, easier-to-reason-about code path. The streaming path adds exactly the delta-emission logic and nothing else. If a third variant is ever needed, extraction becomes worthwhile — for two, the duplication is cheaper than the abstraction.
+
+## 2026-07-03 — Best-effort channel sends in streaming (closed channel is not an error)
+
+- **Status**: accepted
+- **Context**: The frontend may close the Tauri `Channel<ClaudeEvent>` mid-turn (e.g., navigating away from the Agent tab). The Rust side could either (a) treat a closed channel as fatal and abort the turn, or (b) silently drop the send and let the turn complete.
+- **Consequences**: Chose (b) — best-effort sends with `let _ = channel.send(…)`. Rationale: the transcript is always recorded regardless (it's written after the turn completes in `send_and_record_streaming`), and aborting mid-turn would orphan a running claude process with an incomplete stdin stream. The user can always see the result in the transcript when they return.
+
+## 2026-07-03 — Streaming command returns `()` not `AgentResponse`
+
+- **Status**: accepted
+- **Context**: `agent_send_message` returns `AgentResponse` as the Tauri command return value, which the frontend awaits as a Promise. For streaming, the frontend gets data through the Channel, not the return value. We could return `AgentResponse` as well (giving two sources of truth), or return `()`.
+- **Consequences**: Chose `()` — the terminal `ClaudeEvent::Result` carries the full aggregated response inline as the last event on the channel. This is a single source of truth: the frontend listens to the channel and uses the `Result` event to finalize its UI state. Returning `AgentResponse` as well would create ambiguity about which payload to trust.
+
+## 2026-07-03 — Frontend streaming chat UI uses Channel events as single source of truth
+
+- **Status**: accepted
+- **Context**: After adding `agent_send_message_streaming` (Rust) and `ClaudeEvent` types (TS), the `AgentPanel` still used batch APIs exclusively — users saw a spinner for the full turn duration. Building a streaming UI required deciding how the frontend detects turn completion, errors, and final state.
+- **Consequences**: The Tauri `Channel<ClaudeEvent>` is the single source of truth for turn state. The `invoke` Promise is only used for infra-level error catching (timeout, no config, spawn failure). Model-level errors (`is_error: true`) are surfaced from the `ClaudeEvent::Result` event, not from Promise rejection. This is consistent with the existing decision that streaming commands return `()` not `AgentResponse`. The `StreamingBubble` component accumulates `TextDelta`/`ThinkingDelta` events in real time and transitions to a "complete" state when the terminal `Result` event arrives. A `mountedRef` guard prevents post-unmount state updates; a `resultHandled` flag prevents double-reload if the invoke Promise resolves before the last channel event.
+
+## 2026-07-03 — Streaming "Start next loop" variant added for UI consistency
+
+- **Status**: accepted
+- **Context**: The existing `agent_start_loop` was batch-only. Adding streaming to the free-form send but not to Start-next-loop would create an inconsistent UX — the first turn of every session would show a spinner while follow-ups streamed. We could either (a) have the frontend build the prompt and call `agent_send_message_streaming`, or (b) add `agent_start_loop_streaming` in Rust.
+- **Consequences**: Chose (b) — `agent_start_loop_streaming` mirrors the batch `agent_start_loop` exactly (same prompt-building logic via `build_next_loop_prompt`, same transcript recording via `send_and_record_streaming`) and differs only in how the response reaches the UI. This keeps prompt-building logic in one place (Rust) and avoids duplicating `build_next_loop_prompt` / `next_unchecked_loop_step` on the frontend. The two streaming commands (`agent_start_loop_streaming` and `agent_send_message_streaming`) share the same `send_and_record_streaming` pipeline.
+
+## 2026-07-03 — Extracted presentational `Chat` component from `AgentPanel`
+
+- **Status**: accepted
+- **Context**: After the streaming AgentPanel was built, all rendering logic (`TurnBubble`, `StreamingBubble`, `ThinkingBlock`, composer, error banner, empty state) was inline in AgentPanel alongside Channel lifecycle management — the file mixed orchestration and presentation concerns. For reusability (future `/agent` standalone view, potential mobile port) and testability, rendering needed its own module.
+- **Consequences**: `Chat.tsx` is a pure presentational component with zero Tauri or Channel imports. All streaming state (`streamingText`, `streamingThinking`, `streamingResult`, `busy`, `error`) flows in via props; user actions flow out via callbacks (`onSend`, `onClearError`). `AgentPanel.tsx` retains sole ownership of the `Channel<ClaudeEvent>` lifecycle, delta accumulation, transcript persistence (`reload()`), and toolbar buttons. This one-way data flow makes `Chat` independently reusable and testable, while `AgentPanel` remains the single source of truth for streaming orchestration. The `streamingResult` prop gives `Chat` enough context to show usage/duration meta in the transient window before the transcript reload replaces the streaming bubble with the persisted turn.
+
+## 2026-07-03 — Agent Runner uses terminal theme, not Chat bubbles
+
+- **Status**: accepted
+- **Context**: The Agent Runner view needed a standalone agent interface with a project selector. We considered reusing the `Chat` component (which already handles streaming rendering) but `Chat`'s bubble-based, avatar-heavy design doesn't fit a "terminal" aesthetic. The Agent Runner is meant to feel like a developer tool — a tmux-for-AI-agents — not a chat app.
+- **Consequences**: `AgentRunner.tsx` renders its own terminal-themed output (monospace font, dark background `oklch(0.13 0.01 270)`, prompt indicators `❯`, flat line-by-line output, tool-call diamonds `◈` in warning color). It does NOT import `Chat`. However, it does reuse the same streaming orchestration pattern as `AgentPanel` — Channel → `onmessage` → delta accumulation → Result → reload. The two components are rendering-siblings but orchestration-cousins: same approach to Channel lifecycle, different visual output. If a third agent view is ever needed, the shared streaming logic should be extracted into a `useStreamingTurn` hook.
+
+## 2026-07-03 — Activity Feed merges all sources into single chronological timeline
+
+- **Status**: accepted
+- **Context**: The Activity Feed needs to show agent turns, decisions, and loop completions across all projects. We considered rendering separate sections per data source (Conversations, Decisions, Loops) within the feed, vs merging everything into one sorted timeline.
+- **Consequences**: Chose a single merged `ActivityEvent[]` discriminated by `kind` (`turn_user` | `turn_assistant` | `turn_error` | `decision` | `loop_completed`). One sort pass, one date-grouping pass, one render loop. The alternative (separate sections) would fragment chronology and require users to mentally merge timelines. Date-only sources (decisions, loops) get synthesised midnight UTC timestamps so they sort within the correct date bucket. Per-source fetching is best-effort — a missing transcript doesn't prevent decisions/loops from appearing.
+
+## 2026-07-03 — Standalone Decisions + Loops use expand-in-place cards, not detail pages
+
+- **Status**: accepted
+- **Context**: Both the standalone Decisions and Loops views aggregate data across all projects. We could either (a) use click-to-expand cards showing detail inline, or (b) navigate to a per-item detail page (requiring selected-decision-ID / selected-loop-path in Zustand state). With TanStack Router not yet adopted, option (b) would add routing-like state management prematurely.
+- **Consequences**: Chose expand-in-place cards for both views. Clicking a decision card expands it inline to show full context + consequences. Clicking a loop card expands it to show next-steps checklist + history. The ChevronDown icon rotates 180° to indicate state. This keeps the list visible for context while showing detail, and defers the routing complexity until TanStack Router is adopted.
+
+## 2026-07-03 — TanStack Router: memory history, Zustand for data only
+
+- **Status**: accepted
+- **Context**: The app used a Zustand `currentView` string + conditional render (`{currentView === "dashboard" && <Dashboard />}`) for view switching. This worked but had no URL-based routing, no type-safe params, and no nested layout support. We needed proper client-side routing before adding more views.
+- **Consequences**: Adopted `@tanstack/react-router` v1 with `createMemoryHistory` (no browser URL bar in Tauri). Routes: `/`, `/activity`, `/agent`, `/decisions`, `/loops`, `/settings`, `/import`, `/project/$projectPath`. The root route is a layout component (`AppShellLayout`) with sidebar + `<Outlet />`. Zustand retains data state (`projects`, `selectedProject`, `detailTab`, `pendingAgentStart`) but no longer owns the current view. Project filesystem paths are URI-encoded in the route param (`encodeURIComponent`/`decodeURIComponent`). Navigation uses `<Link>` (sidebar) and `useNavigate()` (programmatic). The persisted Zustand slice was reduced from `{currentView, selectedProject, detailTab}` to `{selectedProject, detailTab}` — the router's memory history handles the current location.
+
+## 2026-07-02 — Session heartbeat

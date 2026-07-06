@@ -48,11 +48,55 @@ pub struct AgentResponse {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UsageInfo {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_cost_usd: f64,
+}
+
+// ── Streaming events (frontend-facing) ─────────────────────────────────────
+
+/// Events emitted to the frontend via `Channel<ClaudeEvent>` during a
+/// streaming turn. Each event maps to one content block from the NDJSON stream
+/// (or the terminal `result`), so the UI can render tokens as they arrive.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClaudeEvent {
+    /// A text delta — one `ContentBlock::Text` from an `assistant` message.
+    TextDelta { text: String },
+    /// A thinking delta — one `ContentBlock::Thinking` from an `assistant`
+    /// message (only present when the model uses extended thinking).
+    ThinkingDelta { thinking: String },
+    /// A tool call — one `ContentBlock::ToolUse` from an `assistant` message.
+    /// Surfaced so the UI can show live activity ("Reading X", "Editing Y")
+    /// during long agentic turns where text deltas are sparse.
+    ToolUse {
+        /// Tool name, e.g. "Read", "Edit", "Bash".
+        name: String,
+        /// The raw tool input object, serialized to a JSON string. The UI
+        /// decides how much to show (path, command, etc.).
+        input: String,
+    },
+    /// The terminal event signalling the turn is complete. Carries the full
+    /// aggregated `AgentResponse` so the UI can reconcile its streamed deltas
+    /// and display usage/duration in a single payload.
+    Result {
+        /// Concatenated text from all text deltas in this turn.
+        text: String,
+        /// Aggregated thinking (if any). May be empty when thinking is absent.
+        thinking: Option<String>,
+        /// The final `result` field from the `result` event.
+        result: String,
+        /// Token usage + cost from the `result` event, when available.
+        usage: Option<UsageInfo>,
+        /// Whether this turn errored (from the `result` event).
+        is_error: bool,
+        /// Wall-clock duration of the turn in milliseconds.
+        duration_ms: u64,
+        /// The session id (drives `--resume`). Present on all assistant turns.
+        session_id: String,
+    },
 }
 
 // ── NDJSON stream event types (internal) ───────────────────────────────────
@@ -84,23 +128,37 @@ pub(crate) enum StreamEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct AssistantMessage {
-    content: Vec<ContentBlock>,
+pub(crate) struct AssistantMessage {
+    pub(crate) content: Vec<ContentBlock>,
+}
+
+/// Default for `ContentBlock::ToolUse::input` when the block omits it.
+/// An empty object (not `null`) so downstream `input["field"]` lookups are safe.
+fn default_tool_input() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-enum ContentBlock {
+pub(crate) enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+    // `name` is always present on a tool_use block; `input` may be absent or
+    // null in edge cases, so default to an empty object. We capture both so
+    // the streaming UI can show live activity during agentic turns.
     #[serde(rename = "tool_use")]
-    ToolUse,
+    ToolUse {
+        #[serde(default)]
+        name: String,
+        #[serde(default = "default_tool_input")]
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
-struct RawUsage {
+pub(crate) struct RawUsage {
     input_tokens: u64,
     output_tokens: u64,
 }
@@ -144,7 +202,10 @@ impl ResponseAccumulator {
                         ContentBlock::Thinking { thinking: th } => {
                             self.thinking.get_or_insert_default().push_str(&th);
                         }
-                        ContentBlock::ToolUse => { /* not collected yet */ }
+                        // Tool-use blocks aren't part of the aggregated text —
+                        // they're streamed live via ClaudeEvent::ToolUse in
+                        // `send_message_streaming`, so nothing to accumulate here.
+                        ContentBlock::ToolUse { .. } => {}
                     }
                 }
                 self.session_id = sid;
@@ -277,6 +338,39 @@ mod tests {
         match block {
             ContentBlock::Text { text } => assert_eq!(text, "hi"),
             other => panic!("expected Text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_deser_tool_use_block_captures_name_and_input() {
+        // Regression guard for the silent-activity bug: tool_use blocks must
+        // parse their `name` and `input` so the streaming UI can show live
+        // activity during agentic turns. If this regresses to a unit variant,
+        // long turns show only a spinner again.
+        let json = r#"{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/a/b.rs"}}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("parse tool_use block");
+        match block {
+            ContentBlock::ToolUse { name, input } => {
+                assert_eq!(name, "Read");
+                assert_eq!(input["file_path"], "/a/b.rs");
+            }
+            other => panic!("expected ToolUse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_deser_tool_use_block_handles_missing_input() {
+        // `input` defaults to an empty object — a tool_use without input must
+        // not fail to parse (would drop the whole assistant message).
+        let json = r#"{"type":"tool_use","id":"toolu_02","name":"Bash"}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("parse tool_use block");
+        match block {
+            ContentBlock::ToolUse { name, input } => {
+                assert_eq!(name, "Bash");
+                assert!(input.is_object());
+                assert!(input.as_object().unwrap().is_empty());
+            }
+            other => panic!("expected ToolUse, got {:?}", other),
         }
     }
 

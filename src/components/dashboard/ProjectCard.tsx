@@ -8,6 +8,7 @@ import {
   Clock,
   Circle,
   ArrowUpRight,
+  Play,
 } from "lucide-react";
 import type { ProjectEntry } from "../../types";
 import { relativeTime } from "../../lib/time";
@@ -19,6 +20,8 @@ interface ProjectCardProps {
   onOpenInTerminal: (path: string) => void;
   onRemove: (path: string) => void;
   onRescan: (path: string) => void;
+  /** Start the agent for this project (lands on the Agent tab). */
+  onStart: (path: string) => void;
 }
 
 const ACCENTS = [
@@ -81,6 +84,7 @@ export const ProjectCard = memo(function ProjectCard({
   onOpenInTerminal,
   onRemove,
   onRescan,
+  onStart,
 }: ProjectCardProps) {
   const accent = accentFor(project.name);
   const freshness = freshnessFromStatus(project.status);
@@ -187,6 +191,19 @@ export const ProjectCard = memo(function ProjectCard({
         <Circle className={`size-2 fill-current ${status.color}`} strokeWidth={0} />
         <span className="text-muted-foreground">{status.label}</span>
       </div>
+
+      {/* Start agent CTA */}
+      <button
+        className="w-full inline-flex items-center justify-center gap-1.5 h-8 mb-2 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
+        onClick={(e) => {
+          e.stopPropagation();
+          onStart(project.path);
+        }}
+        title="Start the agent and run the next loop"
+      >
+        <Play className="size-3.5 fill-current" />
+        Start
+      </button>
 
       {/* Actions */}
       <div className="flex gap-1.5 pt-3 border-t border-border/60">

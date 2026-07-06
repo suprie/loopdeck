@@ -69,7 +69,7 @@ export interface AgentConfig {
 }
 
 /** Internal app view routing. */
-export type AppView = "dashboard" | "import" | "detail" | "settings";
+export type AppView = "dashboard" | "import" | "detail" | "settings" | "agent" | "activity" | "decisions" | "loops";
 
 /** A single architectural decision record from .loopdeck/decisions.md. */
 export interface Decision {
@@ -96,4 +96,70 @@ export interface LoopStatus {
 }
 
 /** Tab navigation within ProjectDetail. */
-export type DetailTab = "overview" | "decisions" | "loops";
+export type DetailTab = "overview" | "decisions" | "loops" | "agent";
+
+/** Token usage + cost for an assistant turn (mirrors Rust UsageInfo). */
+export interface UsageInfo {
+  input_tokens: number;
+  output_tokens: number;
+  total_cost_usd: number;
+}
+
+/** Structured result from an agent turn (mirrors Rust AgentResponse). */
+export interface AgentResponse {
+  /** Concatenated assistant text deltas. */
+  text: string;
+  /** Raw thinking content, if the model returned any. */
+  thinking: string | null;
+  /** The complete final answer from the `result` event. */
+  result: string;
+  /** Token usage + cost, when reported. */
+  usage: UsageInfo | null;
+  /** Whether the turn ended in an error. */
+  is_error: boolean;
+  /** Wall-clock duration of the turn in milliseconds. */
+  duration_ms: number;
+  /** Claude session id (drives `--resume` across restarts). */
+  session_id: string;
+}
+
+/** A streaming event emitted by `agent_send_message_streaming` via Tauri Channel.
+ * Mirrors Rust `ClaudeEvent` enum (tagged union, discriminated by `type`). */
+export type ClaudeEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "thinking_delta"; thinking: string }
+  | { type: "tool_use"; name: string; input: string }
+  | {
+      type: "result";
+      text: string;
+      thinking: string | null;
+      result: string;
+      usage: UsageInfo | null;
+      is_error: boolean;
+      duration_ms: number;
+      session_id: string;
+    };
+
+/** A tool call rendered in the streaming activity list. */
+export interface ToolCall {
+  /** Tool name, e.g. "Read", "Edit", "Bash". */
+  name: string;
+  /** Raw tool input as a JSON string (from the backend). */
+  input: string;
+}
+export interface ConversationTurn {
+  /** ISO-8601 timestamp. */
+  ts: string;
+  /** "user" for prompts, "assistant" for replies. */
+  role: "user" | "assistant";
+  /** Turn body — user prompt text or assistant result text. */
+  text: string;
+  /** Claude session id (assistant turns only; absent on user turns). */
+  session_id?: string;
+  /** Whether the assistant turn was an error. Always false for user turns. */
+  is_error?: boolean;
+  /** Token usage + cost (assistant turns only, when reported). */
+  usage?: UsageInfo;
+  /** Wall-clock duration in milliseconds (assistant turns only). */
+  duration_ms?: number;
+}

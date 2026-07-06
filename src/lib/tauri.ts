@@ -1,5 +1,15 @@
-import { invoke } from "@tauri-apps/api/core";
-import type { AgentConfig, DiscoveredRepo, ProjectEntry, ProjectMeta, Decision, LoopStatus } from "../types";
+import { invoke, Channel } from "@tauri-apps/api/core";
+import type {
+  AgentConfig,
+  DiscoveredRepo,
+  ProjectEntry,
+  ProjectMeta,
+  Decision,
+  LoopStatus,
+  AgentResponse,
+  ClaudeEvent,
+  ConversationTurn,
+} from "../types";
 
 /**
  * Scan a directory for project repositories.
@@ -114,4 +124,87 @@ export async function getAgentConfig(): Promise<AgentConfig | null> {
  */
 export async function setAgentConfig(config: AgentConfig): Promise<AgentConfig> {
   return invoke<AgentConfig>("set_agent_config", { agentConfig: config });
+}
+
+// ── Agent session commands ─────────────────────────────────────────────────
+
+/**
+ * Start the next development loop for a project.
+ * Builds the next-loop prompt from `.loopdeck/loops.md` and sends it through
+ * the shared agent pipeline (spawn/resume + record transcript).
+ * Rust: agent_start_loop(path: String) -> Result<AgentResponse, AppError>
+ */
+export async function agentStartLoop(path: string): Promise<AgentResponse> {
+  return invoke<AgentResponse>("agent_start_loop", { path });
+}
+
+/**
+ * Send a free-form follow-up message to the project's agent session.
+ * Rust: agent_send_message(path: String, prompt: String) -> Result<AgentResponse, AppError>
+ */
+export async function agentSendMessage(
+  path: string,
+  prompt: string,
+): Promise<AgentResponse> {
+  return invoke<AgentResponse>("agent_send_message", { path, prompt });
+}
+
+/**
+ * Start the next development loop with streaming events via Tauri Channel.
+ *
+ * Builds the next-loop prompt from `.loopdeck/loops.md` and sends it through
+ * the shared agent pipeline, emitting each assistant content block as a
+ * `ClaudeEvent` on `onEvent` as it arrives. The terminal `ClaudeEvent::Result`
+ * carries the full aggregated response.
+ *
+ * Rust: agent_start_loop_streaming(
+ *   path: String, on_event: Channel<ClaudeEvent>
+ * ) -> Result<(), AppError>
+ */
+export async function agentStartLoopStreaming(
+  path: string,
+  onEvent: Channel<ClaudeEvent>,
+): Promise<void> {
+  return invoke<void>("agent_start_loop_streaming", { path, onEvent });
+}
+
+/**
+ * Send a free-form follow-up message with streaming events via Tauri Channel.
+ *
+ * Each assistant content block is emitted on `onEvent` as a `ClaudeEvent` as it
+ * arrives, so the UI can render tokens immediately. The terminal
+ * `ClaudeEvent::Result` carries the full aggregated response (usage, duration,
+ * session_id, etc.), so the caller doesn't need to await a return value.
+ *
+ * Rust: agent_send_message_streaming(
+ *   path: String, prompt: String, on_event: Channel<ClaudeEvent>
+ * ) -> Result<(), AppError>
+ */
+export async function agentSendMessageStreaming(
+  path: string,
+  prompt: string,
+  onEvent: Channel<ClaudeEvent>,
+): Promise<void> {
+  return invoke<void>("agent_send_message_streaming", {
+    path,
+    prompt,
+    onEvent,
+  });
+}
+
+/**
+ * Load the persisted conversation transcript for the Agent tab.
+ * Rust: agent_get_conversation(path: String) -> Result<Vec<ConversationTurn>, AppError>
+ */
+export async function agentGetConversation(path: string): Promise<ConversationTurn[]> {
+  return invoke<ConversationTurn[]>("agent_get_conversation", { path });
+}
+
+/**
+ * Reset the project's agent session: drop the live process and archive the
+ * transcript so the next Start is a fresh conversation.
+ * Rust: agent_reset_session(path: String) -> Result<(), AppError>
+ */
+export async function agentResetSession(path: string): Promise<void> {
+  return invoke<void>("agent_reset_session", { path });
 }

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useParams, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeft,
   Pencil,
@@ -11,6 +12,7 @@ import {
   LayoutDashboard,
   Lightbulb,
   Repeat,
+  Bot,
 } from "lucide-react";
 import { relativeTime } from "../../lib/time";
 import { useAppStore } from "../../store/appStore";
@@ -18,6 +20,7 @@ import { useProjects } from "../../hooks/useProjects";
 import { EditDescription } from "./EditDescription";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { LoopsPanel } from "./LoopsPanel";
+import { AgentPanel } from "./AgentPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { PageHeader } from "../layout/AppShell";
 import type { DetailTab } from "../../types";
@@ -26,17 +29,32 @@ const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
   { id: "decisions", label: "Decisions", icon: <Lightbulb size={14} /> },
   { id: "loops", label: "Loops", icon: <Repeat size={14} /> },
+  { id: "agent", label: "Agent", icon: <Bot size={14} /> },
 ];
 
 export function ProjectDetail() {
+  const navigate = useNavigate();
+  const { projectPath: encodedPath } = useParams({ strict: false }) as { projectPath: string };
+  const projectPath = decodeURIComponent(encodedPath);
+
+  const projects = useAppStore((s) => s.projects);
+  const setSelectedProject = useAppStore((s) => s.setSelectedProject);
   const project = useAppStore((s) => s.selectedProject);
-  const setCurrentView = useAppStore((s) => s.setCurrentView);
+  const activeTab = useAppStore((s) => s.detailTab);
+  const setActiveTab = useAppStore((s) => s.setDetailTab);
   const { openInFinder, openInTerminal, removeProject, rescanProject, regenerateDesc } =
     useProjects();
 
-  const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const [isEditing, setIsEditing] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
+
+  // Sync the store's selectedProject with the route param on mount / change.
+  useEffect(() => {
+    const match = projects.find((p) => p.path === projectPath);
+    if (match && match.path !== project?.path) {
+      setSelectedProject(match);
+    }
+  }, [projectPath, projects, project, setSelectedProject]);
 
   if (!project) {
     return (
@@ -60,14 +78,14 @@ export function ProjectDetail() {
   };
 
   return (
-    <>
+    <div className="flex-1 flex flex-col min-h-0">
       <PageHeader
         title={project.name}
         subtitle={project.path}
         actions={
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => setCurrentView("dashboard")}
+              onClick={() => navigate({ to: "/" })}
               className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
               title="Back to dashboard"
             >
@@ -106,7 +124,7 @@ export function ProjectDetail() {
         </nav>
 
         {/* Content panel */}
-        <div className="flex-1 min-w-0 overflow-y-auto p-6">
+        <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-6">
           {activeTab === "overview" && (
             <div className="max-w-2xl space-y-4">
               {/* Overview card */}
@@ -260,6 +278,8 @@ export function ProjectDetail() {
           {activeTab === "loops" && (
             <LoopsPanel projectPath={project.path} />
           )}
+
+          {activeTab === "agent" && <AgentPanel projectPath={project.path} />}
         </div>
       </div>
 
@@ -273,6 +293,6 @@ export function ProjectDetail() {
           danger
         />
       )}
-    </>
+    </div>
   );
 }

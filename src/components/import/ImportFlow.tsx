@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { RepoCard } from "./RepoCard";
@@ -6,10 +7,10 @@ import { PageHeader } from "../layout/AppShell";
 import { ArrowLeft, Search } from "lucide-react";
 
 export function ImportFlow() {
+  const navigate = useNavigate();
   const discoveredRepos = useAppStore((s) => s.discoveredRepos);
   const isScanning = useAppStore((s) => s.isScanning);
   const isLoading = useAppStore((s) => s.isLoading);
-  const setCurrentView = useAppStore((s) => s.setCurrentView);
   const { importRepo, scanFolder } = useProjects();
 
   const handleImport = async (path: string) => {
@@ -44,7 +45,7 @@ export function ImportFlow() {
   }
 
   return (
-    <>
+    <div className="flex-1 flex flex-col min-h-0">
       <PageHeader
         title="Import Repository"
         subtitle={
@@ -62,7 +63,7 @@ export function ImportFlow() {
               Scan Again
             </button>
             <button
-              onClick={() => setCurrentView("dashboard")}
+              onClick={() => navigate({ to: "/" })}
               className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
             >
               <ArrowLeft className="size-3.5" />
@@ -72,7 +73,7 @@ export function ImportFlow() {
         }
       />
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto p-6">
         {discoveredRepos.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <p className="text-sm text-muted-foreground">
@@ -93,6 +94,6 @@ export function ImportFlow() {
           </div>
         )}
       </div>
-    </>
+    </div>
   );
 }

@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { ProjectCard } from "./ProjectCard";
@@ -7,11 +8,32 @@ import { PageHeader } from "../layout/AppShell";
 import { Plus } from "lucide-react";
 
 export function Dashboard() {
+  const navigate = useNavigate();
   const projects = useAppStore((s) => s.projects);
   const isLoading = useAppStore((s) => s.isLoading);
   const setSelectedProject = useAppStore((s) => s.setSelectedProject);
+  const setDetailTab = useAppStore((s) => s.setDetailTab);
+  const setPendingAgentStart = useAppStore((s) => s.setPendingAgentStart);
   const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } =
     useProjects();
+
+  /** Navigate to a project's detail view. */
+  const handleSelect = (path: string) => {
+    const project = projects.find((p) => p.path === path);
+    if (project) setSelectedProject(project);
+    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
+  };
+
+  /** Start the agent from the dashboard: navigate to the project on the Agent
+   *  tab and signal AgentPanel to auto-fire `agent_start_loop` on mount. */
+  const handleStart = (path: string) => {
+    const project = projects.find((p) => p.path === path);
+    if (!project) return;
+    setSelectedProject(project);
+    setDetailTab("agent");
+    setPendingAgentStart(path);
+    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
+  };
 
   const handleScan = async () => {
     try {
@@ -51,7 +73,7 @@ export function Dashboard() {
   const activeCount = projects.filter((p) => p.status === "active").length;
 
   return (
-    <>
+    <div className="flex-1 flex flex-col min-h-0">
       <PageHeader
         title="Dashboard"
         subtitle={`${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`}
@@ -65,21 +87,22 @@ export function Dashboard() {
           </button>
         }
       />
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto p-6">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {projects.map((project) => (
             <ProjectCard
               key={project.path}
               project={project}
-              onSelect={setSelectedProject}
+              onSelect={() => handleSelect(project.path)}
               onOpenInFinder={openInFinder}
               onOpenInTerminal={openInTerminal}
               onRemove={removeProject}
               onRescan={rescanProject}
+              onStart={handleStart}
             />
           ))}
         </div>
       </div>
-    </>
+    </div>
   );
 }

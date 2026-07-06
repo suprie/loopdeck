@@ -1,38 +1,63 @@
 import { useCallback } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useAppStore } from "../store/appStore";
 import * as api from "../lib/tauri";
 import type { AppError } from "../types";
 
 /**
  * Hook providing async operations for project management.
- * All IPC calls go through typed wrappers in lib/tauri.ts.
- * Loading/error state is managed via the Zustand store.
+ *
+ * Navigation after side-effecting operations (scan → import, import → dashboard,
+ * remove → dashboard) now uses `useNavigate()` from TanStack Router instead of
+ * the old Zustand `setCurrentView`.
  */
 export function useProjects() {
+  const navigate = useNavigate();
   const setProjects = useAppStore((s) => s.setProjects);
+  const setSelectedProject = useAppStore((s) => s.setSelectedProject);
   const setScanning = useAppStore((s) => s.setScanning);
   const setLoading = useAppStore((s) => s.setLoading);
   const setDiscoveredRepos = useAppStore((s) => s.setDiscoveredRepos);
-  const setCurrentView = useAppStore((s) => s.setCurrentView);
   const setError = useAppStore((s) => s.setError);
   const addProject = useAppStore((s) => s.addProject);
   const removeProjectByPath = useAppStore((s) => s.removeProjectByPath);
   const updateProjectInStore = useAppStore((s) => s.updateProject);
   const updateProjectDescription = useAppStore((s) => s.updateProjectDescription);
 
-  /** Load all projects from the global config on app startup. */
+  /** Load all projects from the global config on app startup.
+   *
+   * After loading, reconciles the persisted `selectedProject` against the fresh
+   * list: if the selected project no longer exists (removed in another session,
+   * path moved/deleted), the selection is cleared. If it still exists, the
+   * stored copy is refreshed with current git info.
+   */
   const loadProjects = useCallback(async () => {
     setLoading(true);
     try {
       const projects = await api.listProjects();
       setProjects(projects);
+
+      // Reconcile persisted selection against the freshly-loaded list.
+      const selected = useAppStore.getState().selectedProject;
+      if (selected) {
+        const fresh = projects.find((p) => p.path === selected.path);
+        if (!fresh) {
+          setSelectedProject(null);
+        } else if (
+          fresh.last_commit_date !== selected.last_commit_date ||
+          fresh.last_modified !== selected.last_modified ||
+          fresh.description !== selected.description
+        ) {
+          updateProjectInStore(fresh);
+        }
+      }
     } catch (err) {
       const appErr = err as AppError;
       setError(appErr.message ?? String(err));
     } finally {
       setLoading(false);
     }
-  }, [setProjects, setLoading, setError]);
+  }, [setProjects, setSelectedProject, setLoading, setError, updateProjectInStore]);
 
   /** Scan a directory for discoverable repositories. */
   const scanFolder = useCallback(
@@ -42,7 +67,7 @@ export function useProjects() {
       try {
         const repos = await api.scanDirectory(path);
         setDiscoveredRepos(repos);
-        setCurrentView("import");
+        navigate({ to: "/import" });
       } catch (err) {
         const appErr = err as AppError;
         setError(appErr.message ?? String(err));
@@ -50,7 +75,7 @@ export function useProjects() {
         setScanning(false);
       }
     },
-    [setScanning, setError, setDiscoveredRepos, setCurrentView],
+    [setScanning, setError, setDiscoveredRepos, navigate],
   );
 
   /** Import a discovered repository into the registry. */
@@ -61,7 +86,7 @@ export function useProjects() {
       try {
         const entry = await api.importProject(path);
         addProject(entry);
-        setCurrentView("dashboard");
+        navigate({ to: "/" });
         return entry;
       } catch (err) {
         const appErr = err as AppError;
@@ -71,7 +96,7 @@ export function useProjects() {
         setLoading(false);
       }
     },
-    [setLoading, setError, addProject, setCurrentView],
+    [setLoading, setError, addProject, navigate],
   );
 
   /** Remove a project from the registry. */
@@ -82,7 +107,7 @@ export function useProjects() {
       try {
         await api.removeProject(path);
         removeProjectByPath(path);
-        setCurrentView("dashboard");
+        navigate({ to: "/" });
       } catch (err) {
         const appErr = err as AppError;
         setError(appErr.message ?? String(err));
@@ -90,7 +115,7 @@ export function useProjects() {
         setLoading(false);
       }
     },
-    [setLoading, setError, removeProjectByPath, setCurrentView],
+    [setLoading, setError, removeProjectByPath, navigate],
   );
 
   /** Update a project's description. */

@@ -2,6 +2,7 @@ mod agents;
 mod claude_session;
 mod commands;
 mod config;
+mod conversation;
 mod error;
 mod git;
 mod memory;
@@ -47,6 +48,12 @@ pub fn run() {
             commands::get_loops,
             commands::get_agent_config,
             commands::set_agent_config,
+            commands::agent_start_loop,
+            commands::agent_start_loop_streaming,
+            commands::agent_send_message,
+            commands::agent_send_message_streaming,
+            commands::agent_get_conversation,
+            commands::agent_reset_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

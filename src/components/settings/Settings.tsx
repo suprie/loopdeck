@@ -103,7 +103,7 @@ export function Settings() {
         subtitle="Configure your AI agent provider"
       />
 
-      <div className="flex-1 overflow-y-auto px-6 py-6">
+      <div className="flex-1 min-h-0 overflow-y-auto px-6 py-6">
         <div className="max-w-xl space-y-8">
           {/* Agent Configuration Section */}
           <section>
