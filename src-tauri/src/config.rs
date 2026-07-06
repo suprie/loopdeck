@@ -35,12 +35,20 @@ impl std::fmt::Debug for AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+/// High-level project status. Serialized to lowercase strings for the
+/// frontend (matching `RunState`). Aliases accept the legacy PascalCase
+/// form so configs written before this normalization still deserialize.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum ProjectStatus {
     #[default]
+    #[serde(alias = "Active")]
     Active,
+    #[serde(alias = "Archived")]
     Archived,
+    #[serde(alias = "NonActive")]
     NonActive,
+    #[serde(alias = "Warning")]
     Warning,
 }
 

@@ -157,9 +157,11 @@ export const ProjectCard = memo(function ProjectCard({
           {monogram}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1">
-            <h3 className="truncate text-sm font-semibold tracking-tight">{project.name}</h3>
-            <ArrowUpRight className="size-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+          <div className="flex items-start gap-1">
+            <h3 className="break-words text-sm font-semibold leading-tight tracking-tight">
+              {project.name}
+            </h3>
+            <ArrowUpRight className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
           </div>
           <p className="text-[11px] text-muted-foreground">
             {project.last_opened ? `Opened ${relativeTime(project.last_opened)}` : "Never opened"}
@@ -223,9 +225,14 @@ export const ProjectCard = memo(function ProjectCard({
 
         {/* Current loop */}
         {project.current_loop && (
-          <div className="flex items-center gap-2 text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
             <RotateCw className="size-3 shrink-0" />
-            <span className="text-foreground/80">Current loop</span> · {project.current_loop}
+            <span className="text-foreground/80">Current loop</span> ·{" "}
+            <span className="truncate">
+              {project.current_loop.length > 100
+                ? `${project.current_loop.slice(0, 100)}…`
+                : project.current_loop}
+            </span>
           </div>
         )}
       </div>

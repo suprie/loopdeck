@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
@@ -17,9 +16,6 @@ export function Dashboard() {
   const setPendingAgentStart = useAppStore((s) => s.setPendingAgentStart);
   const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } =
     useProjects();
-
-  /** Demo toggle: preview the empty state without removing data. */
-  const [previewEmpty, setPreviewEmpty] = useState(false);
 
   /** Navigate to a project's detail view. */
   const handleSelect = (path: string) => {
@@ -63,11 +59,9 @@ export function Dashboard() {
     );
   }
 
-  const showEmpty = projects.length === 0 || previewEmpty;
+  const showEmpty = projects.length === 0;
   const activeCount = projects.filter((p) => p.status === "active").length;
-  const subtitle = previewEmpty
-    ? "Previewing empty state"
-    : `${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`;
+  const subtitle = `${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`;
 
   return (
     <div className="flex flex-1 flex-col min-h-0">
@@ -76,15 +70,6 @@ export function Dashboard() {
         subtitle={subtitle}
         actions={
           <>
-            {projects.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setPreviewEmpty((s) => !s)}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                {previewEmpty ? "Show projects" : "Preview empty state"}
-              </button>
-            )}
             <button
               type="button"
               onClick={handleScan}

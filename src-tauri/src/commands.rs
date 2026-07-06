@@ -191,6 +191,14 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
         }
 
         entry.current_loop = project::read_current_loop(entry.path.as_path());
+
+        // Recompute status from the (possibly refreshed) git dates so the
+        // Dashboard reflects current freshness without a manual rescan.
+        let before = entry.status;
+        config::update_project_status(entry);
+        if entry.status != before {
+            changed = true;
+        }
     }
 
     if changed {
