@@ -417,6 +417,8 @@ pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
 
     #[cfg(target_os = "linux")]
     {
+        use std::os::unix::process::CommandExt; // enables Command::process_group()
+
         // Try common terminal emulators. Path is passed as a distinct argv,
         // never concatenated into a shell string.
         let terminals = [
@@ -430,13 +432,12 @@ pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
 
         let mut spawned = false;
         for term in &terminals {
-            if let Ok(mut child) = std::process::Command::new(term)
-                .arg("--working-directory")
-                .arg(&path_str)
-                .spawn()
-            {
-                // Don't wait — let the terminal run independently.
-                let _ = child.process_group();
+            let mut cmd = std::process::Command::new(term);
+            cmd.arg("--working-directory").arg(&path_str);
+            // Detach the terminal into its own process group so it keeps running
+            // independently of LoopDeck (won't receive SIGHUP when we exit).
+            cmd.process_group(0);
+            if cmd.spawn().is_ok() {
                 spawned = true;
                 break;
             }
