@@ -18,6 +18,26 @@ export interface DiscoveredRepo {
 /** Project status from Rust ProjectStatus enum. */
 export type ProjectStatus = "active" | "archived" | "nonactive" | "warning";
 
+/**
+ * Live agent run state for a project, derived per `list_projects` call from
+ * the in-flight session + any pending manual approval / AskUserQuestion.
+ * Mirrors Rust `RunState` (serde `rename_all = "lowercase"`).
+ *
+ * - `idle` — no live session, or session exists but no turn is in flight.
+ * - `working` — a streaming agent turn is in flight right now.
+ * - `waiting` — the in-flight turn is parked awaiting the user (a manual
+ *   permission approval or an `AskUserQuestion` answer).
+ * - `done` — surfaced by the frontend when a turn just finished (transient).
+ */
+export type RunState = "idle" | "working" | "waiting" | "done";
+
+/** Aggregate diff stats for an uncommitted working tree. Mirrors Rust struct. */
+export interface UncommittedStats {
+  files: number;
+  added: number;
+  deleted: number;
+}
+
 /** A registered project entry from the global config. */
 export interface ProjectEntry {
   path: string;
@@ -34,6 +54,12 @@ export interface ProjectEntry {
   last_commit_message: string | null;
   /** ISO 8601 timestamp of the most recently modified file. */
   last_modified: string | null;
+  /** Uncommitted working-tree diff stats (refreshed on startup/rescan). Older
+   *  configs without this field load as all-zero. */
+  uncommitted: UncommittedStats;
+  /** Live agent run state — derived at read time, not persisted. Older configs
+   *  without this field load as `idle`. */
+  run_state: RunState;
 }
 
 /** Content of .loopdeck/project.yaml. */
@@ -67,9 +93,6 @@ export interface AgentConfig {
   model?: string;
   effort?: string;
 }
-
-/** Internal app view routing. */
-export type AppView = "dashboard" | "import" | "detail" | "settings" | "agent" | "activity" | "decisions" | "loops";
 
 /** A single architectural decision record from .loopdeck/decisions.md. */
 export interface Decision {

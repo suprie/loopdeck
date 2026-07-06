@@ -44,6 +44,48 @@ pub enum ProjectStatus {
     Warning,
 }
 
+/// Aggregate uncommitted change stats for a project's working tree. Mirrors
+/// `git::UncommittedStats` but defined here to avoid a circular dependency
+/// (`git` doesn't depend on `config`, and serde serializes this 1:1).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct UncommittedStats {
+    #[serde(default)]
+    pub files: u32,
+    #[serde(default)]
+    pub added: u32,
+    #[serde(default)]
+    pub deleted: u32,
+}
+
+impl From<crate::git::UncommittedStats> for UncommittedStats {
+    fn from(s: crate::git::UncommittedStats) -> Self {
+        Self {
+            files: s.files,
+            added: s.added,
+            deleted: s.deleted,
+        }
+    }
+}
+
+/// Live agent run state for a project. Ephemeral — derived from `AppState`
+/// (live session + pending approvals/questions) on each `list_projects` call,
+/// not persisted to YAML. Serializes to lowercase strings for the frontend.
+///
+/// - `Idle` — no live session, or session exists but no turn is in flight.
+/// - `Working` — a streaming agent turn is in flight right now.
+/// - `Waiting` — the in-flight turn is parked awaiting the user (a manual
+///   permission approval or an `AskUserQuestion` answer).
+/// - `Done` — the most recent turn finished recently (transient UI affordance).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunState {
+    #[default]
+    Idle,
+    Working,
+    Waiting,
+    Done,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub path: PathBuf,
@@ -65,6 +107,39 @@ pub struct ProjectEntry {
     /// ISO 8601 timestamp of the most recently modified file (refreshed on startup).
     #[serde(default)]
     pub last_modified: Option<String>,
+    /// Uncommitted working-tree diff stats (refreshed on startup/rescan).
+    /// Older configs without this field deserialize to all-zero.
+    #[serde(default)]
+    pub uncommitted: UncommittedStats,
+    /// Live agent run state. Ephemeral — derived at read time, not persisted.
+    /// Older configs without this field deserialize to `Idle`.
+    #[serde(default, skip_serializing_if = "is_run_state_idle")]
+    pub run_state: RunState,
+}
+
+/// serde `skip_serializing_if` predicate: omit `run_state` when `Idle` so the
+/// ephemeral field doesn't clutter the persisted YAML.
+fn is_run_state_idle(state: &RunState) -> bool {
+    matches!(state, RunState::Idle)
+}
+
+impl Default for ProjectEntry {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            name: String::new(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            current_loop: None,
+            last_opened: None,
+            created_at: Utc::now(),
+            last_commit_date: None,
+            last_commit_message: None,
+            last_modified: None,
+            uncommitted: UncommittedStats::default(),
+            run_state: RunState::Idle,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +314,7 @@ mod tests {
                 last_commit_message: None,
                 last_modified: None,
                 current_loop: None,
+                ..Default::default()
             }],
             settings: Settings::default(),
         };
@@ -269,6 +345,7 @@ mod tests {
             last_commit_message: None,
             last_modified: None,
             current_loop: None,
+            ..Default::default()
         };
 
         config.add_project(entry).unwrap();
@@ -286,6 +363,7 @@ mod tests {
             last_commit_message: None,
             last_modified: None,
             current_loop: None,
+            ..Default::default()
         };
         assert!(config.add_project(dup).is_err());
 
@@ -334,6 +412,7 @@ mod tests {
             last_commit_message: None,
             last_modified,
             current_loop: None,
+            ..Default::default()
         }
     }
 
@@ -546,5 +625,48 @@ projects:
         };
         let debug_no_token = format!("{:?}", agent_no_token);
         assert!(debug_no_token.contains("None"));
+    }
+
+    // ── RunState / UncommittedStats tests ──
+
+    #[test]
+    fn test_run_state_idle_not_serialized() {
+        // Idle run_state should be skipped in YAML so ephemeral state never
+        // pollutes the persisted config.
+        let entry = ProjectEntry {
+            path: PathBuf::from("/tmp/x"),
+            name: "X".into(),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&entry).unwrap();
+        assert!(!yaml.contains("run_state"));
+    }
+
+    #[test]
+    fn test_run_state_working_serializes_lowercase() {
+        let mut entry = ProjectEntry {
+            path: PathBuf::from("/tmp/x"),
+            name: "X".into(),
+            ..Default::default()
+        };
+        entry.run_state = RunState::Working;
+        let yaml = serde_yaml::to_string(&entry).unwrap();
+        assert!(yaml.contains("run_state: working"));
+    }
+
+    #[test]
+    fn test_uncommitted_stats_default_round_trip() {
+        // Old configs without `uncommitted` / `run_state` should still parse.
+        let yaml = r#"
+path: /tmp/legacy
+name: Legacy
+description: ""
+status: Active
+last_opened: null
+created_at: "2025-01-01T00:00:00Z"
+"#;
+        let entry: ProjectEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.uncommitted, UncommittedStats::default());
+        assert_eq!(entry.run_state, RunState::Idle);
     }
 }

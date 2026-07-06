@@ -1,7 +1,7 @@
 use crate::agents::AgentResponse;
 use crate::agents::ClaudeEvent;
 use crate::claude_session::{ClaudeSession, InterruptSlot, PermissionSlot, QuestionAnswers, QuestionSlot};
-use crate::config::{self, AgentConfig, GlobalConfig, ProjectEntry, ProjectStatus};
+use crate::config::{self, AgentConfig, GlobalConfig, ProjectEntry, ProjectStatus, RunState};
 use crate::conversation::{self, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
 use crate::git;
@@ -140,6 +140,8 @@ pub async fn import_project(
         last_commit_date: git_info.last_commit_date,
         last_commit_message: git_info.last_commit_message,
         last_modified: git_info.last_modified,
+        uncommitted: git_info.uncommitted.into(),
+        run_state: RunState::Idle,
     };
 
     {
@@ -180,6 +182,11 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
             entry.last_commit_message = git_info.last_commit_message;
             changed = true;
         }
+        let fresh_uncommitted: config::UncommittedStats = git_info.uncommitted.into();
+        if entry.uncommitted != fresh_uncommitted {
+            entry.uncommitted = fresh_uncommitted;
+            changed = true;
+        }
 
         entry.current_loop = project::read_current_loop(entry.path.as_path());
     }
@@ -188,7 +195,12 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
         config.save()?;
     }
 
-    Ok(config.projects.clone())
+    // Derive ephemeral run_state per project from live session + pending slots.
+    // Done after the save so transient state never reaches disk.
+    let mut out = config.projects.clone();
+    derive_run_states(&state, &mut out);
+
+    Ok(out)
 }
 
 /// Get the global agent configuration.
@@ -445,11 +457,17 @@ pub async fn rescan_project(
     let git_info = git::check_git_info(&entry.path);
     entry.last_commit_date = git_info.last_commit_date.clone();
     entry.last_modified = git_info.last_modified.clone();
+    entry.uncommitted = git_info.uncommitted.into();
 
     config::update_project_status(entry);
 
-    let result = entry.clone();
+    let mut result = entry.clone();
     config.save()?;
+
+    // Stamp the ephemeral run_state before returning so callers see the truth.
+    let mut single = vec![result];
+    derive_run_states(&state, &mut single);
+    result = single.into_iter().next().unwrap();
 
     info!("rescan_project complete for: {path}");
     Ok(result)
@@ -1160,6 +1178,69 @@ fn interrupt_slot(state: &AppState, path: &Path) -> Result<InterruptSlot, AppErr
         .entry(path.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(None)))
         .clone())
+}
+
+/// Derive the ephemeral `RunState` for each project from live `AppState`.
+///
+/// Strict live state (no recency heuristic):
+/// - `Waiting` — there is a pending manual-approval (`pending_permissions`) or
+///   a pending `AskUserQuestion` (`pending_answers`) for the project path. The
+///   in-flight turn is parked awaiting the user.
+/// - `Working` — a `claude_sessions` entry exists for the path AND its inner
+///   `tokio::Mutex` is currently held (a turn is streaming). We check by
+///   `try_lock`; success ⇒ idle, failure ⇒ busy.
+/// - `Idle` — no live session, or session exists but no turn is in flight.
+///
+/// Note: `Done` is intentionally never set here. We don't track "last turn
+/// finished at" timestamps globally; the frontend derives its own transient
+/// "done" affordance from streaming-result events if desired.
+fn derive_run_states(state: &AppState, projects: &mut [ProjectEntry]) {
+    // Snapshot the pending-slot keys without holding the locks across the
+    // (potentially async-blocking) inner session `try_lock`.
+    let pending_paths: std::collections::HashSet<PathBuf> = {
+        let perms = state.pending_permissions.lock().map_err(|_| AppError::LockError);
+        let answers = state.pending_answers.lock().map_err(|_| AppError::LockError);
+        let (Ok(perms), Ok(answers)) = (perms, answers) else {
+            // If we can't observe pending state, leave everything as-is.
+            return;
+        };
+        perms.keys().chain(answers.keys()).cloned().collect()
+    };
+
+    // Snapshot live session keys so we don't hold the outer map lock across awaits.
+    let live_paths: std::collections::HashSet<PathBuf> = {
+        let Ok(sessions) = state.claude_sessions.lock() else {
+            return;
+        };
+        sessions.keys().cloned().collect()
+    };
+
+    for entry in projects.iter_mut() {
+        if pending_paths.contains(&entry.path) {
+            entry.run_state = RunState::Waiting;
+            continue;
+        }
+        if !live_paths.contains(&entry.path) {
+            entry.run_state = RunState::Idle;
+            continue;
+        }
+
+        // Entry exists in the session map. Try to acquire its inner lock without
+        // blocking: failure ⇒ held by a streaming turn ⇒ Working. We re-lock
+        // the outer map briefly to clone the Arc. The outer guard is held only
+        // over the synchronous lookup, never across an `.await`.
+        let session_arc = state
+            .claude_sessions
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&entry.path).cloned());
+
+        let busy = match session_arc {
+            Some(arc) => arc.try_lock().is_err(),
+            None => false,
+        };
+        entry.run_state = if busy { RunState::Working } else { RunState::Idle };
+    }
 }
 
 /// Shared send pipeline used by `agent_start_loop` and `agent_send_message`.
