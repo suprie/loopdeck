@@ -83,10 +83,12 @@ function RunButton({
   state,
   onClick,
 }: {
-  state: RunState;
+  state: RunState | undefined;
   onClick: (e: React.MouseEvent) => void;
 }) {
-  const cfg = RUN_CONFIG[state];
+  // Defensive: older backends may not emit `run_state`, and any unknown value
+  // must not blow up the whole card. Fall back to `idle`.
+  const cfg = RUN_CONFIG[state ?? "idle"] ?? RUN_CONFIG.idle;
   const Icon = cfg.icon;
   return (
     <button
