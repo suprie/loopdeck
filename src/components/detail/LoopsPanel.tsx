@@ -3,6 +3,7 @@ import { Repeat, Circle, History, ArrowRight } from "lucide-react";
 import type { LoopStatus, Loop } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
+import { Markdown } from "../shared/Markdown";
 
 interface LoopsPanelProps {
   projectPath: string;
@@ -47,9 +48,9 @@ function LoopCard({ loop, isCurrent }: { loop: Loop; isCurrent?: boolean }) {
           </span>
         )}
       </div>
-      <h3 className="text-sm font-semibold text-foreground leading-snug">
-        {loop.goal}
-      </h3>
+      <div className="text-sm font-semibold text-foreground leading-snug">
+        <Markdown>{loop.goal}</Markdown>
+      </div>
     </div>
   );
 }
@@ -131,10 +132,12 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
                 {status.next_steps.map((step, i) => (
                   <li
                     key={i}
-                    className="flex items-center gap-2 text-sm text-foreground leading-relaxed"
+                    className="flex items-start gap-2 text-sm text-foreground leading-relaxed"
                   >
-                    <Circle size={8} className="text-muted-foreground shrink-0 mt-0.5" />
-                    {step}
+                    <Circle size={8} className="text-muted-foreground shrink-0 mt-[7px]" />
+                    <div className="flex-1 min-w-0">
+                      <Markdown>{step}</Markdown>
+                    </div>
                   </li>
                 ))}
               </ul>

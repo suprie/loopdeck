@@ -3,6 +3,7 @@ import { Lightbulb } from "lucide-react";
 import type { Decision } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
+import { Markdown } from "../shared/Markdown";
 
 interface DecisionsPanelProps {
   projectPath: string;
@@ -105,17 +106,17 @@ export function DecisionsPanel({ projectPath }: DecisionsPanelProps) {
             <h3 className="text-sm font-semibold text-foreground mb-2">
               {decision.title}
             </h3>
-            <p className="text-xs text-foreground/80 leading-relaxed mb-2">
-              {decision.context}
-            </p>
+            <div className="text-xs text-foreground/80 leading-relaxed mb-2">
+              <Markdown>{decision.context}</Markdown>
+            </div>
             {decision.consequences && (
               <div className="mt-2 p-3 rounded-lg bg-surface border-l-[3px] border-l-[var(--primary)]">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--primary)] block mb-1">
                   Consequences
                 </span>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  {decision.consequences}
-                </p>
+                <div className="text-xs text-muted-foreground leading-relaxed">
+                  <Markdown>{decision.consequences}</Markdown>
+                </div>
               </div>
             )}
           </div>
