@@ -2,40 +2,158 @@
 
 ## Current
 
-- **Started**: 2026-07-02
-- **Goal**: Persistent Claude agent sessions via `ClaudeSession` — spawn `claude
-  --input-format stream-json` once per project and keep stdin open so multi-turn
-  context lives inside the process (no per-turn `--resume`). Foundation for the
-  in-app agent chat UI. See [docs/researchs/agent-spawn.md](../../docs/researchs/agent-spawn.md)
-  and [docs/researchs/agent-spawn-implementation.md](../../docs/researchs/agent-spawn-implementation.md).
-- **Status**: completed
-- **Completed**: 2026-07-03
+- **Started**: 2026-07-05
+- **Goal**: Make LoopDeck production-ready. Phase 1 (security stop-the-bleeding)
+  is done; Phases 2-6 remain — distribution, hardening, quality gates, docs/policy,
+  and UX polish. Audit was a three-pronged review (Rust backend, React frontend,
+  ops/tooling) that produced the action items below.
+- **Status**: in_progress
 
 ## Next Steps
-- [x] Add stderr-drain task (`tokio::spawn` reading claude stderr line-by-line) so verbose output doesn't deadlock; `Stdio::null()` replaced with piped + drained via background task logging at debug level
-- [x] Wrap `send_message` in `tokio::time::timeout` (180s) so a stuck peer fails loudly instead of hanging the caller
-- [x] Replace single session slot with `Mutex<HashMap<PathBuf, ClaudeSession>>` keyed by project (parallel across projects, serial within) — landed in `commands.rs` `AppState` (commit `ce0935c`)
-- [x] Add per-project turn lock (`Arc<tokio::sync::Mutex<ClaudeSession>>`) so concurrent sends to the same project queue rather than spawning duplicate processes — two-layer lock model: outer `std::sync::Mutex` (map, microseconds) + inner per-project `tokio::sync::Mutex` (full turn)
-- [x] Build `with_session` helper (get-or-spawn + return locked Arc; Arc stays in the map keeping the process alive)
-- [x] Wire `agent_send_message(project_path, prompt)` Tauri command on top of `with_session` — plus `agent_start_loop`, `agent_get_conversation`, `agent_reset_session`, a shared `send_and_record` pipeline, and `build_next_loop_prompt`
-- [x] Streaming variant: `ClaudeEvent` enum + `send_message_streaming` emitting via Tauri `Channel<T>`
-- [x] Frontend chat UI (net-new — no `listen()`/Channel/Chat component exists yet)
-- [x] Add Agent Runner view (`/agent`) — terminal-based AI agent runner UI
-- [x] Add Activity Feed view (`/activity`) — chronological event feed
-- [x] Add standalone Decisions page (currently only accessible via project detail)
-- [x] Add standalone Next Loop page (currently only accessible via project detail)
-- [x] Add TanStack Router for proper client-side routing (replace Zustand view switching)
-- [ ] Add shadcn/ui component library for polished UI primitives
-- [ ] Add keyboard shortcut (⌘K) command palette
-- [ ] Add unit tests for status derivation logic (0 days, 6 days, 7 days, 30 days, 31+ days, no git)
-- [ ] Run `npm run tauri dev` to verify UI renders correctly with color-coded status badges
-- [ ] Consider: should status also update on `list_projects` (not just rescan)?
-- [ ] Cross-platform testing
+
+### P2 — Distribution (signing / notarization / updater)
+- [ ] Configure macOS signing identity in `tauri.conf.json` (`bundle.macOS.signingIdentity`) + Windows `certificateThumbprint`/`tsp` server; feed via CI secrets
+- [ ] Notarization: wire `APPLE_ID` / `APPLE_PASSWORD` / team ID into the macOS release pipeline
+- [ ] Updater: add `tauri-plugin-updater` config (`pubkey` + `endpoints`) and a `TAURI_SIGNING_PRIVATE_KEY`-based release workflow
+- [ ] Release CI: `tauri-apps/tauri-action` workflow producing signed `.dmg` / `.msi` / `.AppImage` + signed `latest.json`
+- [ ] Bundle metadata: fill in `bundle.publisher`, `bundle.category`, `bundle.copyright`, `bundle.shortDescription`
+
+### P3 — Hardening (correctness, robustness, secret hygiene)
+- [ ] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
+- [ ] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they currently run sync walkdir + git subprocess spawning inside `async` Tauri commands
+- [ ] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — move to `spawn_blocking` or kill+detach with tokio `wait`
+- [ ] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs:202`, `git.rs:68,91,114,144,162`) to defeat PATH hijack
+- [ ] Add a top-level React error boundary above `<App>` in `main.tsx` — pre-router crashes currently blank-screen with no recovery
+- [ ] Audit `expect()`/`unwrap()` under `panic = "abort"`; in particular `skills.rs:362` (a malformed user `settings.json` aborts the process on import) and `lib.rs:77`
+- [ ] Add an absolute per-turn deadline or parked-slot expiry (`claude_session.rs`) — parked turns currently hold the per-project lock indefinitely
+- [ ] Cap unbounded accumulation in `ResponseAccumulator` (`agents.rs:603-625`) — abort past a block/byte limit
+- [ ] Cap log retention in `logging.rs` (daily rolling appender grows forever); confirm no `auth_token` is ever logged
+- [ ] Replace `eprintln!` diagnostics in `project.rs:43,76,172` with `tracing::debug!`
+- [ ] Strengthen `check_destructive_floor` further: prefix deny-list is now argv-analyzed, but `mv`/`cp` targeting `/`, `/etc`, `/usr`, `$HOME` root are still best-effort
+- [ ] Reconcile the `claude_session.rs:218-224` doc comment ("default") with the actual `--permission-mode acceptEdits` arg
+
+### P4 — Quality gates (CI, lint, tests)
+- [ ] CI: `.github/workflows/ci.yml` running `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm ci`, `tsc --noEmit`, `npm run build` on macOS/Linux/Windows matrices
+- [ ] Frontend lint/format: ESLint + @typescript-eslint + eslint-plugin-react-hooks + Prettier; add `npm run lint`
+- [ ] Rust lint/format: `rustfmt.toml` + `clippy.toml`; enforce `-D warnings`
+- [ ] Frontend tests: vitest + @testing-library/react — prioritize `streamingState`, `groupLoopRuns`, the IPC wire-conversion in `tauri.ts:216-235`, and the streaming-turn lifecycle
+- [ ] E2E: `@tauri-apps/driver` + WebdriverIO smoke covering scan → import → edit
+- [ ] Dependabot + `cargo audit` + `npm audit` in CI; pin toolchain (`engines`, `packageManager`, `rust-toolchain.toml`)
+- [ ] Type-narrow Tauri IPC at the boundary (zod/valibot); assert-never on the `ClaudeEvent.type` switch
+- [ ] Pre-commit hook wiring the lint/format checks above
+- [ ] SBOM / license check (`cargo bundle-licenses`) in CI
+
+### P5 — Docs & policy
+- [ ] Add `LICENSE` (MIT) + `license` field in `package.json` and `Cargo.toml`
+- [ ] Add `SECURITY.md` documenting the agent threat model (subprocess spawn, `acceptEdits`, allow-by-default + destructive floor) and vuln-reporting policy
+- [ ] Add `CONTRIBUTING.md` (dev setup, commit style, branch model, PR checklist, `.loopdeck/` memory convention)
+- [ ] Refresh README/CLAUDE — they claim "no agents" but the code has a full agent runtime with 29 IPC commands; fix the stale "30 tests" count (now 188)
+- [ ] `git rm --cached .DS_Store .claude -r` (both tracked despite being in `.gitignore`)
+- [ ] Move `docs/researchs/*.json` (~220KB captured provider payloads) to LFS or an external artifact store
+- [ ] Add `.env.example` (DONE in Phase 1) — keep in sync as new env vars are introduced
+- [ ] Architecture doc + user install guide: `docs/architecture.md`, `docs/USER_GUIDE.md`
+- [ ] `CHANGELOG.md` (or generate via release tooling)
+
+### P6 — UX polish (a11y, i18n, perf)
+- [ ] A11y: replace the hand-rolled history dropdown with Radix `Popover`/`DropdownMenu` (`AgentPanel.tsx:852-905`) — gives focus trap, Esc, roving focus, ARIA
+- [ ] A11y: give `AskUserQuestionCard`/`PermissionApprovalCard` real `role="radio"`/`role="checkbox"` + keyboard nav (`Chat.tsx:622-879`); currently glyphs (`●`/`○`) are the only state indicator
+- [ ] A11y: `aria-live="polite"` on the streaming region; `aria-label` on the send button
+- [ ] A11y: visually-hidden native `<input type="checkbox">` for GFM task-list items (`Markdown.tsx:73-87`)
+- [ ] i18n scaffolding (react-intl/i18next) — every user-facing string is currently a hardcoded English literal
+- [ ] Chat perf: `useMemo` `groupLoopRuns`, memoize completed `TurnBubble`, virtualize the transcript (`@tanstack/react-virtual`)
+- [ ] Throttle `streamingState` delta writes (currently O(blocks) per token; use `useSyncExternalStore` selector + rAF)
+- [ ] Auto-scroll: only stick-to-bottom when the user is already near the bottom (`Chat.tsx:921-925`)
+- [ ] Persist only `selectedProject.path` in Zustand (not the full `ProjectEntry`) to avoid schema drift
+- [ ] Move module-level mutable `lastSelectedPath` (`AgentRunner.tsx:30`) into the Zustand store
+- [ ] Wire or remove the dead `cmdk` dependency; remove the misleading `⌘K` hint (`AppShell.tsx:152`)
+- [ ] Fetch model presets from backend/config instead of hardcoding model IDs (`Settings.tsx:24-29`)
+- [ ] Verify `lucide-react ^1.21.0` is the intended major (current major is much higher — likely a typo)
+- [ ] Consolidate the three divergent relative-time formatters (`lib/time.ts`, `AgentPanel.tsx:53-70`, `Chat.tsx:96-102`)
+- [ ] Add source-map strategy for prod error reporting; inject `__APP_VERSION__` via Vite `define`
 
 ## Parking Lot
 - [ ] **Move agent control into LoopDeck app** — When LoopDeck can spawn/manage AI agents from within the app (not just the terminal), it should own all agent configuration: CLAUDE.md, skills, hooks, and memory conventions. The current `.claude/settings.local.json` hooks (PreToolUse dirty flag, Stop hook reminder) are temporary workarounds that only work in the Claude Code terminal context. Once LoopDeck controls the agent runtime, it can intelligently decide when to prompt for memory updates, apply project-specific instructions, and manage skills — without relying on external hook files.
+- [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
 ## History
+
+### 2026-07-05 — Phase 1: Stop the bleeding (security)
+
+- **Status**: completed
+- **Completed**: 2026-07-05
+
+Closed the critical/high security findings from the production-readiness audit.
+Reframing documented for future readers: `permission.rs` already parks
+`Bash`/`Edit`/`Write`/`NotebookEdit`/`WebFetch`/MCP on a manual-approval card
+(`MANUAL_APPROVAL_TOOLS`), so the user *is* in the loop for mutating tools; the
+"allow-by-default" only governs read-only tools. The destructive floor is the
+backstop for when a user clicks "Allow" without reading — that's what got
+strengthened, rather than flipping the whole posture.
+
+**Changes.**
+
+- **Leaked API key removed from source.** `sk-64a72…` was hardcoded in
+  `claude_session.rs` test_config and a dead commented block in `agents.rs`.
+  `test_config()` now reads `LOOPDECK_TEST_AUTH_TOKEN` from env (also
+  `LOOPDECK_TEST_BASE_URL`/`LOOPDECK_TEST_MODEL`); the dead block was deleted.
+  History scrub intentionally skipped (rotated literal is dead). New
+  `.env.example` documents all runtime + test env vars.
+- **Strict CSP** (`tauri.conf.json`). Was `null`; now `default-src 'self' ipc:
+  http://ipc.localhost`, `script-src 'self'` (no unsafe-inline/eval), only
+  `style-src 'unsafe-inline'` (Tailwind v4 + Radix need it). img/font/data
+  allowlisted minimally.
+- **Shell injection fixed** (`commands.rs`). New `resolve_dir_arg()` canonicalizes
+  and rejects non-directories — used by both `open_in_finder` and
+  `open_in_terminal` (blocks the macOS `open "x-apple-…"` handler trick).
+  macOS terminal launchers no longer interpolate the path into AppleScript —
+  it's passed as a separate `osascript … <path>` argv with `on run argv` +
+  `quoted form of`. Windows dropped `cmd /C "cd /d {path}"` for `cmd /K` +
+  `current_dir()`. Linux was already safe.
+- **Destructive floor strengthened** (`permission.rs`). Was a 5-rule prefix list
+  trivially bypassed (`rm -r -f`, `find -delete`, `ls; rm -rf`, etc.). Now: lex
+  with `shell-words`, quote-aware stage split on `| ; && ||`, walk every stage,
+  peel privilege wrappers (`sudo`/`command`/`exec`/`eval`/…), inspect argv[0] +
+  flags (case-insensitive, short-flag bundling aware). Catches `rm` with
+  recursive+force in any order/form, `find -delete`/`-exec rm`, `dd`, `mkfs*`,
+  `chmod/chown -R`, all force-push variants including `--force-with-lease`,
+  `curl|sh` pipe-to-shell, smuggled pipeline stages, and wrappers. Falls back
+  to legacy prefix rules if parse fails. +13 new tests, all 30 floor tests pass.
+- **Capabilities scoped** (`capabilities/default.json`). `shell:default` →
+  `shell:allow-open` (the only shell function the frontend uses is `open()` in
+  `Markdown.tsx`).
+- **Markdown href allowlist** (`Markdown.tsx`). The `a` override handed any
+  `href` to Tauri `open()`; now only `http:`/`https:`/`mailto:` get through,
+  others drop `href` entirely. Belt-and-braces alongside the CSP.
+
+**Verification.** `cargo test --lib` 188 passed / 0 failed / 7 ignored (was 175
+before; +13 new floor tests). `cargo clippy --all-targets` 0 warnings. `cargo fmt`
+applied. `npm run build` passes (tsc + vite).
+
+**Outstanding from this loop (carried to P2-P6).** Code signing / notarization /
+updater (P2); plaintext token → keychain, `spawn_blocking`, `Drop` blocking,
+absolute-path binary resolution, top-level error boundary (P3). CI, lint, frontend
+tests (P4). LICENSE / SECURITY.md / CONTRIBUTING / README refresh (P5).
+
+Files changed: src-tauri/src/{permission.rs, commands.rs, claude_session.rs,
+agents.rs, Cargo.toml}, src-tauri/{tauri.conf.json, capabilities/default.json},
+src/components/shared/Markdown.tsx, .env.example (new), .loopdeck/loops.md.
+
+### 2026-07-05 — Production readiness audit
+
+- **Status**: completed
+- **Completed**: 2026-07-05
+
+Three-pronged read of the codebase (Rust backend, React frontend, ops/tooling)
+to enumerate what's needed before production. Verdict: not production-ready —
+solid foundation (typed IPC, good Rust test coverage, navigation-stable
+streaming stores) but real blockers in security, distribution, and quality
+gates. Findings fed directly into the Phase 1-6 next-steps list above.
+
+Top blockers surfaced: leaked API key in git history; no CSP; shell injection
+in `open_in_terminal`; over-broad capabilities + PATH-resolved binaries; no
+code signing / notarization / updater; no CI; no LICENSE/SECURITY/CONTRIBUTING;
+zero frontend tests; no markdown sanitization; A11y failures on hand-rolled
+dropdowns and question/approval cards.
 
 ### 2026-07-03 — TanStack Router (replace Zustand view switching)
 

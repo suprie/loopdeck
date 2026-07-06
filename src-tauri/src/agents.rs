@@ -658,7 +658,17 @@ impl ResponseAccumulator {
                         // Capture tool calls for the aggregated response so the
                         // transcript records them. Live streaming still emits
                         // ClaudeEvent::ToolUse separately in send_message_streaming.
+                        //
+                        // `AskUserQuestion` is intentionally NOT persisted as a
+                        // tool_use block: it's surfaced to the user via the
+                        // pinned question card (driven by the
+                        // `ask_user_question` channel event), and a persisted
+                        // `› AskUserQuestion · {json}` row would just be noise
+                        // on reload. Skip both `tool_calls` and `blocks`.
                         ContentBlock::ToolUse { name, input } => {
+                            if name == "AskUserQuestion" {
+                                continue;
+                            }
                             let input_str = input.to_string();
                             self.tool_calls.push(crate::conversation::ToolCallRecord {
                                 name: name.clone(),

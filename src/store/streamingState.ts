@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ClaudeEvent, ContentBlock } from "../types";
+import type { ClaudeEvent, ContentBlock, TaskRecord } from "../types";
 
 /**
  * Per-project in-flight streaming state, lifted OUT of `AgentPanel`'s React
@@ -45,6 +45,23 @@ export interface StreamingState {
   streamingResult: (ClaudeEvent & { type: "result" }) | null;
   /** Error banner text. */
   error: string | null;
+  /**
+   * Live task lifecycle state for the in-flight turn, keyed by task id.
+   *
+   * The agent emits a `task_update` event on every TodoWrite create / update /
+   * complete / delete. The transcript renders each as an arrival-ordered
+   * activity row (good for "what happened when"), but a turn's tasks also want
+   * a *current state* view — "which tasks exist right now and what's their
+   * status?" — which is what the floating TaskPanel shows. We keep the latest
+   * record per id here (last write wins, exactly like the agent's own todo
+   * store), so a created→completed→updated sequence collapses to a single
+   * "completed" row keyed by id, instead of three rows.
+   *
+   * Cleared on turn begin (each turn gets a fresh todo set) and on `clear`.
+   * Not persisted — like the rest of streaming state it's only meaningful for
+   * a live process.
+   */
+  tasks: Record<string, TaskRecord>;
 }
 
 interface StreamingStateMap {
@@ -55,7 +72,7 @@ interface StreamingStateMap {
   get: (path: string) => StreamingState;
 
   // ── Mutations (per-path) ──
-  /** Begin a new turn: busy=true, blocks=[], result=null, error=null. */
+  /** Begin a new turn: busy=true, blocks=[], result=null, error=null, tasks={}. */
   beginTurn: (path: string) => void;
   /** Patch arbitrary fields (used for result, error, busy). */
   patch: (path: string, patch: Partial<StreamingState>) => void;
@@ -65,6 +82,11 @@ interface StreamingStateMap {
   appendTextDelta: (path: string, text: string) => void;
   /** Coalesce a thinking delta into the trailing thinking block. */
   appendThinkingDelta: (path: string, thinking: string) => void;
+  /**
+   * Apply a task lifecycle event: insert-or-replace by id (last write wins).
+   * Deletions remove the id so the panel reflects the agent's own todo state.
+   */
+  applyTask: (path: string, task: TaskRecord) => void;
   /** Clear all streaming state for a path (turn fully done + reloaded). */
   clear: (path: string) => void;
 }
@@ -74,6 +96,7 @@ const EMPTY: StreamingState = {
   streamingBlocks: null,
   streamingResult: null,
   error: null,
+  tasks: {},
 };
 
 export const useStreamingState = create<StreamingStateMap>((set, get) => ({
@@ -90,6 +113,8 @@ export const useStreamingState = create<StreamingStateMap>((set, get) => ({
           streamingBlocks: [],
           streamingResult: null,
           error: null,
+          // Fresh todo set each turn — a new turn's TodoWrite starts clean.
+          tasks: {},
         },
       },
     })),
@@ -99,6 +124,22 @@ export const useStreamingState = create<StreamingStateMap>((set, get) => ({
       const cur = s.byPath[path] ?? EMPTY;
       return {
         byPath: { ...s.byPath, [path]: { ...cur, ...patch } },
+      };
+    }),
+
+  applyTask: (path, task) =>
+    set((s) => {
+      const cur = s.byPath[path] ?? EMPTY;
+      const next = { ...cur.tasks };
+      // `deleted` tasks drop out of the agent's todo list, so mirror that here
+      // — the panel should reflect "what exists now," not "what ever existed."
+      if (task.status === "deleted") {
+        delete next[task.id];
+      } else {
+        next[task.id] = task;
+      }
+      return {
+        byPath: { ...s.byPath, [path]: { ...cur, tasks: next } },
       };
     }),
 

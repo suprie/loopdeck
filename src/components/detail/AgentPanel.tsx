@@ -14,7 +14,8 @@ import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import { useStreamingState } from "../../store/streamingState";
-import { Chat } from "./Chat";
+import { Chat, buildAllowRule } from "./Chat";
+import { TaskPanel } from "./TaskPanel";
 
 interface AgentPanelProps {
   projectPath: string;
@@ -432,6 +433,9 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     setError(null);
     setStreamingBlocks([]);
     setStreamingResult(null);
+    // Reset the live-task state for this turn so the floating TaskPanel starts
+    // clean — the agent's TodoWrite always begins a fresh todo set per turn.
+    useStreamingState.getState().patch(projectPath, { tasks: {} });
 
     const channel = new Channel<ClaudeEvent>();
 
@@ -481,56 +485,49 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // Always a fresh block — a tool call is a discrete event, never
           // coalesced. Keeping it in-order with the surrounding text/thinking
           // is what surfaces live activity mid-turn (reading files, etc.).
+          //
+          // EXCEPTION: the `AskUserQuestion` tool call. Its tool_use block
+          // arrives just before the dedicated `ask_user_question` channel
+          // event, and rendering it here would show a noisy
+          // `› AskUserQuestion · {questions json}` row right above the
+          // question card itself — pure duplication. The question card (the
+          // pinned AskUserQuestionCard) is the user-facing surface for this
+          // interaction, so the raw tool-call row is dropped everywhere.
+          if (event.name === "AskUserQuestion") break;
           setStreamingBlocks((prev) => [
             ...(prev ?? []),
             { type: "tool_use", name: event.name, input: event.input },
           ]);
           break;
         case "task_update": {
-          // A task create/update from the agent. Rendered as a tool_use-style
-          // activity row so it reads naturally mid-turn ("✓ Task #10 created:
-          // …"), in arrival order with the surrounding tool calls. Foundation
-          // for a future Tasks panel — for now it's transcript decoration.
-          const tag =
-            event.task.status === "created"
-              ? "✚"
-              : event.task.status === "completed"
-                ? "✓"
-                : event.task.status === "deleted"
-                  ? "✗"
-                  : "✎";
-          setStreamingBlocks((prev) => [
-            ...(prev ?? []),
-            {
-              type: "tool_use",
-              name: `${tag} Task #${event.task.id} ${event.task.status}`,
-              input: event.task.subject,
-            },
-          ]);
+          // A task create/update from the agent. Folded into the navigation-
+          // stable `tasks` map (latest-wins-by-id) which drives the floating
+          // TaskPanel — that's now the single, dedicated surface for task
+          // state. No transcript row: rendering it here too (as a "✚ Task #N
+          // created" activity line) duplicated the panel and cluttered the
+          // message flow.
+          useStreamingState.getState().applyTask(projectPath, event.task);
           break;
         }
         case "permission_request": {
           // Two distinct meanings depending on `decision`:
           // - "pending": a mutating tool needs the user's Allow/Deny. We park
-          //   the turn and surface the approval card; render a ⏳ marker in the
-          //   streaming bubble so the user sees what's being asked.
-          // - "allow"/"deny": the resolved verdict (either the user's choice on
-          //   a pending request, or the synchronous policy for auto-decided
-          //   tools). Narrated as a ✓/✗ tool_use-style activity row.
+          //   the turn and surface the pinned approval card.
+          // - "allow"/"deny": the resolved verdict (the user's choice on a
+          //   pending request, or the synchronous policy for auto-decided
+          //   tools). If it matches the pending request, the card clears.
+          //
+          // Neither decision is rendered as a transcript activity row anymore:
+          // the approval card is the dedicated surface while pending, and a
+          // ✓/✗ marker line in the message flow just duplicated that (and
+          // vanished on reload anyway, since permission events aren't
+          // persisted as turn content).
           if (event.decision === "pending") {
             setPendingPermission(projectPath, {
               requestId: event.request_id,
               toolName: event.tool_name,
               input: event.input,
             });
-            setStreamingBlocks((prev) => [
-              ...(prev ?? []),
-              {
-                type: "tool_use",
-                name: `⏳ ${event.tool_name}`,
-                input: event.input,
-              },
-            ]);
           } else {
             // Resolved — if it matches the pending request, clear the card.
             // (Reads the current store value rather than a functional updater —
@@ -540,16 +537,6 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
             if (cur && cur.requestId === event.request_id) {
               clearPendingPermission(projectPath);
             }
-            const tag = event.decision === "allow" ? "✓" : "✗";
-            const suffix = event.reason ? ` — ${event.reason}` : "";
-            setStreamingBlocks((prev) => [
-              ...(prev ?? []),
-              {
-                type: "tool_use",
-                name: `${tag} ${event.tool_name}`,
-                input: event.input + suffix,
-              },
-            ]);
           }
           break;
         }
@@ -597,6 +584,15 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           void reload().finally(() => {
             setStreamingBlocks(null);
             setStreamingResult(null);
+            // Keep the TaskPanel visible a beat longer than the streaming
+            // bubble — the turn's completed tasks are the most useful thing to
+            // glance at right as the turn lands, so collapsing them instantly
+            // (the moment the streaming bubble goes) would flash the final
+            // state away before the user registers it. 3.5s lets the user see
+            // "5/5 done," then the panel auto-hides.
+            setTimeout(() => {
+              useStreamingState.getState().patch(projectPath, { tasks: {} });
+            }, 3500);
             busyRef.current = false;
           });
           break;
@@ -615,6 +611,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       if (!resultHandled) {
         setStreamingBlocks(null);
         setStreamingResult(null);
+        useStreamingState.getState().patch(projectPath, { tasks: {} });
         setBusy(false);
         clearPendingQuestion(projectPath);
         clearPendingPermission(projectPath);
@@ -629,6 +626,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       setError(describeError(err));
       setStreamingBlocks(null);
       setStreamingResult(null);
+      useStreamingState.getState().patch(projectPath, { tasks: {} });
       setBusy(false);
       clearPendingQuestion(projectPath);
       clearPendingPermission(projectPath);
@@ -662,7 +660,15 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
    * its context. Browsing is free; promotion is lazy and happens only on send.
    */
   async function runSendMessage(prompt: string) {
-    if (!prompt.trim() || busy) return;
+    if (!prompt.trim()) return;
+    // Synchronous busy guard — same race `runStreamingTurn` closes. React's
+    // `busy` state is stale within the render cycle, so a rapid double-send
+    // (double-click, double Enter before re-render) would pass a `!busy` check
+    // twice. Both calls would then append an optimistic user turn before
+    // `runStreamingTurn`'s `busyRef` lock blocked the second *stream* — leaving
+    // the user's message inserted twice. Checking `busyRef` here closes that at
+    // the source: the second call bails before mutating anything.
+    if (busyRef.current) return;
     const text = prompt.trim();
 
     // Promote-on-send: viewing an archive → make it active before sending.
@@ -680,6 +686,22 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         if (mountedRef.current) setError(describeError(err));
         return;
       }
+    }
+
+    // Optimistic insertion: surface the user's message immediately instead of
+    // waiting for the post-turn transcript reload. Without this the bubble the
+    // user just typed vanishes for the entire turn — `turns` only refreshes
+    // after the terminal `result` event round-trips through Rust + reparses
+    // active.jsonl. The canonical record from `reload()` replaces this entry
+    // after the turn completes (same text, same tail position, index-keyed) so
+    // the swap is seamless — no flicker, no duplicate. Loop starts are excluded:
+    // those turns are `source: "loop"` and render as collapsed LoopStepRow
+    // markers, not user bubbles.
+    if (mountedRef.current) {
+      setTurns((prev) => [
+        ...prev,
+        { ts: new Date().toISOString(), role: "user", source: "user", text },
+      ]);
     }
 
     await runStreamingTurn(text);
@@ -725,6 +747,48 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       if (mountedRef.current) {
         setError(describeError(err));
         clearPendingPermission(projectPath);
+      }
+    }
+  }
+
+  /**
+   * "Always allow": resolve the current approval as an Allow, AND persist a
+   * permission rule so future calls of the same tool/command short-circuit via
+   * Claude Code's own allow-list. The rule is written to
+   * `.claude/settings.local.json` and takes effect on the next spawned session;
+   * the current approval is resolved immediately so the parked turn resumes.
+   *
+   * The two operations (resolve-now + remember-for-later) are intentionally
+   * independent: a rule-write failure doesn't block the approval, and an
+   * approval-delivery failure still surfaces — but the rule may have written.
+   * Either failure is shown in the banner without wedging the turn.
+   */
+  async function handleAlwaysAllow(toolName: string, input: string) {
+    if (!pendingPermission) return;
+    const requestId = pendingPermission.requestId;
+    const rule = buildAllowRule(toolName, input);
+
+    // Resolve the current approval first — unblocks the parked turn.
+    try {
+      await api.agentAnswerPermission(projectPath, requestId, { allow: true });
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(describeError(err));
+        clearPendingPermission(projectPath);
+      }
+      return; // No point writing a rule if the approval itself failed to land.
+    }
+
+    // Best-effort rule write — surfaces a banner on failure but doesn't undo
+    // the approval. Most failures here (disk full, permissions) leave the
+    // turn running normally; the user just won't get auto-allow next time.
+    try {
+      await api.agentAddAllowRule(projectPath, rule);
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(
+          `Allowed this call, but couldn't save the "always allow" rule: ${describeError(err)}`,
+        );
       }
     }
   }
@@ -794,7 +858,28 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-3xl flex h-full min-h-0 flex-1 flex-col">
+    // Root spans the full content area and is the positioning context for the
+    // floating TaskPanel (`absolute right-0 top-0` below). Previously the root
+    // was `max-w-3xl` and was itself the panel's parent, so the panel pinned to
+    // the chat column's right edge instead of the page's. Now the chat column
+    // is a centered inner element (`mx-auto max-w-3xl`) and the panel floats
+    // over whatever empty space sits to its right at fullscreen width.
+    <div className="relative flex h-full min-h-0 flex-1 flex-col">
+      {/* Floating live-task panel — pinned to the TOP-RIGHT of the whole
+          content area, not the chat column. `pointer-events-none` on the
+          wrapper lets clicks fall through to the transcript where the panel
+          has no content; the panel itself re-enables pointer events. Renders
+          null when there are no tasks (outside an in-flight turn), so the
+          overlay is absent entirely then. */}
+      <div className="pointer-events-none absolute right-0 top-0 z-20 p-1">
+        <TaskPanel projectPath={projectPath} />
+      </div>
+
+      {/* Centered chat column — toolbar + transcript + composer. `max-w-3xl`
+          caps the readable line length; `mx-auto` centers it within the full
+          width so the empty space splits evenly left/right (and the floating
+          TaskPanel sits in the right-hand gutter at fullscreen). */}
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-1 flex-col">
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-2 pb-3 mb-3 border-b border-border shrink-0">
         <button
@@ -907,24 +992,24 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       </div>
 
       {/* ── Chat (transcript + streaming bubble + composer) ── */}
-      <div className="flex min-h-0 flex-1 flex-col">
-        <Chat
-          turns={turns}
-          streamingBlocks={isActiveView ? streamingBlocks : null}
-          streamingResult={isActiveView ? streamingResult : null}
-          busy={busy}
-          error={error}
-          onSend={runSendMessage}
-          onClearError={() => setError(null)}
-          focusNonce={focusNonce}
-          pendingQuestion={pendingQuestion?.questions ?? null}
-          onAnswerQuestion={handleAnswerQuestion}
-          pendingPermission={pendingPermission ? {
-            toolName: pendingPermission.toolName,
-            input: pendingPermission.input,
-          } : null}
-          onAnswerPermission={handleAnswerPermission}
-        />
+      <Chat
+        turns={turns}
+        streamingBlocks={isActiveView ? streamingBlocks : null}
+        streamingResult={isActiveView ? streamingResult : null}
+        busy={busy}
+        error={error}
+        onSend={runSendMessage}
+        onClearError={() => setError(null)}
+        focusNonce={focusNonce}
+        pendingQuestion={pendingQuestion?.questions ?? null}
+        onAnswerQuestion={handleAnswerQuestion}
+        pendingPermission={pendingPermission ? {
+          toolName: pendingPermission.toolName,
+          input: pendingPermission.input,
+        } : null}
+        onAnswerPermission={handleAnswerPermission}
+        onAlwaysAllow={handleAlwaysAllow}
+      />
       </div>
     </div>
   );

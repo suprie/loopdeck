@@ -68,6 +68,7 @@ pub fn run() {
             commands::agent_reset_session,
             commands::agent_answer_question,
             commands::agent_answer_permission,
+            commands::agent_add_allow_rule,
             commands::agent_interrupt,
             commands::agent_is_busy,
             commands::agent_pending_permission,

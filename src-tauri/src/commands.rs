@@ -1010,6 +1010,86 @@ pub async fn agent_answer_permission(
     Ok(())
 }
 
+/// Persist a permission allow-rule into the project's `.claude/settings.local.json`.
+///
+/// "Always allow" affordance for the manual-approval card: alongside the
+/// per-call Allow/Deny verdict, the user can ask LoopDeck to remember the
+/// decision for future calls of the same tool/command. This writes the rule
+/// into `permissions.allow[]` of the **local** settings file (gitignored by
+/// Claude Code convention — machine-specific, never shared), deduped against
+/// any rules already present.
+///
+/// The rule string is built by the frontend (it has the parsed tool input and
+/// mirrors the `describeTool` field extraction) in the canonical Claude Code
+/// format, e.g. `Bash(docker:*)`, `Read(*)`, `mcp__server__tool`. The format is
+/// the same one `skills::setup_hooks` seeds into `settings.json` (project
+/// scope) at `CURATED_ALLOW` — local + project are merged by Claude Code's own
+/// settings loader.
+///
+/// **Effect timing:** settings are loaded at `ClaudeSession::spawn`, so the
+/// rule takes effect on the *next* spawned session (after a reset/restart, or
+/// once the live process exits). It does NOT auto-allow the currently-parked
+/// approval — that's resolved separately by `agent_answer_permission` writing
+/// the `control_response`. The rule just prevents the prompt from reappearing
+/// for future calls. Both calls are made by the frontend on "Always allow".
+///
+/// Idempotent: re-adding an existing rule is a no-op (the dedup preserves the
+/// original write order). Creates `.claude/` and the file if absent.
+#[tauri::command]
+pub async fn agent_add_allow_rule(
+    path: String,
+    rule: String,
+) -> Result<(), AppError> {
+    debug!("agent_add_allow_rule called for path: {path}, rule: {rule}");
+    let repo_path = PathBuf::from(&path);
+    let claude_dir = repo_path.join(".claude");
+    let settings_path = claude_dir.join("settings.local.json");
+
+    // Load existing settings (or start fresh). A missing file or unparseable
+    // body is fine — we treat it as `{}` and (re)write a clean file. This
+    // recovers gracefully from a hand-corrupted local settings file.
+    let mut root: serde_json::Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Ensure `permissions` is an object and `permissions.allow` is an array,
+    // mirroring the structure `skills::setup_hooks` writes into settings.json.
+    if root.get("permissions").is_none() {
+        root["permissions"] = serde_json::json!({});
+    }
+    let allow_arr = root["permissions"]["allow"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    // Dedup: only push if the rule isn't already present. Preserves existing
+    // order (curated entries stay first, user-added rules append).
+    let mut existing: Vec<serde_json::Value> = allow_arr;
+    let already_present = existing.iter().any(|v| v.as_str() == Some(rule.as_str()));
+    if !already_present {
+        existing.push(serde_json::Value::from(rule));
+    }
+    root["permissions"]["allow"] = serde_json::Value::Array(existing);
+
+    // Write back, pretty-printed for readability / low-diff manual edits.
+    std::fs::create_dir_all(&claude_dir).map_err(|e| {
+        AppError::Config(format!("failed to create .claude dir: {e}"))
+    })?;
+    let formatted = serde_json::to_string_pretty(&root)
+        .map_err(|e| AppError::Config(format!("JSON serialization error: {e}")))?;
+    std::fs::write(&settings_path, formatted).map_err(|e| {
+        AppError::Config(format!("failed to write settings.local.json: {e}"))
+    })?;
+
+    if already_present {
+        info!("agent_add_allow_rule rule already present in {settings_path:?} — no-op");
+    } else {
+        info!("agent_add_allow_rule wrote rule to {settings_path:?}");
+    }
+    Ok(())
+}
+
 /// Gracefully interrupt the in-flight turn for a project.
 ///
 /// Called by the frontend's Stop button. Pops the oneshot sender from the

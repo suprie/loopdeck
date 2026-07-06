@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ShieldCheck,
   ShieldX,
+  ShieldPlus,
   Repeat,
 } from "lucide-react";
 import type {
@@ -17,7 +18,6 @@ import type {
   ClaudeEvent,
   ContentBlock,
   ToolCall,
-  TaskRecord,
   AskUserQuestionSpec,
   AskUserQuestionAnswers,
   ApprovalDecision,
@@ -88,6 +88,14 @@ export interface ChatProps {
    * and resumes (or recovers from) the turn.
    */
   onAnswerPermission?: (decision: ApprovalDecision) => void;
+  /**
+   * "Always allow" callback — fires when the user clicks the Always-allow
+   * button. The parent resolves the current approval (same as a plain Allow)
+   * AND persists a permission rule (built from `toolName`/`input` via
+   * `buildAllowRule`) so future calls of the same tool/command don't prompt
+   * again. Optional — when omitted, the button is hidden.
+   */
+  onAlwaysAllow?: (toolName: string, input: string) => void;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -197,6 +205,48 @@ function describeTool(name: string, rawInput: string): string {
   return detail ? `${name} · ${detail}` : name;
 }
 
+/**
+ * Build a Claude Code permission allow-rule string for "always allow".
+ *
+ * Mirrors the `CURATED_ALLOW` format in `src-tauri/src/skills.rs` so the rule
+ * matches Claude Code's own `--setting-sources` allow-list semantics:
+ *
+ * - `Bash` → `Bash(<first-command-token>:*)`. We take only the leading command
+ *   word (not the full argv), so `git push --force origin main` becomes
+ *   `Bash(git:*)` — same granularity as the curated `Bash(git status:*)` /
+ *   `Bash(cargo:*)` entries. The `:*` is the wildcard terminator Claude Code's
+ *   matcher expects (NOT a glob over the remainder).
+ * - File tools (`Read`/`Edit`/`Write`/`Glob`/`Grep`) → `Tool(*)`. The path is
+ *   irrelevant for "always allow this tool" intent, and a path-pinned rule
+ *   would be too narrow to be useful.
+ * - `mcp__server__tool` → the bare tool name (MCP convention — no parens).
+ * - Anything else → `Tool(*)` as a safe permissive default.
+ *
+ * Used by the "Always allow" button on the approval card. The result is sent
+ * to `agent_add_allow_rule`, which dedups it into `settings.local.json`.
+ */
+export function buildAllowRule(toolName: string, rawInput: string): string {
+  if (toolName.startsWith("mcp__")) return toolName;
+  if (toolName === "Bash") {
+    // Extract the command field and take its first whitespace token.
+    let command = "";
+    try {
+      const parsed = JSON.parse(rawInput);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const cmd = (parsed as Record<string, unknown>).command;
+        if (typeof cmd === "string") command = cmd;
+      }
+    } catch {
+      // Not JSON — fall back to the raw input trimmed.
+      command = rawInput;
+    }
+    const firstToken = command.trim().split(/\s+/)[0];
+    return firstToken ? `Bash(${firstToken}:*)` : "Bash(*)";
+  }
+  // Read/Edit/Write/Glob/Grep and anything else: allow the whole tool.
+  return `${toolName}(*)`;
+}
+
 // ── Sub-components ───────────────────────────────────────────────────────────
 
 /**
@@ -295,17 +345,17 @@ function TurnBubble({ turn }: { turn: ConversationTurn }) {
             rendering) when the turn recorded it; otherwise fall back to the
             legacy fixed grouping (thinking → tools → text) so old transcripts
             keep rendering exactly as before. User turns always render their
-            `text` directly. */}
+            `text` directly. Task lifecycle rows are intentionally NOT rendered
+            here — tasks have their own dedicated floating TaskPanel during a
+            live turn, and a per-row list in the transcript just duplicated
+            that surface as clutter. The `turn.tasks` array is still persisted
+            on disk for a future Tasks panel. */}
         {!isUser && turn.blocks && turn.blocks.length > 0 ? (
-          <>
-            <BlockList blocks={turn.blocks} />
-            {!isUser && <TaskList tasks={turn.tasks ?? []} />}
-          </>
+          <BlockList blocks={turn.blocks} />
         ) : (
           <>
             {!isUser && <ThinkingBlock thinking={turn.thinking ?? ""} />}
             {!isUser && <ToolList tools={turn.tool_calls ?? []} />}
-            {!isUser && <TaskList tasks={turn.tasks ?? []} />}
             {!isUser ? (
               <div className="text-sm leading-relaxed break-words">
                 <Markdown>{sanitise(turn.text)}</Markdown>
@@ -376,10 +426,15 @@ function ThinkingBlock({ thinking }: { thinking: string }) {
  * tool name and the most relevant input field (file path, command, etc.).
  */
 function ToolList({ tools }: { tools: ToolCall[] }) {
-  if (tools.length === 0) return null;
+  // `AskUserQuestion` is rendered as its own pinned question card, not as a
+  // transcript activity row — filter it out so old transcripts (which still
+  // carry the persisted tool_use entry) don't show a redundant
+  // `› AskUserQuestion · {json}` line above where the card was.
+  const visible = tools.filter((t) => t.name !== "AskUserQuestion");
+  if (visible.length === 0) return null;
   return (
     <ul className="mb-2 space-y-1">
-      {tools.map((tool, i) => (
+      {visible.map((tool, i) => (
         <li
           key={i}
           className="flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed"
@@ -390,56 +445,6 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
           </span>
         </li>
       ))}
-    </ul>
-  );
-}
-
-/**
- * Pick the glyph + tone for a task lifecycle status.
- *
- * Mirrors the streaming bubble's tagging (AgentPanel) so live and persisted
- * rows read consistently: ✚ created, ✓ completed, ✗ deleted, ✎ updated/other.
- */
-function taskGlyph(status: string): { glyph: string; cls: string } {
-  switch (status) {
-    case "created":
-      return { glyph: "✚", cls: "text-emerald-500" };
-    case "completed":
-      return { glyph: "✓", cls: "text-emerald-500" };
-    case "deleted":
-      return { glyph: "✗", cls: "text-destructive" };
-    default:
-      return { glyph: "✎", cls: "text-[var(--primary)]" };
-  }
-}
-
-/**
- * Persisted task lifecycle events for an assistant turn.
- *
- * Rendered as a small list beneath the tool calls (or beneath the blocks when
- * the turn recorded them), each row showing the status glyph, the task id +
- * status, and the subject. Sibling to `ToolList`; together they record *what
- * the agent did* during the turn.
- */
-function TaskList({ tasks }: { tasks: TaskRecord[] }) {
-  if (tasks.length === 0) return null;
-  return (
-    <ul className="mb-2 space-y-1">
-      {tasks.map((task, i) => {
-        const { glyph, cls } = taskGlyph(task.status);
-        return (
-          <li
-            key={i}
-            className="flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed"
-          >
-            <span className={`${cls} mt-0.5 shrink-0`}>{glyph}</span>
-            <span className="font-mono break-all">
-              <span className={cls}>#{task.id} {task.status}:</span>{" "}
-              {sanitise(task.subject)}
-            </span>
-          </li>
-        );
-      })}
     </ul>
   );
 }
@@ -497,6 +502,11 @@ function BlockList({
           return <ThinkingBlock key={i} thinking={block.thinking} />;
         }
         if (block.type === "tool_use") {
+          // `AskUserQuestion` is surfaced as its own pinned question card, not
+          // as a transcript activity row — skip it so neither the live stream
+          // nor a reloaded transcript shows the redundant
+          // `› AskUserQuestion · {questions json}` line.
+          if (block.name === "AskUserQuestion") return null;
           return <ToolUseBlock key={i} name={block.name} input={block.input} />;
         }
         const isTrailing = i === lastTextIndex;
@@ -810,11 +820,19 @@ function PermissionApprovalCard({
   input,
   disabled,
   onDecide,
+  onAlwaysAllow,
 }: {
   toolName: string;
   input: string;
   disabled?: boolean;
   onDecide: (decision: ApprovalDecision) => void;
+  /**
+   * "Always allow": allow this call AND persist a rule so future calls of the
+   * same tool/command auto-allow. The parent resolves the current approval
+   * (same as Allow) and writes the rule to `.claude/settings.local.json`.
+   * Optional — when omitted, the Always-allow button is hidden.
+   */
+  onAlwaysAllow?: () => void;
 }) {
   const [reason, setReason] = useState("");
   const summary = describeTool(toolName, input);
@@ -868,11 +886,23 @@ function PermissionApprovalCard({
           type="button"
           disabled={disabled}
           onClick={() => onDecide({ allow: true })}
-          className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-primary/40 text-primary text-xs font-medium hover:bg-primary/10 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <ShieldCheck className="size-3.5" />
-          Allow
+          Allow once
         </button>
+        {onAlwaysAllow && (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onAlwaysAllow}
+            title="Allow now + remember this tool/command for future sessions (writes a rule to .claude/settings.local.json, takes effect on the next agent session)"
+            className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <ShieldPlus className="size-3.5" />
+            Always allow
+          </button>
+        )}
       </div>
     </div>
   );
@@ -910,19 +940,43 @@ export function Chat({
   readOnly = false,
   pendingPermission,
   onAnswerPermission,
+  onAlwaysAllow,
 }: ChatProps) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isStreaming = streamingBlocks !== null;
 
-  // Auto-scroll to the bottom when turns change, streaming progresses, or
-  // the busy flag toggles (covers the gap before the first token arrives).
+  // Whether auto-scroll is armed — i.e. the user is parked at the bottom and
+  // wants new content to scroll into view. Flips to false the moment the user
+  // scrolls up (to read history or, importantly, to drag-select text). While
+  // disarmed, per-token streaming scrolls are suppressed so the container
+  // doesn't yank to the bottom and break an in-progress selection. Re-armed on
+  // send (sending implies "show me the latest") and whenever the turn list is
+  // replaced (initial load, conversation switch, post-turn reload).
+  const stickRef = useRef(true);
+
+  // Stick-to-bottom while streaming: scroll on every progress tick, but ONLY
+  // if the user hasn't scrolled away. This is the per-token path, so gating it
+  // on `stickRef` is what keeps a mid-stream drag-selection from being
+  // annihilated by an auto-scroll on the next token.
   useEffect(() => {
+    if (stickRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [streamingBlocks, streamingResult, busy]);
+
+  // Force-to-bottom when the turn list changes — initial load, conversation
+  // switch, and the canonical-record swap after a turn completes. These are
+  // discrete navigational events where snapping to the freshest content is the
+  // right call, and they re-arm stickiness so subsequent streaming tokens keep
+  // the view pinned until the user scrolls away.
+  useEffect(() => {
+    stickRef.current = true;
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [turns, streamingBlocks, streamingResult, busy]);
+  }, [turns]);
 
   // Focus the composer when the parent bumps `focusNonce` (e.g. after the
   // "New conversation" button archives the transcript). Lets the user start
@@ -937,6 +991,14 @@ export function Chat({
     const text = draft.trim();
     if (!text || disabled || busy || readOnly) return;
     setDraft("");
+    // Sending implies "show me what happens next" — re-arm stick-to-bottom so
+    // the user's own bubble (rendered by the parent's optimistic insert) and
+    // the upcoming assistant reply scroll into view, even if the user had
+    // scrolled up to read history before hitting send.
+    stickRef.current = true;
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
     onSend(text);
   }
 
@@ -974,6 +1036,16 @@ export function Chat({
       {/* ── Transcript area ── */}
       <div
         ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          // "Near the bottom" within a small threshold counts as pinned —
+          // covers fractional/RTL rounding so normal streaming stays sticky.
+          // Anything past the threshold disarms auto-scroll: the user is
+          // reading history or selecting text, so don't fight them.
+          const atBottom =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          stickRef.current = atBottom;
+        }}
         className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1"
       >
         {/* Empty state */}
@@ -1022,27 +1094,6 @@ export function Chat({
           ),
         )}
 
-        {/* Pending AskUserQuestion — the agent is parked waiting on the user.
-            Rendered above the streaming bubble so it's the focal affordance. */}
-        {hasPendingQuestion && onAnswerQuestion && (
-          <AskUserQuestionCard
-            questions={pendingQuestion}
-            disabled={disabled}
-            onSubmit={onAnswerQuestion}
-          />
-        )}
-
-        {/* Pending manual approval — the agent is parked waiting on Allow/Deny.
-            Sibling to the question card; same focal-above-stream placement. */}
-        {hasPendingPermission && pendingPermission && onAnswerPermission && (
-          <PermissionApprovalCard
-            toolName={pendingPermission.toolName}
-            input={pendingPermission.input}
-            disabled={disabled}
-            onDecide={onAnswerPermission}
-          />
-        )}
-
         {/* Streaming bubble — live token accumulation via Channel */}
         {isStreaming && (
           <StreamingBubble
@@ -1059,6 +1110,45 @@ export function Chat({
           </div>
         )}
       </div>
+
+      {/* ── Pending-interaction strip ──
+          Pinned OUT of the transcript scroll region, between the transcript
+          and the composer. Both cards below represent a turn that is PARKED —
+          the agent cannot proceed until the user answers — so they must be the
+          most visible thing on screen, never buried below the fold. Keeping
+          them in normal flow inside the scroller meant a long transcript
+          pushed them out of view, forcing the user to scroll up to find the
+          very thing blocking progress. This strip is non-scrolling
+          (shrink-0, max-h with internal overflow only when a card is huge) so
+          the card stays anchored at the bottom of the visible area, right
+          above the composer where the user's attention already is. */}
+      {(hasPendingQuestion || hasPendingPermission) && (
+        <div className="shrink-0 pt-2">
+          {hasPendingQuestion && onAnswerQuestion && (
+            <div className="max-h-[45vh] overflow-y-auto">
+              <AskUserQuestionCard
+                questions={pendingQuestion}
+                disabled={disabled}
+                onSubmit={onAnswerQuestion}
+              />
+            </div>
+          )}
+          {hasPendingPermission && pendingPermission && onAnswerPermission && (
+            <PermissionApprovalCard
+              toolName={pendingPermission.toolName}
+              input={pendingPermission.input}
+              disabled={disabled}
+              onDecide={onAnswerPermission}
+              onAlwaysAllow={
+                onAlwaysAllow
+                  ? () =>
+                      onAlwaysAllow(pendingPermission.toolName, pendingPermission.input)
+                  : undefined
+              }
+            />
+          )}
+        </div>
+      )}
 
       {/* ── Composer ── */}
       {/* Disabled while a question or approval is pending (the agent is parked

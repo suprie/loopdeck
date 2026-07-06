@@ -1072,6 +1072,18 @@ impl ClaudeSession {
                             // events the UI would show only a spinner for the
                             // whole multi-minute turn.
                             ContentBlock::ToolUse { name, input } => {
+                                // `AskUserQuestion` is surfaced via the
+                                // dedicated `ask_user_question` channel event
+                                // (which shows the pinned question card), so
+                                // emitting its raw tool_use block here would
+                                // only produce a redundant activity row in the
+                                // transcript. Skip it on the wire entirely —
+                                // the frontend filters it too, but stopping it
+                                // at the source keeps the persisted blocks and
+                                // the live view consistent.
+                                if name == "AskUserQuestion" {
+                                    continue;
+                                }
                                 let _ = channel.send(ClaudeEvent::ToolUse {
                                     name: name.clone(),
                                     input: input.to_string(),

@@ -318,6 +318,25 @@ export async function agentAnswerPermission(
 }
 
 /**
+ * Persist an "always allow" permission rule into `.claude/settings.local.json`.
+ *
+ * The "Always allow" button on the approval card: in addition to resolving the
+ * current approval (done via `agentAnswerPermission`), the rule is written so
+ * future calls of the same tool/command short-circuit via Claude Code's own
+ * allow-list instead of prompting again. The rule string is built in the
+ * frontend in the canonical Claude Code format (`Bash(cmd:*)`, `Read(*)`, …).
+ *
+ * Takes effect on the NEXT spawned session (settings are loaded at spawn); the
+ * current approval still needs its normal verdict, which the frontend fires
+ * alongside this call.
+ *
+ * Rust: agent_add_allow_rule(path: String, rule: String) -> Result<(), AppError>
+ */
+export async function agentAddAllowRule(path: string, rule: string): Promise<void> {
+  return invoke<void>("agent_add_allow_rule", { path, rule });
+}
+
+/**
  * Gracefully interrupt the in-flight agent turn (Stop button).
  *
  * Ends the current turn gracefully — the live process keeps its conversation
