@@ -3,16 +3,21 @@ import { Lightbulb } from "lucide-react";
 import type { Decision } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
-import "./DecisionsPanel.css";
 
 interface DecisionsPanelProps {
   projectPath: string;
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  proposed: "var(--color-warning)",
-  accepted: "var(--color-success)",
-  superseded: "var(--color-text-secondary)",
+  proposed: "var(--warning)",
+  accepted: "var(--success)",
+  superseded: "var(--muted-foreground)",
+};
+
+const STATUS_BG: Record<string, string> = {
+  proposed: "bg-[color-mix(in_oklab,var(--warning)_12%,transparent)]",
+  accepted: "bg-[color-mix(in_oklab,var(--success)_12%,transparent)]",
+  superseded: "bg-muted",
 };
 
 export function DecisionsPanel({ projectPath }: DecisionsPanelProps) {
@@ -49,53 +54,68 @@ export function DecisionsPanel({ projectPath }: DecisionsPanelProps) {
 
   if (error) {
     return (
-      <div className="decisions-panel">
-        <div className="decisions-panel__error">
-          Failed to load decisions: {error}
-        </div>
+      <div className="text-destructive text-sm p-3">
+        Failed to load decisions: {error}
       </div>
     );
   }
 
   if (decisions.length === 0) {
     return (
-      <div className="decisions-panel">
-        <div className="decisions-panel__empty">
-          <Lightbulb size={32} className="decisions-panel__empty-icon" />
-          <h3>No decisions recorded</h3>
-          <p>
-            Architectural decisions are written by AI agents to{" "}
-            <code>.loopdeck/decisions.md</code>. They will appear here
-            automatically once recorded.
-          </p>
-        </div>
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <Lightbulb size={32} className="text-muted-foreground/30 mb-3" />
+        <h3 className="text-sm font-semibold text-foreground mb-1.5">
+          No decisions recorded
+        </h3>
+        <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
+          Architectural decisions are written by AI agents to{" "}
+          <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">
+            .loopdeck/decisions.md
+          </code>
+          . They will appear here automatically once recorded.
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="decisions-panel">
-      <div className="decisions-panel__count">
+    <div className="max-w-2xl">
+      <div className="text-xs text-muted-foreground mb-4">
         {decisions.length} decision{decisions.length !== 1 ? "s" : ""}
       </div>
-      <div className="decisions-panel__list">
+      <div className="space-y-3">
         {decisions.map((decision, i) => (
-          <div key={i} className="decision-card">
-            <div className="decision-card__header">
-              <span className="decision-card__date">{decision.date}</span>
+          <div
+            key={i}
+            className="rounded-xl border border-border bg-card p-4 hover:border-primary/40 transition-all"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-mono text-muted-foreground">
+                {decision.date}
+              </span>
               <span
-                className="decision-card__status"
-                style={{ color: STATUS_COLORS[decision.status] ?? "var(--color-text-secondary)" }}
+                className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${STATUS_BG[decision.status] ?? "bg-muted"}`}
+                style={{
+                  color: STATUS_COLORS[decision.status] ?? "var(--muted-foreground)",
+                }}
               >
                 {decision.status}
               </span>
             </div>
-            <h3 className="decision-card__title">{decision.title}</h3>
-            <p className="decision-card__context">{decision.context}</p>
+            <h3 className="text-sm font-semibold text-foreground mb-2">
+              {decision.title}
+            </h3>
+            <p className="text-xs text-foreground/80 leading-relaxed mb-2">
+              {decision.context}
+            </p>
             {decision.consequences && (
-              <div className="decision-card__consequences">
-                <span className="decision-card__consequences-label">Consequences</span>
-                <p>{decision.consequences}</p>
+              <div className="mt-2 p-3 rounded-lg bg-surface border-l-[3px] border-l-[var(--primary)]">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--primary)] block mb-1">
+                  Consequences
+                </span>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {decision.consequences}
+                </p>
               </div>
             )}
           </div>

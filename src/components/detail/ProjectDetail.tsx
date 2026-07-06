@@ -19,8 +19,8 @@ import { EditDescription } from "./EditDescription";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { LoopsPanel } from "./LoopsPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { PageHeader } from "../layout/AppShell";
 import type { DetailTab } from "../../types";
-import "./ProjectDetail.css";
 
 const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
@@ -31,13 +31,8 @@ const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
 export function ProjectDetail() {
   const project = useAppStore((s) => s.selectedProject);
   const setCurrentView = useAppStore((s) => s.setCurrentView);
-  const {
-    openInFinder,
-    openInTerminal,
-    removeProject,
-    rescanProject,
-    regenerateDesc,
-  } = useProjects();
+  const { openInFinder, openInTerminal, removeProject, rescanProject, regenerateDesc } =
+    useProjects();
 
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const [isEditing, setIsEditing] = useState(false);
@@ -45,8 +40,8 @@ export function ProjectDetail() {
 
   if (!project) {
     return (
-      <div className="project-detail">
-        <p style={{ color: "var(--color-text-secondary)" }}>No project selected.</p>
+      <div className="flex-1 flex items-center justify-center">
+        <p className="text-sm text-muted-foreground">No project selected.</p>
       </div>
     );
   }
@@ -65,34 +60,44 @@ export function ProjectDetail() {
   };
 
   return (
-    <div className="project-detail">
-      {/* Header */}
-      <div className="project-detail__header">
-        <button
-          className="project-detail__back"
-          onClick={() => setCurrentView("dashboard")}
-          title="Back to dashboard"
-        >
-          <ArrowLeft size={18} />
-        </button>
-        <h1 className="project-detail__title">{project.name}</h1>
-      </div>
+    <>
+      <PageHeader
+        title={project.name}
+        subtitle={project.path}
+        actions={
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setCurrentView("dashboard")}
+              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
+              title="Back to dashboard"
+            >
+              <ArrowLeft size={14} />
+            </button>
+          </div>
+        }
+      />
 
       {/* Body: sidebar + content */}
-      <div className="project-detail__body">
+      <div className="flex flex-1 min-h-0">
         {/* Sidebar nav */}
-        <nav className="project-detail__sidebar">
-          <div className="project-detail__sidebar-project">
-            <span className="project-detail__sidebar-name">{project.name}</span>
-            <span className="project-detail__sidebar-path">{project.path}</span>
+        <nav className="w-[180px] shrink-0 border-r border-border p-3 space-y-0.5">
+          <div className="px-2 py-1.5 mb-2">
+            <div className="text-xs font-semibold text-foreground truncate">
+              {project.name}
+            </div>
+            <div className="text-[10px] text-muted-foreground font-mono truncate mt-0.5">
+              {project.path}
+            </div>
           </div>
           {TABS.map((tab) => (
             <button
               key={tab.id}
-              className={`project-detail__tab ${
-                activeTab === tab.id ? "project-detail__tab--active" : ""
-              }`}
               onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors w-full text-left ${
+                activeTab === tab.id
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+              }`}
             >
               {tab.icon}
               {tab.label}
@@ -101,19 +106,26 @@ export function ProjectDetail() {
         </nav>
 
         {/* Content panel */}
-        <div className="project-detail__content">
+        <div className="flex-1 min-w-0 overflow-y-auto p-6">
           {activeTab === "overview" && (
-            <>
-              <div className="project-detail__card">
-                <div className="project-detail__field">
-                  <div className="project-detail__label">Path</div>
-                  <div className="project-detail__value project-detail__value--path">
+            <div className="max-w-2xl space-y-4">
+              {/* Overview card */}
+              <div className="rounded-xl border border-border bg-card p-5 space-y-5">
+                {/* Path */}
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
+                    Path
+                  </div>
+                  <div className="text-sm font-mono text-muted-foreground break-all">
                     {project.path}
                   </div>
                 </div>
 
-                <div className="project-detail__field">
-                  <div className="project-detail__label">Description</div>
+                {/* Description */}
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
+                    Description
+                  </div>
                   {isEditing ? (
                     <EditDescription
                       path={project.path}
@@ -122,103 +134,123 @@ export function ProjectDetail() {
                       onCancel={() => setIsEditing(false)}
                     />
                   ) : (
-                    <div className="project-detail__description">
-                      <p className={project.description ? "" : "is-empty"}>
+                    <div className="flex items-start justify-between gap-3">
+                      <p
+                        className={
+                          project.description
+                            ? "text-sm text-foreground leading-relaxed"
+                            : "text-sm text-muted-foreground italic leading-relaxed"
+                        }
+                      >
                         {project.description || "No description set."}
                       </p>
-                      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                      <div className="flex gap-1 shrink-0">
                         <button
-                          className="btn-secondary"
                           onClick={() => setIsEditing(true)}
+                          className="inline-flex items-center gap-1 h-7 px-2 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
                           title="Edit description"
                         >
-                          <Pencil size={14} />
+                          <Pencil size={12} />
                         </button>
                         <button
-                          className="btn-secondary"
                           onClick={handleRegenerate}
+                          className="inline-flex items-center gap-1 h-7 px-2 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
                           title="Regenerate from README"
                         >
-                          <RefreshCw size={14} />
+                          <RefreshCw size={12} />
                         </button>
                       </div>
                     </div>
                   )}
                 </div>
 
-                <div className="project-detail__field">
-                  <div className="project-detail__label">Details</div>
-                  <div className="project-detail__meta">
-                    <div className="project-detail__value">
-                      Status: <strong>{project.status}</strong>
-                    </div>
-                    <div className="project-detail__value">
+                {/* Details */}
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
+                    Details
+                  </div>
+                  <div className="flex flex-wrap gap-3 text-sm">
+                    <span className="text-muted-foreground">
+                      Status: <strong className="text-foreground">{project.status}</strong>
+                    </span>
+                    <span className="text-muted-foreground">
                       Created:{" "}
-                      <strong>
+                      <strong className="text-foreground">
                         {new Date(project.created_at).toLocaleDateString()}
                       </strong>
-                    </div>
+                    </span>
                     {project.last_opened && (
-                      <div className="project-detail__value">
+                      <span className="text-muted-foreground">
                         Last opened:{" "}
-                        <strong>
+                        <strong className="text-foreground">
                           {new Date(project.last_opened).toLocaleDateString()}
                         </strong>
-                      </div>
+                      </span>
                     )}
                   </div>
                 </div>
 
-                <div className="project-detail__field">
-                  <div className="project-detail__label">Repository Activity</div>
-                  <div className="project-detail__meta">
-                    <div className="project-detail__value">
-                      <GitCommit size={13} /> Last commit:{" "}
-                      <strong>
-                        {project.last_commit
-                          ? relativeTime(project.last_commit)
+                {/* Repository Activity */}
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">
+                    Repository Activity
+                  </div>
+                  <div className="flex flex-wrap gap-3 text-sm">
+                    <span className="text-muted-foreground inline-flex items-center gap-1.5">
+                      <GitCommit size={13} />
+                      Last commit:{" "}
+                      <strong className="text-foreground">
+                        {project.last_commit_date
+                          ? relativeTime(project.last_commit_date)
                           : "Uncommitted"}
                       </strong>
-                    </div>
+                      {project.last_commit_message && (
+                        <span className="text-muted-foreground font-mono text-xs truncate max-w-[200px]">
+                          — {project.last_commit_message}
+                        </span>
+                      )}
+                    </span>
                     {project.last_modified && (
-                      <div className="project-detail__value">
-                        <Clock size={13} /> Last modified:{" "}
-                        <strong>
+                      <span className="text-muted-foreground inline-flex items-center gap-1.5">
+                        <Clock size={13} />
+                        Last modified:{" "}
+                        <strong className="text-foreground">
                           {relativeTime(project.last_modified)}
                         </strong>
-                      </div>
+                      </span>
                     )}
                   </div>
                 </div>
               </div>
 
-              <div className="project-detail__actions">
+              {/* Actions */}
+              <div className="flex gap-2 flex-wrap">
                 <button
-                  className="btn-secondary"
                   onClick={handleRescan}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
                 >
-                  <RefreshCw size={14} /> Rescan
+                  <RefreshCw size={13} /> Rescan
                 </button>
                 <button
-                  className="btn-secondary"
                   onClick={() => openInFinder(project.path)}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
                 >
-                  <Folder size={14} /> Open in Finder
+                  <Folder size={13} /> Open in Finder
                 </button>
                 <button
-                  className="btn-secondary"
                   onClick={() => openInTerminal(project.path)}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
                 >
-                  <Terminal size={14} /> Open in Terminal
+                  <Terminal size={13} /> Open in Terminal
                 </button>
                 <button
-                  className="btn-danger"
                   onClick={() => setShowRemoveConfirm(true)}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_12%,transparent)] transition"
                 >
-                  <Trash2 size={14} /> Remove from Registry
+                  <Trash2 size={13} /> Remove from Registry
                 </button>
               </div>
-            </>
+            </div>
           )}
 
           {activeTab === "decisions" && (
@@ -241,6 +273,6 @@ export function ProjectDetail() {
           danger
         />
       )}
-    </div>
+    </>
   );
 }

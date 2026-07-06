@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useProjects } from "../../hooks/useProjects";
-import "./EditDescription.css";
 
 interface EditDescriptionProps {
   path: string;
@@ -24,19 +23,25 @@ export function EditDescription({
   };
 
   return (
-    <div className="edit-description">
+    <div className="space-y-2">
       <textarea
-        className="edit-description__textarea"
+        className="w-full min-h-[80px] px-3 py-2 rounded-md border border-border bg-surface text-sm text-foreground placeholder:text-muted-foreground resize-y focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/30 font-sans"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder="Enter a project description..."
         autoFocus
       />
-      <div className="edit-description__actions">
-        <button className="btn-secondary" onClick={onCancel}>
+      <div className="flex gap-2">
+        <button
+          onClick={onCancel}
+          className="inline-flex items-center h-7 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
+        >
           Cancel
         </button>
-        <button className="btn-primary" onClick={handleSave}>
+        <button
+          onClick={handleSave}
+          className="inline-flex items-center h-7 px-3 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
+        >
           Save
         </button>
       </div>

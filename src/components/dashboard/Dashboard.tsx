@@ -1,15 +1,17 @@
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
-import { ProjectRow } from "./ProjectRow";
+import { ProjectCard } from "./ProjectCard";
 import { EmptyState } from "./EmptyState";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
-import "./Dashboard.css";
+import { PageHeader } from "../layout/AppShell";
+import { Plus } from "lucide-react";
 
 export function Dashboard() {
   const projects = useAppStore((s) => s.projects);
   const isLoading = useAppStore((s) => s.isLoading);
   const setSelectedProject = useAppStore((s) => s.setSelectedProject);
-  const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } = useProjects();
+  const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } =
+    useProjects();
 
   const handleScan = async () => {
     try {
@@ -28,34 +30,56 @@ export function Dashboard() {
   };
 
   if (isLoading && projects.length === 0) {
-    return <LoadingSpinner label="Loading projects..." />;
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <LoadingSpinner label="Loading projects..." />
+      </div>
+    );
   }
 
   if (projects.length === 0) {
-    return <EmptyState onScan={handleScan} />;
+    return (
+      <div className="flex-1 flex flex-col">
+        <PageHeader title="Dashboard" subtitle="No projects yet" />
+        <div className="flex-1 flex items-center justify-center">
+          <EmptyState onScan={handleScan} />
+        </div>
+      </div>
+    );
   }
 
+  const activeCount = projects.filter((p) => p.status === "active").length;
+
   return (
-    <div className="dashboard">
-      <div className="dashboard__header">
-        <h2>Projects</h2>
-        <span className="dashboard__count">
-          {projects.length} project{projects.length !== 1 ? "s" : ""}
-        </span>
+    <>
+      <PageHeader
+        title="Dashboard"
+        subtitle={`${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`}
+        actions={
+          <button
+            onClick={handleScan}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
+          >
+            <Plus className="size-3.5" />
+            Import Repository
+          </button>
+        }
+      />
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {projects.map((project) => (
+            <ProjectCard
+              key={project.path}
+              project={project}
+              onSelect={setSelectedProject}
+              onOpenInFinder={openInFinder}
+              onOpenInTerminal={openInTerminal}
+              onRemove={removeProject}
+              onRescan={rescanProject}
+            />
+          ))}
+        </div>
       </div>
-      <div className="dashboard__list">
-        {projects.map((project) => (
-          <ProjectRow
-            key={project.path}
-            project={project}
-            onSelect={setSelectedProject}
-            onOpenInFinder={openInFinder}
-            onOpenInTerminal={openInTerminal}
-            onRemove={removeProject}
-            onRescan={rescanProject}
-          />
-        ))}
-      </div>
-    </div>
+    </>
   );
 }

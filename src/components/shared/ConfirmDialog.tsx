@@ -1,5 +1,3 @@
-import "./ConfirmDialog.css";
-
 interface ConfirmDialogProps {
   title: string;
   message: string;
@@ -20,17 +18,32 @@ export function ConfirmDialog({
   danger = false,
 }: ConfirmDialogProps) {
   return (
-    <div className="confirm-overlay" onClick={onCancel}>
-      <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>{title}</h3>
-        <p>{message}</p>
-        <div className="confirm-dialog__actions">
-          <button className="btn-secondary" onClick={onCancel}>
+    <div
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-surface border border-border rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold text-foreground mb-1.5">{title}</h3>
+        <p className="text-sm text-muted-foreground mb-5 leading-relaxed">
+          {message}
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="inline-flex items-center h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
+          >
             {cancelLabel}
           </button>
           <button
-            className={danger ? "btn-danger" : "btn-primary"}
             onClick={onConfirm}
+            className={
+              danger
+                ? "inline-flex items-center h-8 px-3 rounded-md text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_12%,transparent)] transition"
+                : "inline-flex items-center h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition"
+            }
           >
             {confirmLabel}
           </button>

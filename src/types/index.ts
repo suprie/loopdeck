@@ -16,7 +16,7 @@ export interface DiscoveredRepo {
 }
 
 /** Project status from Rust ProjectStatus enum. */
-export type ProjectStatus = "active" | "archived";
+export type ProjectStatus = "active" | "archived" | "nonactive" | "warning";
 
 /** A registered project entry from the global config. */
 export interface ProjectEntry {
@@ -26,7 +26,11 @@ export interface ProjectEntry {
   status: ProjectStatus;
   last_opened: string | null;
   created_at: string;
-  last_commit: string | null;
+  /** ISO 8601 timestamp of the last git commit (refreshed on startup/rescan). */
+  last_commit_date: string | null;
+  /** Subject line of the last git commit. */
+  last_commit_message: string | null;
+  /** ISO 8601 timestamp of the most recently modified file. */
   last_modified: string | null;
 }
 

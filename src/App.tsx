@@ -5,7 +5,7 @@ import { AppShell } from "./components/layout/AppShell";
 import { Dashboard } from "./components/dashboard/Dashboard";
 import { ImportFlow } from "./components/import/ImportFlow";
 import { ProjectDetail } from "./components/detail/ProjectDetail";
-import "./App.css";
+import "./styles.css";
 
 export default function App() {
   const currentView = useAppStore((s) => s.currentView);

@@ -2,7 +2,8 @@ import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { RepoCard } from "./RepoCard";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
-import "./ImportFlow.css";
+import { PageHeader } from "../layout/AppShell";
+import { ArrowLeft, Search } from "lucide-react";
 
 export function ImportFlow() {
   const discoveredRepos = useAppStore((s) => s.discoveredRepos);
@@ -35,44 +36,63 @@ export function ImportFlow() {
   };
 
   if (isScanning) {
-    return <LoadingSpinner label="Scanning for repositories..." />;
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <LoadingSpinner label="Scanning for repositories..." />
+      </div>
+    );
   }
 
   return (
-    <div className="import-flow">
-      <div className="import-flow__header">
-        <h2>Discovered Repositories</h2>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn-secondary" onClick={handleScanAgain}>
-            Scan Again
-          </button>
-          <button className="btn-secondary" onClick={() => setCurrentView("dashboard")}>
-            Back to Dashboard
-          </button>
-        </div>
+    <>
+      <PageHeader
+        title="Import Repository"
+        subtitle={
+          discoveredRepos.length > 0
+            ? `Found ${discoveredRepos.length} repo${discoveredRepos.length !== 1 ? "s" : ""}`
+            : "Select a folder to scan for repositories"
+        }
+        actions={
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleScanAgain}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
+            >
+              <Search className="size-3.5" />
+              Scan Again
+            </button>
+            <button
+              onClick={() => setCurrentView("dashboard")}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-muted text-muted-foreground text-xs font-medium hover:bg-accent hover:text-foreground transition"
+            >
+              <ArrowLeft className="size-3.5" />
+              Back
+            </button>
+          </div>
+        }
+      />
+
+      <div className="flex-1 overflow-y-auto p-6">
+        {discoveredRepos.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <p className="text-sm text-muted-foreground">
+              No repositories discovered. Try scanning a different folder.
+            </p>
+          </div>
+        ) : (
+          <div className="max-w-3xl mx-auto space-y-3">
+            {discoveredRepos.map((repo) => (
+              <RepoCard key={repo.path} repo={repo} onImport={handleImport} />
+            ))}
+          </div>
+        )}
+
+        {isLoading && (
+          <div className="mt-6">
+            <LoadingSpinner label="Importing project..." />
+          </div>
+        )}
       </div>
-      <p className="import-flow__subtitle">
-        Found {discoveredRepos.length} repo{discoveredRepos.length !== 1 ? "s" : ""}.
-        Select repositories to import and create project memory.
-      </p>
-
-      {discoveredRepos.length === 0 ? (
-        <div className="import-flow__empty">
-          No repositories discovered. Try scanning a different folder.
-        </div>
-      ) : (
-        <div className="import-flow__list">
-          {discoveredRepos.map((repo) => (
-            <RepoCard
-              key={repo.path}
-              repo={repo}
-              onImport={handleImport}
-            />
-          ))}
-        </div>
-      )}
-
-      {isLoading && <LoadingSpinner label="Importing project..." />}
-    </div>
+    </>
   );
 }
