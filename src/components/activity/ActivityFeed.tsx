@@ -8,11 +8,11 @@ import {
   Lightbulb,
   Play,
   CheckCircle2,
-  Clock,
 } from "lucide-react";
 import type { ConversationTurn, Decision, Loop } from "../../types";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
+import { PageHeader } from "../layout/AppShell";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -282,20 +282,17 @@ export function ActivityFeed() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Header */}
-      <div className="h-14 shrink-0 px-6 border-b border-border flex items-center justify-between bg-background/80 backdrop-blur sticky top-0 z-10">
-        <div>
-          <h1 className="text-sm font-semibold tracking-tight">Activity Feed</h1>
-          <p className="text-xs text-muted-foreground">
-            Chronological events across all projects
-          </p>
-        </div>
-        {!loading && hasData && (
-          <span className="text-[11px] text-muted-foreground">
-            {events.length} event{events.length !== 1 ? "s" : ""}
-          </span>
-        )}
-      </div>
+      <PageHeader
+        title="Activity"
+        subtitle="Recent events across all projects"
+        actions={
+          !loading && hasData ? (
+            <span className="text-[11px] text-muted-foreground">
+              {events.length} event{events.length !== 1 ? "s" : ""}
+            </span>
+          ) : undefined
+        }
+      />
 
       {/* Body */}
       <div className="flex-1 min-h-0 overflow-y-auto">
@@ -332,29 +329,30 @@ export function ActivityFeed() {
           </div>
         )}
 
-        {/* Timeline */}
+        {/* Timeline — left-rail with dot markers (clone anatomy) */}
         {!loading && !error && hasData && (
-          <div className="max-w-2xl mx-auto px-6 py-4">
+          <div className="mx-auto w-full max-w-3xl px-8 py-8">
             {grouped.map(([dateLabel, groupEvents]) => (
-              <section key={dateLabel} className="mb-6">
+              <section key={dateLabel} className="mb-8 last:mb-0">
                 {/* Date heading */}
-                <div className="flex items-center gap-3 mb-3 sticky top-0 pt-1 pb-2 bg-background/90 backdrop-blur z-[5]">
-                  <Clock className="size-4 text-muted-foreground" />
-                  <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                <div className="mb-4 flex items-center gap-3">
+                  <h2 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                     {dateLabel}
                   </h2>
-                  <div className="flex-1 h-px bg-border" />
+                  <div className="h-px flex-1 bg-border" />
                   <span className="text-[10px] text-muted-foreground/60">
                     {groupEvents.length}
                   </span>
                 </div>
 
-                {/* Event rows */}
-                <div className="space-y-0.5">
+                {/* Event rows on a left rail */}
+                <ol className="relative space-y-3 border-l border-border pl-6">
                   {groupEvents.map((event, i) => (
-                    <EventRow key={`${event.timestamp}-${i}`} event={event} />
+                    <li key={`${event.timestamp}-${i}`} className="relative">
+                      <EventRow event={event} />
+                    </li>
                   ))}
-                </div>
+                </ol>
               </section>
             ))}
           </div>
@@ -370,50 +368,53 @@ function EventRow({ event }: { event: ActivityEvent }) {
   const colorClass = EVENT_COLOR[event.kind];
   const [expanded, setExpanded] = useState(false);
   const hasDetail = event.detail && event.detail.length > 0;
+  const Icon = EVENT_ICON[event.kind];
 
   return (
     <div className="group">
+      {/* Dot marker on the rail */}
+      <span
+        className={`absolute -left-[27px] top-3 flex size-4 items-center justify-center rounded-full border border-border bg-background ${colorClass}`}
+      >
+        {Icon}
+      </span>
+
       <button
         onClick={() => hasDetail && setExpanded(!expanded)}
-        className={`w-full text-left flex items-start gap-3 px-3 py-2 rounded-md transition-colors hover:bg-accent/30 ${
-          expanded ? "bg-accent/20" : ""
+        className={`w-full rounded-lg border border-border bg-card p-3 text-left shadow-[var(--shadow-sm)] transition-colors hover:bg-accent/30 ${
+          expanded ? "ring-1 ring-border" : ""
         } ${!hasDetail ? "cursor-default" : ""}`}
       >
-        {/* Icon — coloured per kind */}
-        <div
-          className={`size-7 shrink-0 rounded-full grid place-items-center bg-[color-mix(in_oklab,var(--primary)_10%,transparent)] ${colorClass}`}
-        >
-          {EVENT_ICON[event.kind]}
-        </div>
-
-        {/* Content */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2 flex-wrap">
-            <span className="text-xs font-medium text-foreground truncate">
-              {event.projectName}
-            </span>
-            <span className="text-[10px] text-muted-foreground/60 shrink-0">
-              {fmtTime(event.timestamp)}
-            </span>
-          </div>
-          <p className="text-xs text-muted-foreground leading-relaxed mt-0.5 line-clamp-2">
-            {event.summary}
-          </p>
-
-          {/* Expanded detail */}
-          {expanded && hasDetail && (
-            <p className="mt-1.5 text-xs text-muted-foreground/80 leading-relaxed whitespace-pre-wrap break-words bg-muted/50 rounded-md p-2.5 border border-border/50 max-h-48 overflow-y-auto font-mono">
-              {sanitise(event.detail!)}
+        <div className="flex items-start gap-3">
+          {/* Content */}
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between text-xs">
+              <span className="truncate font-semibold text-foreground">
+                {event.projectName}
+              </span>
+              <span className="text-muted-foreground">
+                {fmtTime(event.timestamp)}
+              </span>
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground line-clamp-2">
+              {event.summary}
             </p>
+
+            {/* Expanded detail */}
+            {expanded && hasDetail && (
+              <p className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-border/50 bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground/90">
+                {sanitise(event.detail!)}
+              </p>
+            )}
+          </div>
+
+          {/* Expand indicator */}
+          {hasDetail && (
+            <span className="mt-1 shrink-0 text-[10px] text-muted-foreground/40 opacity-0 transition-opacity group-hover:opacity-100">
+              {expanded ? "−" : "+"}
+            </span>
           )}
         </div>
-
-        {/* Expand indicator */}
-        {hasDetail && (
-          <span className="shrink-0 text-[10px] text-muted-foreground/40 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-            {expanded ? "−" : "+"}
-          </span>
-        )}
       </button>
     </div>
   );

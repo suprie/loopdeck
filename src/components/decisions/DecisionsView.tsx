@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
-import { Lightbulb, Loader2, AlertTriangle, Search, Filter, ChevronDown } from "lucide-react";
+import { Lightbulb, Loader2, AlertTriangle, Search, Filter, ChevronDown, GitBranch } from "lucide-react";
 import type { Decision } from "../../types";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
+import { PageHeader } from "../layout/AppShell";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -151,20 +152,18 @@ export function DecisionsView() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header */}
-      <div className="h-14 shrink-0 px-6 border-b border-border flex items-center justify-between bg-background/80 backdrop-blur sticky top-0 z-10">
-        <div>
-          <h1 className="text-sm font-semibold tracking-tight">Decisions</h1>
-          <p className="text-xs text-muted-foreground">
-            Architectural decisions across all projects
-          </p>
-        </div>
-        {!loading && hasData && (
-          <span className="text-[11px] text-muted-foreground">
-            {decisions.length} decision{decisions.length !== 1 ? "s" : ""}
-            {filtered.length !== decisions.length && ` · ${filtered.length} shown`}
-          </span>
-        )}
-      </div>
+      <PageHeader
+        title="Decisions"
+        subtitle="Architectural notes captured across projects"
+        actions={
+          !loading && hasData ? (
+            <span className="text-[11px] text-muted-foreground">
+              {decisions.length} decision{decisions.length !== 1 ? "s" : ""}
+              {filtered.length !== decisions.length && ` · ${filtered.length} shown`}
+            </span>
+          ) : undefined
+        }
+      />
 
       {/* ── Filters ── */}
       {hasData && !loading && (
@@ -273,20 +272,20 @@ export function DecisionsView() {
 
         {/* Decision list grouped by month */}
         {!loading && !error && hasFiltered && (
-          <div className="max-w-2xl mx-auto px-6 py-4 space-y-6">
+          <div className="mx-auto w-full max-w-3xl space-y-6 px-8 py-8">
             {grouped.map(([month, ds]) => (
               <section key={month}>
-                <h2 className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-3 sticky top-0 pt-1 pb-2 bg-background/90 backdrop-blur z-[5]">
+                <h2 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                   {month}
                 </h2>
 
-                <div className="space-y-2">
+                <div className="space-y-3">
                   {ds.map((d, i) => {
                     const isExpanded = expandedIdx === i;
                     return (
                       <div
                         key={`${d.date}-${d.title}-${i}`}
-                        className={`rounded-lg border transition-colors ${
+                        className={`rounded-xl border bg-card p-5 shadow-[var(--shadow-sm)] transition-colors ${
                           STATUS_BG[d.status]
                         } ${isExpanded ? "ring-1 ring-border" : ""}`}
                       >
@@ -294,37 +293,36 @@ export function DecisionsView() {
                           onClick={() =>
                             setExpandedIdx(isExpanded ? null : i)
                           }
-                          className="w-full text-left px-4 py-3"
+                          className="w-full text-left"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0 flex-1">
-                              {/* Project + date */}
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-[10px] font-medium text-muted-foreground">
-                                  {d.projectName}
-                                </span>
-                                <span className="text-[10px] text-muted-foreground/50">
-                                  {d.date}
+                              {/* Project chip + date */}
+                              <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                <GitBranch className="size-3" />
+                                {d.projectName}
+                                <span className="font-normal text-muted-foreground/60">
+                                  · {d.date}
                                 </span>
                               </div>
 
                               {/* Title */}
-                              <h3 className="text-sm font-semibold text-foreground leading-snug">
+                              <h3 className="mt-2 text-sm font-semibold tracking-tight text-foreground leading-snug">
                                 {d.title}
                               </h3>
 
                               {/* Context preview (collapsed) */}
                               {!isExpanded && (
-                                <p className="text-xs text-muted-foreground leading-relaxed mt-1 line-clamp-2">
+                                <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground line-clamp-2">
                                   {d.context}
                                 </p>
                               )}
                             </div>
 
                             {/* Status badge + chevron */}
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex shrink-0 items-center gap-2">
                               <span
-                                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider ${
+                                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${
                                   STATUS_COLOR[d.status]
                                 }`}
                               >
@@ -340,12 +338,12 @@ export function DecisionsView() {
 
                           {/* Expanded body */}
                           {isExpanded && (
-                            <div className="mt-3 pt-3 border-t border-border/50 space-y-2.5 text-xs leading-relaxed">
+                            <div className="mt-3 space-y-2.5 border-t border-border/50 pt-3 text-xs leading-relaxed">
                               <div>
                                 <span className="font-semibold text-foreground">
                                   Context
                                 </span>
-                                <p className="text-muted-foreground mt-0.5">
+                                <p className="mt-0.5 text-muted-foreground">
                                   {d.context}
                                 </p>
                               </div>
@@ -354,7 +352,7 @@ export function DecisionsView() {
                                   <span className="font-semibold text-foreground">
                                     Consequences
                                   </span>
-                                  <p className="text-muted-foreground mt-0.5 whitespace-pre-wrap">
+                                  <p className="mt-0.5 whitespace-pre-wrap text-muted-foreground">
                                     {d.consequences}
                                   </p>
                                 </div>
