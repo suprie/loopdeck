@@ -1,14 +1,17 @@
 use crate::agents::AgentResponse;
 use crate::agents::ClaudeEvent;
-use crate::claude_session::ClaudeSession;
+use crate::claude_session::{ClaudeSession, InterruptSlot, PermissionSlot, QuestionAnswers, QuestionSlot};
 use crate::config::{self, AgentConfig, GlobalConfig, ProjectEntry, ProjectStatus};
-use crate::conversation::{self, ConversationTurn};
+use crate::conversation::{self, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
 use crate::git;
 use crate::memory::{self, Decision, LoopStatus};
+use crate::permission::{PermissionPolicy};
+use crate::permission::Decision as PermissionDecision;
 use crate::project::{self, ProjectMeta};
 use crate::scanner::{self, DiscoveredRepo};
 use chrono::Utc;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,6 +32,24 @@ use tracing::{debug, info};
 pub struct AppState {
     pub config: Mutex<GlobalConfig>,
     pub claude_sessions: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<ClaudeSession>>>>,
+    /// Per-project pending `AskUserQuestion` slots. When Claude asks a
+    /// question mid-turn, the read loop parks on the slot's oneshot receiver;
+    /// the `agent_answer_question` command pops the sender here to deliver the
+    /// user's answers and wake the parked turn. Keyed by project path so
+    /// different projects' questions can't collide.
+    pub pending_answers: Mutex<HashMap<PathBuf, QuestionSlot>>,
+    /// Per-project pending manual-approval slots for `can_use_tool` requests on
+    /// mutating/executing tools (Bash/Edit/Write/…). When such a tool call
+    /// arrives, the read loop parks on the slot's oneshot receiver; the
+    /// `agent_answer_permission` command pops the sender here to deliver the
+    /// user's Allow/Deny and wake the parked turn. Mirrors `pending_answers`.
+    pub pending_permissions: Mutex<HashMap<PathBuf, PermissionSlot>>,
+    /// Per-project interrupt slots for graceful Stop. The streaming read loop
+    /// installs a fresh oneshot sender per turn and `select!`s on the
+    /// receiver; `agent_interrupt` pops + fires the sender, the loop wakes and
+    /// writes the `interrupt` control_request, ending the turn while keeping
+    /// the live process (and its context) alive.
+    pub interrupt_slots: Mutex<HashMap<PathBuf, InterruptSlot>>,
 }
 
 /// Scan a directory for project repositories.
@@ -506,8 +527,14 @@ pub async fn get_loops(path: String, _state: State<'_, AppState>) -> Result<Loop
 ///
 /// Builds the next-loop prompt from `.loopdeck/loops.md` (first unchecked
 /// step under `## Next Steps`, or a "propose the next loop" fallback) and
-/// sends it through the shared agent pipeline. The turn is recorded to the
-/// conversation transcript; the live process is spawned/resumed as needed.
+/// sends it through the **fresh-start** pipeline: any live session is dropped,
+/// the transcript is archived, and a brand-new claude process is spawned
+/// **without** `--resume` — Start always begins a new conversation.
+///
+/// Concurrency: uses `try_lock`. If a turn is already in flight on this
+/// project, Start is rejected immediately with "agent is busy" rather than
+/// queueing (only `agent_send_message` queues). The successful `try_lock` is
+/// the proof that the prior session is idle and safe to replace.
 #[tauri::command]
 pub async fn agent_start_loop(
     path: String,
@@ -520,15 +547,21 @@ pub async fn agent_start_loop(
     }
 
     let prompt = build_next_loop_prompt(&repo_path);
-    let response = send_and_record(&state, &repo_path, &prompt).await?;
+    let response = start_fresh_and_record(&state, &repo_path, &prompt).await?;
     info!("agent_start_loop complete for: {path}");
     Ok(response)
 }
 
 /// Send a free-form follow-up message to the project's agent session.
 ///
-/// Same shared pipeline as `agent_start_loop` — the live process is reused if
-/// present, spawned/resumed otherwise, and both turns are recorded.
+/// Continues the **existing** conversation: reuses the live process if present,
+/// or (after an app restart, when no live process exists) re-spawns claude with
+/// `--resume <last_session_id>` so the model's context is restored. Both turns
+/// are recorded. Contrast with `agent_start_loop`, which always begins a fresh
+/// conversation.
+///
+/// Concurrency: uses `lock().await`, so a follow-up sent while a turn is in
+/// flight on this project queues behind it (different projects run in parallel).
 #[tauri::command]
 pub async fn agent_send_message(
     path: String,
@@ -552,6 +585,10 @@ pub async fn agent_send_message(
 /// `ClaudeEvent` on the `on_event` channel as it arrives. The transcript is
 /// still recorded atomically after the turn completes.
 ///
+/// Fresh-start semantics, identical to `agent_start_loop`: drops any live
+/// session, archives the transcript, spawns without `--resume`, rejects with
+/// "agent is busy" if a turn is in flight (`try_lock`).
+///
 /// Returns `()` rather than `AgentResponse` — the terminal result event
 /// (`ClaudeEvent::Result`) carries the full aggregated response.
 #[tauri::command]
@@ -567,7 +604,7 @@ pub async fn agent_start_loop_streaming(
     }
 
     let prompt = build_next_loop_prompt(&repo_path);
-    send_and_record_streaming(&state, &repo_path, &prompt, &on_event).await?;
+    start_fresh_and_record_streaming(&state, &repo_path, &prompt, &on_event).await?;
     info!("agent_start_loop_streaming complete for: {path}");
     Ok(())
 }
@@ -617,6 +654,95 @@ pub async fn agent_get_conversation(
     Ok(conversation::load_conversation(&repo_path))
 }
 
+/// List all conversations (active + archived) for the history UI.
+///
+/// Returns one `ConversationSummary` per transcript file in the sessions dir,
+/// sorted newest-first by last-turn timestamp. Each row carries an id
+/// (`"active"` or an archive stem) the frontend passes back to
+/// `agent_get_conversation_by_id` to load the turns.
+#[tauri::command]
+pub async fn agent_list_conversations(
+    path: String,
+    _state: State<'_, AppState>,
+) -> Result<Vec<ConversationSummary>, AppError> {
+    debug!("agent_list_conversations called for path: {path}");
+    let repo_path = PathBuf::from(&path);
+    if !repo_path.exists() {
+        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+    }
+    Ok(conversation::list_conversations(&repo_path))
+}
+
+/// Load a specific conversation by id (`"active"` or an archive stem).
+///
+/// Used by the history viewer to open a past conversation read-only. Returns
+/// an empty vec for an unknown id (e.g. an archive deleted out of band) — the
+/// UI shows an empty state rather than erroring.
+#[tauri::command]
+pub async fn agent_get_conversation_by_id(
+    path: String,
+    id: String,
+    _state: State<'_, AppState>,
+) -> Result<Vec<ConversationTurn>, AppError> {
+    debug!("agent_get_conversation_by_id called for path: {path}, id: {id}");
+    let repo_path = PathBuf::from(&path);
+    if !repo_path.exists() {
+        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+    }
+    Ok(conversation::load_conversation_by_id(&repo_path, &id))
+}
+
+/// Promote an archived conversation to active, returning its `session_id`.
+///
+/// Called by the frontend when the user sends a follow-up while viewing an
+/// archived conversation. The backend:
+/// 1. `promote_to_active` — rotates the current `active.jsonl` aside (so it
+///    survives in history) and seeds a fresh active transcript with the chosen
+///    archive's turns.
+/// 2. Extracts the most recent assistant `session_id` from that conversation
+///    so the agent pipeline can `--resume` it, restoring the model's context.
+///
+/// Returns `None` when the source has no `session_id` (empty, or only user
+/// turns) — in that case the frontend proceeds with a non-resume start. The
+/// live session is also dropped (its context is now stale relative to the
+/// promoted transcript); the next send re-spawns with the returned resume id.
+#[tauri::command]
+pub async fn agent_promote_to_active(
+    path: String,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
+    debug!("agent_promote_to_active called for path: {path}, id: {id}");
+    let repo_path = PathBuf::from(&path);
+    if !repo_path.exists() {
+        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+    }
+
+    // Extract the resume id BEFORE promoting (after promotion the turns live
+    // in active.jsonl, but reading from the source id is unambiguous).
+    let resume_id = conversation::session_id_for_conversation(&repo_path, &id);
+
+    // Promote: archive current active, seed new active from the source. No-op
+    // for `id == "active"` or an unknown/empty source — both safe here.
+    conversation::promote_to_active(&repo_path, &id)?;
+
+    // Drop any live session — its in-process context is now stale relative to
+    // the promoted transcript. The next send re-spawns with `--resume <id>`
+    // via `with_session` (which reads `last_session_id` off the new active).
+    let removed = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(&repo_path)
+        .is_some();
+    if removed {
+        debug!("dropped live session for promote of {id} in: {path}");
+    }
+
+    info!("agent_promote_to_active complete for: {path}, id: {id}");
+    Ok(resume_id)
+}
+
 /// Reset the project's agent session: drop the live process and archive the
 /// transcript.
 ///
@@ -650,12 +776,231 @@ pub async fn agent_reset_session(
     Ok(())
 }
 
+/// Wire shape of a single answer as sent by the frontend
+/// (`agent_answer_question`'s `answers` map value).
+///
+/// `labels` carries the selected option label(s); `other_text` carries the
+/// free-text "Other…" value when the user typed one instead of (or alongside)
+/// picking a canned option. Both optional so the frontend can send whichever
+/// applies.
+#[derive(Debug, Deserialize)]
+pub struct AnswerWire {
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub other_text: Option<String>,
+}
+
+/// Answer a pending `AskUserQuestion` for the given project.
+///
+/// Called by the frontend when the user submits the question card. Pops the
+/// oneshot sender from the per-project `pending_answers` slot and sends the
+/// answers — this wakes the read loop (parked in
+/// `ClaudeSession::answer_ask_user_question`), which writes the
+/// `control_response` with `updatedInput.answers` and the turn resumes.
+///
+/// Returns an error if no question is pending for this project (the user
+/// submitted without a prompt, or the turn already ended/timed out).
+#[tauri::command]
+pub async fn agent_answer_question(
+    path: String,
+    request_id: String,
+    answers: HashMap<String, AnswerWire>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!(
+        "agent_answer_question called for path: {path}, request_id: {request_id}, {} answers",
+        answers.len()
+    );
+    let repo_path = PathBuf::from(&path);
+
+    // Pop the sender for this project. There's at most one pending question at
+    // a time (Claude blocks on each), so this is a single take.
+    let sender = {
+        let guard = state
+            .pending_answers
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        guard
+            .get(&repo_path)
+            .and_then(|slot| {
+                slot.lock()
+                    .ok()
+                    .and_then(|mut g| g.take())
+            })
+            .ok_or_else(|| {
+                AppError::Agent(
+                    "no pending question for this project (it may have timed out or already been answered)".into(),
+                )
+            })?
+    };
+
+    // Convert the wire answers into the backend type and send. The sender
+    // drops on send, so the slot is now empty for the next question.
+    let mapped: QuestionAnswers = answers
+        .into_iter()
+        .map(|(q, a)| {
+            (
+                q,
+                crate::claude_session::QuestionAnswer {
+                    labels: a.labels,
+                    other_text: a.other_text.filter(|t| !t.trim().is_empty()),
+                },
+            )
+        })
+        .collect();
+
+    sender
+        .send(mapped)
+        .map_err(|_| {
+            AppError::Agent(
+                "the pending question is no longer waiting for an answer (turn ended)".into(),
+            )
+        })?;
+
+    info!("agent_answer_question delivered for: {path}");
+    Ok(())
+}
+
+/// Wire shape of the user's manual-approval verdict, as sent by the frontend
+/// (`agent_answer_permission`'s `decision` arg).
+///
+/// `allow: true` → run the tool; `allow: false` → deny it. `reason` is
+/// optional and only meaningful on a deny (it's surfaced to the model as the
+/// deny message). Mirrors `AnswerWire`'s role for `agent_answer_question`.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalWire {
+    pub allow: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Resolve a pending manual-approval request for the given project.
+///
+/// Called by the frontend when the user clicks Allow or Deny on the approval
+/// card. Pops the oneshot sender from the per-project `pending_permissions`
+/// slot and sends the `Decision` — this wakes the read loop (parked in
+/// `ClaudeSession::answer_manual_permission`), which writes the matching
+/// `control_response` and the turn resumes (or, on deny, recovers).
+///
+/// Returns an error if no approval is pending for this project (the user
+/// clicked after the turn ended/timed out, or there was never a prompt).
+#[tauri::command]
+pub async fn agent_answer_permission(
+    path: String,
+    request_id: String,
+    decision: ApprovalWire,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!(
+        "agent_answer_permission called for path: {path}, request_id: {request_id}, allow: {}",
+        decision.allow
+    );
+    let repo_path = PathBuf::from(&path);
+
+    // Pop the sender for this project. At most one pending approval at a time
+    // (Claude blocks on each control_request), so this is a single take.
+    let sender = {
+        let guard = state
+            .pending_permissions
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        guard
+            .get(&repo_path)
+            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+            .ok_or_else(|| {
+                AppError::Agent(
+                    "no pending permission approval for this project (it may have timed out or already been answered)".into(),
+                )
+            })?
+    };
+
+    // Convert the wire verdict into the policy's `Decision` vocabulary — the
+    // single source of truth the read loop writes back. A deny with no reason
+    // gets a generic message so the model always sees *something*.
+    let verdict = if decision.allow {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Deny(
+            decision
+                .reason
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| String::from("denied by user")),
+        )
+    };
+
+    sender
+        .send(verdict)
+        .map_err(|_| {
+            AppError::Agent(
+                "the pending approval is no longer waiting for an answer (turn ended)".into(),
+            )
+        })?;
+
+    info!("agent_answer_permission delivered for: {path}");
+    Ok(())
+}
+
+/// Gracefully interrupt the in-flight turn for a project.
+///
+/// Called by the frontend's Stop button. Pops the oneshot sender from the
+/// per-project `interrupt_slots` and fires it; the streaming read loop (which
+/// `select!`s on the receiver) wakes, writes the graceful `interrupt`
+/// control_request to the live process, and ends the turn. The live process
+/// and its conversation context survive (unlike `agent_reset_session`, which
+/// kills both) — the next send resumes the same conversation.
+///
+/// Returns `Ok(())` whether or not a turn was in flight: no-op when idle is
+/// the friendlier contract for a UI button (the user just sees "stopped").
+/// Returns an error only on state corruption (lock poisoned).
+///
+/// **Limitation:** if the turn is currently parked on an AskUserQuestion or
+/// manual-approval card (off `read_line`), the interrupt isn't observed this
+/// turn — the user should dismiss the card instead. The next turn picks up
+/// the interrupt slot fresh.
+#[tauri::command]
+pub async fn agent_interrupt(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("agent_interrupt called for path: {path}");
+    let repo_path = PathBuf::from(&path);
+
+    // Pop + fire the sender. There's at most one per project (cleared at turn
+    // end), so this is a single take. `send` failing means the receiver was
+    // already dropped (turn ended between the UI click and here) — treat as a
+    // no-op success so the button feels responsive either way.
+    let fired = {
+        let guard = state
+            .interrupt_slots
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        guard
+            .get(&repo_path)
+            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+            .map(|sender| sender.send(()).is_ok())
+    };
+
+    if !fired.unwrap_or(false) {
+        debug!("agent_interrupt: no in-flight turn for {path} (no-op)");
+    } else {
+        info!("agent_interrupt fired for: {path}");
+    }
+    Ok(())
+}
+
 // ── Agent session helpers ──────────────────────────────────────────────────
 //
-// `with_session` is the single chokepoint through which every agent turn
-// flows. It owns the get-or-spawn + lock lifecycle so commands stay thin and
-// the per-project turn lock invariant (one stdin, one process) can't be
-// violated by a caller.
+// Two pipelines own session lifecycle:
+// - `with_session` (below) — get-or-spawn + `lock().await`. Used by
+//   `agent_send_message`: reuses the live process, or `--resume`s after a
+//   restart. Queues behind a running turn.
+// - `spawn_fresh_locked` (further below) — force-spawn + `try_lock`. Used by
+//   `agent_start_loop[_streaming]`: always a fresh conversation, rejects when
+//   busy.
+//
+// Both uphold the per-project turn-lock invariant (one stdin, one process):
+// same-project turns never run concurrently, different projects run in parallel.
 
 /// Get the live `ClaudeSession` for `path` as an owned `Arc`, spawning one if
 /// none exists (or resuming a prior conversation via `--resume`).
@@ -698,7 +1043,12 @@ async fn with_session(
         })?;
 
     let resume_id = conversation::last_session_id(path);
-    let session = ClaudeSession::spawn(&path.to_path_buf(), &agent_config, resume_id.as_deref())?;
+    let session = ClaudeSession::spawn(
+        &path.to_path_buf(),
+        &agent_config,
+        resume_id.as_deref(),
+        PermissionPolicy::allow_by_default(),
+    )?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     map_guard.insert(path.to_path_buf(), Arc::clone(&arc));
     // ── map_guard (std Mutex) dropped here as this scope ends. ──
@@ -759,6 +1109,59 @@ fn next_unchecked_loop_step(path: &Path) -> Option<String> {
     None
 }
 
+/// Get (or create) the per-project `AskUserQuestion` slot.
+///
+/// One slot per project path, shared (via `Arc`) between the read loop (which
+/// stores the oneshot sender when Claude asks a question) and the
+/// `agent_answer_question` command (which pops the sender to deliver answers).
+/// The slot persists across turns so it doesn't need re-creating each time;
+/// its contents are always `None` outside a pending question.
+fn question_slot(state: &AppState, path: &Path) -> Result<QuestionSlot, AppError> {
+    let mut guard = state
+        .pending_answers
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone())
+}
+
+/// Get (or create) the per-project manual-approval slot.
+///
+/// The permission counterpart of `question_slot`: one `PermissionSlot` per
+/// project path, shared between the read loop (stores the oneshot sender when
+/// a mutating tool needs approval) and the `agent_answer_permission` command
+/// (pops the sender to deliver the verdict). Persistent across turns; always
+/// `None` outside a pending approval.
+fn permission_slot(state: &AppState, path: &Path) -> Result<PermissionSlot, AppError> {
+    let mut guard = state
+        .pending_permissions
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone())
+}
+
+/// Get (or create) the per-project graceful-interrupt slot.
+///
+/// The streaming read loop installs a oneshot sender here at turn start and
+/// clears it at turn end; `agent_interrupt` pops + fires the sender to end the
+/// turn gracefully. Persistent across turns; always `None` outside a running
+/// turn.
+fn interrupt_slot(state: &AppState, path: &Path) -> Result<InterruptSlot, AppError> {
+    let mut guard = state
+        .interrupt_slots
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone())
+}
+
 /// Shared send pipeline used by `agent_start_loop` and `agent_send_message`.
 ///
 /// Records the user turn to the transcript *before* sending (so a crash
@@ -773,6 +1176,9 @@ async fn send_and_record(
 ) -> Result<AgentResponse, AppError> {
     let session_arc = with_session(state, path).await?;
     let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
 
     // 1. Record the user turn first (crash-safety: intent survives).
     if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
@@ -780,18 +1186,24 @@ async fn send_and_record(
     }
 
     // 2. Send + receive.
-    let response = session.send_message(prompt).await?;
+    let response = session.send_message(prompt, &qslot, &pslot, &islot).await?;
 
     // 3. Record the assistant turn (best-effort). Done BEFORE the error check
     //    below so a failed turn (e.g. "Not logged in") still lands in the
     //    transcript — the user sees the error bubble AND its session_id is
-    //    captured for a potential resume after they fix auth.
+    //    captured for a potential resume after they fix auth. Includes the
+    //    model's thinking chain and tool calls so the transcript records how
+    //    the answer was reached, not just the final summary.
     let assistant_turn = ConversationTurn::assistant(
         response.result.clone(),
         response.session_id.clone(),
         response.is_error,
         response.usage.clone(),
         response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
     );
     if let Err(e) = conversation::append_turn(path, &assistant_turn) {
         tracing::warn!("failed to append assistant turn to transcript: {e}");
@@ -827,6 +1239,9 @@ async fn send_and_record_streaming(
 ) -> Result<(), AppError> {
     let session_arc = with_session(state, path).await?;
     let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
 
     // 1. Record the user turn first (crash-safety: intent survives).
     if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
@@ -834,15 +1249,214 @@ async fn send_and_record_streaming(
     }
 
     // 2. Send + stream.
-    let response = session.send_message_streaming(prompt, channel).await?;
+    let response = session
+        .send_message_streaming(prompt, channel, &qslot, &pslot, &islot)
+        .await?;
 
-    // 3. Record the assistant turn (best-effort).
+    // 3. Record the assistant turn (best-effort). Includes thinking + tool
+    //    calls so the persisted transcript captures the full reasoning trail,
+    //    not just the final summary text.
     let assistant_turn = ConversationTurn::assistant(
         response.result.clone(),
         response.session_id.clone(),
         response.is_error,
         response.usage.clone(),
         response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
+    );
+    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+        tracing::warn!("failed to append assistant turn to transcript: {e}");
+    }
+
+    Ok(())
+}
+
+// ── Fresh-start pipeline (agent_start_loop[_streaming]) ────────────────────
+//
+// Start always begins a NEW conversation: drop any live session, archive the
+// transcript, spawn a fresh claude process WITHOUT `--resume`. This is the
+// deliberate contrast with `with_session` (used by `agent_send_message`),
+// which reuses the live process or `--resume`s after a restart.
+//
+// Concurrency: Start uses `try_lock` — if a turn is already in flight on this
+// project, the start is rejected immediately ("agent is busy") instead of
+// queueing. The successful `try_lock` is also the proof that the prior session
+// is idle and therefore safe to drop and replace mid-map. Send, by contrast,
+// uses `lock().await` and queues.
+
+/// Force-spawn a fresh `ClaudeSession` for `path`, replacing any live one.
+///
+/// 1. `try_lock` the existing arc (if any). `Err` ⇒ a turn is in flight on the
+///    current session → reject with "agent is busy" (Start must not interrupt a
+///    running turn). `Ok` ⇒ the old session is provably idle.
+/// 2. Drop the old arc from the map (last reference drops → `Drop` closes stdin
+///    → claude exits → child reaped).
+/// 3. `archive_conversation` — rotate `active.jsonl` aside so the new
+///    conversation begins fresh.
+/// 4. Spawn a NEW `ClaudeSession` with `resume_session_id = None` (never resume
+///    on Start), insert its arc into the map, and return the arc.
+///
+/// Returns an owned `Arc` (mirroring `with_session`'s contract) so the caller
+/// `.lock().await`s it. The busy-check `try_lock` in phase 1 only proves the
+/// *old* session was idle; between then and the caller taking the new arc's
+/// lock, a concurrent producer could in principle race — but the only producers
+/// are Start/Send, and the frontend disables both while a turn is in flight, so
+/// the race window is closed in practice for this single-user app.
+async fn spawn_fresh(
+    state: &AppState,
+    path: &Path,
+) -> Result<Arc<tokio::sync::Mutex<ClaudeSession>>, AppError> {
+    // ── Phase 1: try_lock the existing arc to prove it's idle. ──
+    // Scoped so the map's std Mutex guard is dropped before we await anything.
+    {
+        let map_guard = state.claude_sessions.lock().map_err(|_| AppError::LockError)?;
+        if let Some(arc) = map_guard.get(path) {
+            // Try to acquire the per-project turn lock non-blockingly. Holding
+            // the std Mutex here is fine — try_lock is synchronous, no .await.
+            if arc.try_lock().is_err() {
+                return Err(AppError::Agent(
+                    "agent is busy — wait for the current turn to finish before starting a new conversation".into(),
+                ));
+            }
+            // try_lock succeeded ⇒ idle. The guard drops here; we proceed to
+            // replace the session below.
+        }
+    }
+
+    // ── Phase 2: drop the old arc from the map (reaps the child via Drop). ──
+    let dropped = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(path);
+    if dropped.is_some() {
+        debug!("dropped live claude session for fresh start: {}", path.display());
+    }
+
+    // ── Phase 3: archive the transcript (rotate active.jsonl aside). ──
+    // Surfaced as a real error: the user asked for a fresh conversation and
+    // didn't get one.
+    conversation::archive_conversation(path)?;
+
+    // ── Phase 4: spawn fresh (no --resume) and insert. ──
+    let agent_config = state
+        .config
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .agent
+        .clone()
+        .ok_or_else(|| {
+            AppError::Agent(
+                "no agent config set; configure it in Settings before starting a loop".into(),
+            )
+        })?;
+
+    let session = ClaudeSession::spawn(
+        &path.to_path_buf(),
+        &agent_config,
+        None,
+        PermissionPolicy::allow_by_default(),
+    )?;
+    let arc = Arc::new(tokio::sync::Mutex::new(session));
+    state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .insert(path.to_path_buf(), Arc::clone(&arc));
+
+    Ok(arc)
+}
+
+/// Fresh-start send pipeline used by `agent_start_loop`. Mirrors
+/// `send_and_record` but spawns a brand-new session (no `--resume`) and rejects
+/// when busy instead of queueing. See `spawn_fresh` for the lifecycle.
+async fn start_fresh_and_record(
+    state: &AppState,
+    path: &Path,
+    prompt: &str,
+) -> Result<AgentResponse, AppError> {
+    let session_arc = spawn_fresh(state, path).await?;
+    let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
+
+    // 1. Record the user turn first (crash-safety: intent survives).
+    //    Marked `user_loop` — this prompt was auto-built from
+    //    `.loopdeck/loops.md` by `build_next_loop_prompt`, not typed by the
+    //    human. The UI renders these as compact system rows instead of
+    //    user chat bubbles so they don't drown out real messages.
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
+        tracing::warn!("failed to append user turn to transcript: {e}");
+    }
+
+    // 2. Send + receive.
+    let response = session.send_message(prompt, &qslot, &pslot, &islot).await?;
+
+    // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
+    let assistant_turn = ConversationTurn::assistant(
+        response.result.clone(),
+        response.session_id.clone(),
+        response.is_error,
+        response.usage.clone(),
+        response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
+    );
+    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+        tracing::warn!("failed to append assistant turn to transcript: {e}");
+    }
+
+    // 4. Propagate claude-level errors (is_error: true) as a real Err so every
+    //    caller surfaces them instead of silently treating the turn as success.
+    if response.is_error {
+        return Err(AppError::Agent(response.result.clone().trim().to_string()));
+    }
+
+    Ok(response)
+}
+
+/// Streaming variant of `start_fresh_and_record`, used by
+/// `agent_start_loop_streaming`. Same fresh-start + reject-when-busy semantics.
+async fn start_fresh_and_record_streaming(
+    state: &AppState,
+    path: &Path,
+    prompt: &str,
+    channel: &Channel<ClaudeEvent>,
+) -> Result<(), AppError> {
+    let session_arc = spawn_fresh(state, path).await?;
+    let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
+
+    // 1. Record the user turn first (crash-safety: intent survives).
+    //    Marked `user_loop` (see `start_fresh_and_record` for rationale).
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
+        tracing::warn!("failed to append user turn to transcript: {e}");
+    }
+
+    // 2. Send + stream.
+    let response = session
+        .send_message_streaming(prompt, channel, &qslot, &pslot, &islot)
+        .await?;
+
+    // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
+    let assistant_turn = ConversationTurn::assistant(
+        response.result.clone(),
+        response.session_id.clone(),
+        response.is_error,
+        response.usage.clone(),
+        response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
     );
     if let Err(e) = conversation::append_turn(path, &assistant_turn) {
         tracing::warn!("failed to append assistant turn to transcript: {e}");

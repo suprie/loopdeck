@@ -8,20 +8,35 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
+  ShieldCheck,
+  ShieldX,
+  Repeat,
 } from "lucide-react";
-import type { ConversationTurn, ClaudeEvent, ToolCall } from "../../types";
+import type {
+  ConversationTurn,
+  ClaudeEvent,
+  ContentBlock,
+  ToolCall,
+  TaskRecord,
+  AskUserQuestionSpec,
+  AskUserQuestionAnswers,
+  ApprovalDecision,
+} from "../../types";
+import { Markdown } from "../shared/Markdown";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface ChatProps {
   /** Completed conversation turns to display. */
   turns: ConversationTurn[];
-  /** Currently accumulating streaming text (null when nothing is streaming). */
-  streamingText: string | null;
-  /** Currently accumulating streaming thinking (null when nothing is streaming). */
-  streamingThinking: string | null;
-  /** Tool calls accumulated so far this turn (null when nothing is streaming). */
-  streamingTools: ToolCall[] | null;
+  /**
+   * Currently accumulating streaming content blocks, in arrival order
+   * (null when nothing is streaming — hides the streaming bubble). Each
+   * text/thinking delta coalesces into the trailing same-type block; each
+   * tool_use is its own block. This is what lets the bubble render a turn
+   * exactly as it unfolded instead of a fixed thinking→tools→text grouping.
+   */
+  streamingBlocks: ContentBlock[] | null;
   /**
    * The terminal Result event, if it has arrived while the streaming bubble is
    * still visible (arrives before the transcript reload replaces it). Carries
@@ -37,6 +52,42 @@ export interface ChatProps {
   onClearError?: () => void;
   /** Whether the composer and Start button should be disabled. */
   disabled?: boolean;
+  /**
+   * Bump this value to programmatically focus the composer (e.g. after the
+   * parent archives the transcript for a fresh conversation). The effect keys
+   * off this nonce, so re-focusing after back-to-back "New conversation"
+   * presses still fires.
+   */
+  focusNonce?: number;
+  /**
+   * A pending `AskUserQuestion` from the agent — when non-null, the question
+   * card is rendered above the composer and the composer is disabled (the
+   * agent is parked waiting for the answer, not for free-form input).
+   */
+  pendingQuestion?: AskUserQuestionSpec[] | null;
+  /**
+   * Called when the user submits the question card. The parent forwards the
+   * answers to the backend, which un-parks the agent turn.
+   */
+  onAnswerQuestion?: (answers: AskUserQuestionAnswers) => void;
+  /**
+   * Read-only mode for viewing archived conversations. Disables the composer
+   * and swaps the empty-state copy — the user can read history but not send.
+   * The parent sets this when a non-active conversation is selected.
+   */
+  readOnly?: boolean;
+  /**
+   * A pending manual-approval request from the agent — when non-null, the
+   * approval card is rendered above the streaming bubble and the composer is
+   * disabled. The agent turn is parked until the user picks Allow or Deny.
+   */
+  pendingPermission?: { toolName: string; input: string } | null;
+  /**
+   * Called when the user clicks Allow / Deny on the approval card. The parent
+   * forwards the verdict to the backend, which writes the control_response
+   * and resumes (or recovers from) the turn.
+   */
+  onAnswerPermission?: (decision: ApprovalDecision) => void;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -53,6 +104,69 @@ function fmtDuration(ms: number): string {
 /** Strip ANSI escape codes (claude sometimes emits them even in stream-json). */
 function sanitise(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+}
+
+/**
+ * Extract the human-readable subject from an auto-built loop prompt.
+ *
+ * `build_next_loop_prompt` (commands.rs) wraps the actual step in heavy
+ * boilerplate: `You are working on this LoopDeck project. … The next unchecked
+ * step is: "STEP HERE". Implement it. When done, update …`. Showing that
+ * verbatim as a "system" row is no better than showing it as a user bubble.
+ * This pulls out just the step text (the quoted span after `step is:`), or the
+ * fallback "propose the next loop" phrasing, so the row reads like a label.
+ */
+function loopPromptSubject(text: string): string {
+  const m = text.match(/next unchecked step is:\s*"([^"]+)"/i);
+  if (m) return m[1];
+  if (/propose and start the next loop/i.test(text)) return "Propose & start next loop";
+  // Fallback: trim and elide the long boilerplate to a reasonable preview.
+  const trimmed = text.trim();
+  return trimmed.length > 120 ? trimmed.slice(0, 117) + "…" : trimmed;
+}
+
+/**
+ * Group consecutive auto-loop prompts into a single collapsed row.
+ *
+ * Clicking "Start next loop" multiple times before a turn completes produces
+ * several identical auto-prompts in a row (the user re-clicked, or the click
+ * fired twice). Each is a few hundred chars of boilerplate — rendering them as
+ * separate rows recreates the noise we're trying to eliminate. This collapses
+ * runs of consecutive `source: "loop"` turns into one row showing the count.
+ *
+ * Returns a new array where each element is either the original turn (for
+ * user-typed and assistant turns) or a synthetic marker carrying the run.
+ */
+type TranscriptItem =
+  | { kind: "turn"; turn: ConversationTurn }
+  | { kind: "loop-run"; subject: string; count: number; ts: string };
+
+function groupLoopRuns(turns: ConversationTurn[]): TranscriptItem[] {
+  const out: TranscriptItem[] = [];
+  let i = 0;
+  while (i < turns.length) {
+    const t = turns[i];
+    if (t.role === "user" && t.source === "loop") {
+      const subject = loopPromptSubject(t.text);
+      // Collect consecutive loop turns with the SAME subject (dedup) — a
+      // different subject means a different step, render separately.
+      let count = 1;
+      while (
+        i + count < turns.length &&
+        turns[i + count].role === "user" &&
+        turns[i + count].source === "loop" &&
+        loopPromptSubject(turns[i + count].text) === subject
+      ) {
+        count++;
+      }
+      out.push({ kind: "loop-run", subject, count, ts: t.ts });
+      i += count;
+    } else {
+      out.push({ kind: "turn", turn: t });
+      i++;
+    }
+  }
+  return out;
 }
 
 /**
@@ -84,6 +198,40 @@ function describeTool(name: string, rawInput: string): string {
 }
 
 // ── Sub-components ───────────────────────────────────────────────────────────
+
+/**
+ * A collapsed row for one or more consecutive auto-built loop prompts.
+ *
+ * `build_next_loop_prompt` (Rust) generates long boilerplate user turns every
+ * time the user clicks "Start next loop" — these aren't messages the human
+ * typed, so rendering them as right-aligned user bubbles buries real input
+ * under repetitive machine-generated text. Instead we render a compact,
+ * left-aligned system row: a loop icon, the extracted step subject (e.g.
+ * "Frontend chat UI"), and — when the click fired more than once before a turn
+ * completed — an "× N" repeat badge.
+ *
+ * It reads as a labelled activity marker ("ran loop: …") rather than a
+ * simulated user message, which is what makes the transcript scannable.
+ */
+function LoopStepRow({ subject, count }: { subject: string; count: number }) {
+  return (
+    <div className="flex justify-start pl-1">
+      <div className="inline-flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1 text-[11px] text-muted-foreground">
+        <Repeat className="size-3 text-primary shrink-0" />
+        <span className="font-medium">Ran loop</span>
+        <span className="text-foreground/80 truncate max-w-md">{subject}</span>
+        {count > 1 && (
+          <span
+            className="ml-1 inline-flex items-center justify-center min-w-[1.25rem] h-4 px-1 rounded-full bg-primary/15 text-primary text-[9px] font-semibold"
+            title={`${count} consecutive auto-prompts collapsed`}
+          >
+            ×{count}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /**
  * A single completed conversation turn from the persisted transcript.
@@ -143,9 +291,39 @@ function TurnBubble({ turn }: { turn: ConversationTurn }) {
           </div>
         )}
 
-        <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-          {sanitise(turn.text)}
-        </p>
+        {/* Assistant body. Prefer the ordered `blocks` view (arrival-order
+            rendering) when the turn recorded it; otherwise fall back to the
+            legacy fixed grouping (thinking → tools → text) so old transcripts
+            keep rendering exactly as before. User turns always render their
+            `text` directly. */}
+        {!isUser && turn.blocks && turn.blocks.length > 0 ? (
+          <>
+            <BlockList blocks={turn.blocks} />
+            {!isUser && <TaskList tasks={turn.tasks ?? []} />}
+          </>
+        ) : (
+          <>
+            {!isUser && <ThinkingBlock thinking={turn.thinking ?? ""} />}
+            {!isUser && <ToolList tools={turn.tool_calls ?? []} />}
+            {!isUser && <TaskList tasks={turn.tasks ?? []} />}
+            {!isUser ? (
+              <div className="text-sm leading-relaxed break-words">
+                <Markdown>{sanitise(turn.text)}</Markdown>
+              </div>
+            ) : (
+              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                {sanitise(turn.text)}
+              </p>
+            )}
+          </>
+        )}
+
+        {/* User turns render their prompt text directly. */}
+        {isUser && (
+          <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+            {sanitise(turn.text)}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -217,6 +395,125 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
 }
 
 /**
+ * Pick the glyph + tone for a task lifecycle status.
+ *
+ * Mirrors the streaming bubble's tagging (AgentPanel) so live and persisted
+ * rows read consistently: ✚ created, ✓ completed, ✗ deleted, ✎ updated/other.
+ */
+function taskGlyph(status: string): { glyph: string; cls: string } {
+  switch (status) {
+    case "created":
+      return { glyph: "✚", cls: "text-emerald-500" };
+    case "completed":
+      return { glyph: "✓", cls: "text-emerald-500" };
+    case "deleted":
+      return { glyph: "✗", cls: "text-destructive" };
+    default:
+      return { glyph: "✎", cls: "text-[var(--primary)]" };
+  }
+}
+
+/**
+ * Persisted task lifecycle events for an assistant turn.
+ *
+ * Rendered as a small list beneath the tool calls (or beneath the blocks when
+ * the turn recorded them), each row showing the status glyph, the task id +
+ * status, and the subject. Sibling to `ToolList`; together they record *what
+ * the agent did* during the turn.
+ */
+function TaskList({ tasks }: { tasks: TaskRecord[] }) {
+  if (tasks.length === 0) return null;
+  return (
+    <ul className="mb-2 space-y-1">
+      {tasks.map((task, i) => {
+        const { glyph, cls } = taskGlyph(task.status);
+        return (
+          <li
+            key={i}
+            className="flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed"
+          >
+            <span className={`${cls} mt-0.5 shrink-0`}>{glyph}</span>
+            <span className="font-mono break-all">
+              <span className={cls}>#{task.id} {task.status}:</span>{" "}
+              {sanitise(task.subject)}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/**
+ * A single tool-use block, rendered as one indented activity row.
+ *
+ * Shared between `BlockList` (arrival-order rendering) and kept visually
+ * identical to the legacy `ToolList` entries so live and persisted turns look
+ * the same.
+ */
+function ToolUseBlock({ name, input }: { name: string; input: string }) {
+  return (
+    <div className="mb-2 flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed">
+      <span className="text-[var(--primary)] mt-0.5">›</span>
+      <span className="font-mono break-all">{sanitise(describeTool(name, input))}</span>
+    </div>
+  );
+}
+
+/**
+ * Render an ordered sequence of assistant content blocks in **arrival order**.
+ *
+ * This is the order-preserving counterpart to the legacy fixed grouping
+ * (`ThinkingBlock` + `ToolList` + a single `<p>`). Each block is rendered in
+ * sequence: thinking blocks reuse `ThinkingBlock` (each independently
+ * collapsible), tool-use blocks reuse `ToolUseBlock`, text blocks render as
+ * paragraphs. While streaming, a blinking cursor is shown after the trailing
+ * text block for the typewriter feel.
+ *
+ * @param streaming  true while the turn is still arriving (controls the cursor).
+ */
+function BlockList({
+  blocks,
+  streaming = false,
+}: {
+  blocks: ContentBlock[];
+  streaming?: boolean;
+}) {
+  // Index of the last text block, so the cursor attaches only there.
+  let lastTextIndex = -1;
+  if (streaming) {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i].type === "text") {
+        lastTextIndex = i;
+        break;
+      }
+    }
+  }
+
+  return (
+    <>
+      {blocks.map((block, i) => {
+        if (block.type === "thinking") {
+          return <ThinkingBlock key={i} thinking={block.thinking} />;
+        }
+        if (block.type === "tool_use") {
+          return <ToolUseBlock key={i} name={block.name} input={block.input} />;
+        }
+        const isTrailing = i === lastTextIndex;
+        return (
+          <div key={i} className="text-sm leading-relaxed break-words">
+            <Markdown>{sanitise(block.text)}</Markdown>
+            {streaming && isTrailing && (
+              <span className="inline-block w-1.5 h-4 ml-0.5 bg-primary animate-pulse align-middle rounded-sm" />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/**
  * Live-updating streaming bubble — shows tokens as they arrive via the Tauri
  * Channel.
  *
@@ -228,18 +525,15 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
  * with a persisted `TurnBubble`.
  */
 function StreamingBubble({
-  text,
-  thinking,
-  tools,
+  blocks,
   result,
 }: {
-  text: string;
-  thinking: string;
-  tools: ToolCall[];
+  blocks: ContentBlock[];
   result: (ClaudeEvent & { type: "result" }) | null;
 }) {
   const isComplete = result !== null;
   const isError = result?.is_error ?? false;
+  const hasContent = blocks.length > 0;
 
   return (
     <div className="flex gap-2.5">
@@ -284,21 +578,9 @@ function StreamingBubble({
           </div>
         )}
 
-        {/* Collapsible thinking block */}
-        <ThinkingBlock thinking={thinking} />
-
-        {/* Live tool calls — concrete activity while the agent works. */}
-        {!isComplete && <ToolList tools={tools} />}
-
-        {/* Streaming text body */}
-        {text.length > 0 ? (
-          <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-            {sanitise(text)}
-            {/* Blinking cursor while still streaming — typewriter feel. */}
-            {!isComplete && (
-              <span className="inline-block w-1.5 h-4 ml-0.5 bg-primary animate-pulse align-middle rounded-sm" />
-            )}
-          </p>
+        {/* Ordered content blocks — rendered exactly as they arrived. */}
+        {hasContent ? (
+          <BlockList blocks={blocks} streaming={!isComplete} />
         ) : (
           <p className="text-sm text-muted-foreground italic">
             {isComplete ? "(empty response)" : "Waiting for response…"}
@@ -320,6 +602,283 @@ function StreamingBubble({
 // ── Main component ───────────────────────────────────────────────────────────
 
 /**
+ * Render an `AskUserQuestion` prompt as an interactive card.
+ *
+ * The agent has paused the turn to ask the user one or more questions; this
+ * card collects the answers and calls `onSubmit` with a map keyed by question
+ * text. While visible, it's the focal affordance — the composer is disabled.
+ *
+ * Selection model:
+ * - Single-select (`multiSelect: false`): radio-style — clicking an option
+ *   selects it and deselects the rest. Plus an "Other…" affordance with a
+ *   text input, which clears any option selection.
+ * - Multi-select (`multiSelect: true`): checkbox-style — options toggle
+ *   independently. "Other…" appends free text alongside the labels.
+ *
+ * Submit is disabled until every question has at least one answer (a selected
+ * label or non-empty "Other…" text). This mirrors the tool's contract that
+ * every question must be answered.
+ */
+function AskUserQuestionCard({
+  questions,
+  disabled,
+  onSubmit,
+}: {
+  questions: AskUserQuestionSpec[];
+  disabled?: boolean;
+  onSubmit: (answers: AskUserQuestionAnswers) => void;
+}) {
+  // Per-question selection state. For single-select we track a single label
+  // string (or null); for multi-select a Set of labels. Plus an "Other…"
+  // free-text value per question (its presence implies "Other…" was chosen).
+  const [single, setSingle] = useState<Record<string, string | null>>({});
+  const [multi, setMulti] = useState<Record<string, Set<string>>>({});
+  const [otherText, setOtherText] = useState<Record<string, string>>({});
+  const [otherActive, setOtherActive] = useState<Record<string, boolean>>({});
+
+  /** Is this question answered? (a label selected, or non-empty Other text) */
+  function isAnswered(q: AskUserQuestionSpec): boolean {
+    if (otherActive[q.question] && otherText[q.question]?.trim()) return true;
+    if (q.multiSelect) return (multi[q.question]?.size ?? 0) > 0;
+    return single[q.question] != null;
+  }
+
+  /** Toggle a multi-select option on/off. */
+  function toggleMulti(question: string, label: string) {
+    setMulti((prev) => {
+      const next = new Set(prev[question] ?? []);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return { ...prev, [question]: next };
+    });
+  }
+
+  /** Build the answers map from current selection state. */
+  function buildAnswers(): AskUserQuestionAnswers {
+    const out: AskUserQuestionAnswers = {};
+    for (const q of questions) {
+      const labels = q.multiSelect
+        ? Array.from(multi[q.question] ?? [])
+        : single[q.question] != null
+          ? [single[q.question] as string]
+          : [];
+      const ot = otherActive[q.question] ? otherText[q.question] : undefined;
+      out[q.question] = { labels, otherText: ot };
+    }
+    return out;
+  }
+
+  const allAnswered = questions.every(isAnswered);
+
+  return (
+    <div className="my-2 rounded-lg border border-primary/30 bg-[color-mix(in_oklab,var(--primary)_5%,transparent)] p-3 space-y-4">
+      <div className="flex items-center gap-2 text-xs font-medium text-primary">
+        <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
+        <span>The agent has a question for you</span>
+      </div>
+
+      {questions.map((q, qi) => {
+        const answered = isAnswered(q);
+        return (
+          <div key={qi} className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-primary/80 bg-primary/10 rounded px-1.5 py-0.5">
+                {q.header}
+              </span>
+            </div>
+            <p className="text-sm text-foreground leading-relaxed">{q.question}</p>
+
+            <div className="space-y-1.5">
+              {q.options.map((opt, oi) => {
+                const selected = q.multiSelect
+                  ? (multi[q.question]?.has(opt.label) ?? false)
+                  : single[q.question] === opt.label;
+                return (
+                  <button
+                    key={oi}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => {
+                      if (q.multiSelect) {
+                        toggleMulti(q.question, opt.label);
+                      } else {
+                        setSingle((p) => ({ ...p, [q.question]: opt.label }));
+                        setOtherActive((p) => ({ ...p, [q.question]: false }));
+                      }
+                    }}
+                    className={`w-full text-left rounded-md border px-3 py-2 transition disabled:opacity-50 disabled:cursor-not-allowed ${
+                      selected
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border bg-input hover:border-primary/40 text-foreground/90"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span className="text-primary text-xs mt-0.5 shrink-0">
+                        {q.multiSelect ? (selected ? "☑" : "☐") : selected ? "●" : "○"}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium">{opt.label}</div>
+                        {opt.description && (
+                          <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                            {opt.description}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+
+              {/* "Other…" affordance: free-text override. For single-select it
+                  replaces the option selection; for multi-select it appends. */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() =>
+                    setOtherActive((p) => ({
+                      ...p,
+                      [q.question]: !(p[q.question] ?? false),
+                    }))
+                  }
+                  className={`text-xs px-2 py-1 rounded border transition disabled:opacity-50 disabled:cursor-not-allowed ${
+                    otherActive[q.question]
+                      ? "border-primary text-primary bg-primary/10"
+                      : "border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {otherActive[q.question] ? "☑" : "☐"} Other…
+                </button>
+                {otherActive[q.question] && (
+                  <input
+                    type="text"
+                    disabled={disabled}
+                    value={otherText[q.question] ?? ""}
+                    onChange={(e) =>
+                      setOtherText((p) => ({ ...p, [q.question]: e.target.value }))
+                    }
+                    // Single-select: typing Other clears the canned selection.
+                    onFocus={() => {
+                      if (!q.multiSelect) {
+                        setSingle((p) => ({ ...p, [q.question]: null }));
+                      }
+                    }}
+                    placeholder="Type your answer…"
+                    className="flex-1 rounded-md border border-border bg-input px-2 py-1 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+                  />
+                )}
+              </div>
+            </div>
+
+            {!answered && (
+              <p className="text-[10px] text-muted-foreground/60">Please select an option or type an answer.</p>
+            )}
+          </div>
+        );
+      })}
+
+      <div className="flex justify-end pt-1">
+        <button
+          type="button"
+          disabled={disabled || !allAnswered}
+          onClick={() => onSubmit(buildAnswers())}
+          className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Submit answer{questions.length > 1 ? "s" : ""}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Render a manual tool-approval prompt as an interactive Allow / Deny card.
+ *
+ * When the agent calls a mutating/executing tool (Bash, Edit, Write, …) under
+ * the manual-approval policy, the read loop parks until the user decides. This
+ * card is the focal affordance while parked: it shows what the agent wants to
+ * do (tool name + a one-line summary of its input) and offers an Allow and a
+ * Deny button. While visible the composer is disabled — the user must resolve
+ * the prompt (or the turn ends) before sending more input.
+ *
+ * Optional reason text is forwarded on a deny (surfaced to the model as the
+ * denial message); allows ignore it. Mirrors `AskUserQuestionCard`'s visual
+ * language so the two parking states read consistently.
+ */
+function PermissionApprovalCard({
+  toolName,
+  input,
+  disabled,
+  onDecide,
+}: {
+  toolName: string;
+  input: string;
+  disabled?: boolean;
+  onDecide: (decision: ApprovalDecision) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const summary = describeTool(toolName, input);
+
+  return (
+    <div className="my-2 rounded-lg border border-primary/30 bg-[color-mix(in_oklab,var(--primary)_5%,transparent)] p-3 space-y-3">
+      <div className="flex items-center gap-2 text-xs font-medium text-primary">
+        <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
+        <span>The agent needs your approval</span>
+      </div>
+
+      <div className="rounded-md border border-border bg-input/60 px-3 py-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-0.5">
+          {toolName}
+        </div>
+        <div className="font-mono text-xs text-foreground/90 break-all leading-relaxed">
+          {sanitise(summary)}
+        </div>
+      </div>
+
+      <details className="text-xs text-muted-foreground">
+        <summary className="cursor-pointer hover:text-foreground transition-colors select-none">
+          Add a reason (optional, deny only)
+        </summary>
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          disabled={disabled}
+          rows={2}
+          placeholder="Why deny? (shown to the agent)"
+          className="mt-2 w-full resize-none rounded-md border border-border bg-input px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+        />
+      </details>
+
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() =>
+            onDecide({
+              allow: false,
+              reason: reason.trim() || undefined,
+            })
+          }
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-[color-mix(in_oklab,var(--destructive)_40%,transparent)] text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_10%,transparent)] transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <ShieldX className="size-3.5" />
+          Deny
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onDecide({ allow: true })}
+          className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <ShieldCheck className="size-3.5" />
+          Allow
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Streaming-aware chat UI component.
  *
  * Renders a conversation transcript with:
@@ -338,19 +897,24 @@ function StreamingBubble({
  */
 export function Chat({
   turns,
-  streamingText,
-  streamingThinking,
-  streamingTools,
+  streamingBlocks,
   streamingResult,
   busy,
   error,
   onSend,
   onClearError,
   disabled = false,
+  focusNonce,
+  pendingQuestion,
+  onAnswerQuestion,
+  readOnly = false,
+  pendingPermission,
+  onAnswerPermission,
 }: ChatProps) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const isStreaming = streamingText !== null;
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const isStreaming = streamingBlocks !== null;
 
   // Auto-scroll to the bottom when turns change, streaming progresses, or
   // the busy flag toggles (covers the gap before the first token arrives).
@@ -358,15 +922,34 @@ export function Chat({
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [turns, streamingText, streamingThinking, streamingTools, busy]);
+  }, [turns, streamingBlocks, streamingResult, busy]);
+
+  // Focus the composer when the parent bumps `focusNonce` (e.g. after the
+  // "New conversation" button archives the transcript). Lets the user start
+  // typing their first message immediately.
+  useEffect(() => {
+    if (focusNonce === undefined) return;
+    if (inputRef.current) inputRef.current.focus();
+  }, [focusNonce]);
 
   /** Handle the composer send action: validate, clear, fire callback. */
   function handleSend() {
     const text = draft.trim();
-    if (!text || disabled || busy) return;
+    if (!text || disabled || busy || readOnly) return;
     setDraft("");
     onSend(text);
   }
+
+  // Whether either parking affordance is active — the composer is disabled
+  // while the agent waits on the user (not free-form input).
+  const hasPendingQuestion = pendingQuestion != null && pendingQuestion.length > 0;
+  const hasPendingPermission = pendingPermission != null;
+  const composerDisabled =
+    disabled ||
+    busy ||
+    readOnly ||
+    hasPendingQuestion ||
+    hasPendingPermission;
 
   const isEmpty = turns.length === 0 && !isStreaming && !busy;
 
@@ -397,31 +980,73 @@ export function Chat({
         {isEmpty && (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <Bot size={32} className="text-muted-foreground/30 mb-3" />
-            <h3 className="text-sm font-semibold text-foreground mb-1.5">
-              No conversation yet
-            </h3>
-            <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
-              Press <strong>Start next loop</strong> to spawn the agent. It will
-              read{" "}
-              <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">
-                .loopdeck/loops.md
-              </code>
-              , work the next unchecked step, and update the memory files.
-            </p>
+            {readOnly ? (
+              <>
+                <h3 className="text-sm font-semibold text-foreground mb-1.5">
+                  This conversation is empty
+                </h3>
+                <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
+                  Read-only view — pick another conversation from the history
+                  list, or start a new one to send messages.
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 className="text-sm font-semibold text-foreground mb-1.5">
+                  No conversation yet
+                </h3>
+                <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
+                  Type a message below to start a conversation, or press{" "}
+                  <strong>Start next loop</strong> to have the agent work the
+                  next step from{" "}
+                  <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">
+                    .loopdeck/loops.md
+                  </code>
+                  .
+                </p>
+              </>
+            )}
           </div>
         )}
 
-        {/* Completed turns (persisted transcript) */}
-        {turns.map((turn, i) => (
-          <TurnBubble key={i} turn={turn} />
-        ))}
+        {/* Completed turns (persisted transcript).
+            Auto-built loop prompts (source: "loop") are collapsed into compact
+            LoopStepRow markers so consecutive "Start next loop" clicks don't
+            pile up as identical user bubbles. Real user + assistant turns
+            render as full bubbles. */}
+        {groupLoopRuns(turns).map((item, i) =>
+          item.kind === "loop-run" ? (
+            <LoopStepRow key={i} subject={item.subject} count={item.count} />
+          ) : (
+            <TurnBubble key={i} turn={item.turn} />
+          ),
+        )}
+
+        {/* Pending AskUserQuestion — the agent is parked waiting on the user.
+            Rendered above the streaming bubble so it's the focal affordance. */}
+        {hasPendingQuestion && onAnswerQuestion && (
+          <AskUserQuestionCard
+            questions={pendingQuestion}
+            disabled={disabled}
+            onSubmit={onAnswerQuestion}
+          />
+        )}
+
+        {/* Pending manual approval — the agent is parked waiting on Allow/Deny.
+            Sibling to the question card; same focal-above-stream placement. */}
+        {hasPendingPermission && pendingPermission && onAnswerPermission && (
+          <PermissionApprovalCard
+            toolName={pendingPermission.toolName}
+            input={pendingPermission.input}
+            disabled={disabled}
+            onDecide={onAnswerPermission}
+          />
+        )}
 
         {/* Streaming bubble — live token accumulation via Channel */}
         {isStreaming && (
           <StreamingBubble
-            text={streamingText ?? ""}
-            thinking={streamingThinking ?? ""}
-            tools={streamingTools ?? []}
+            blocks={streamingBlocks ?? []}
             result={streamingResult}
           />
         )}
@@ -436,35 +1061,50 @@ export function Chat({
       </div>
 
       {/* ── Composer ── */}
+      {/* Disabled while a question or approval is pending (the agent is parked
+          waiting on the answer/verdict, not free-form input), or in read-only
+          mode (viewing an archived conversation). */}
       <div className="pt-3 mt-3 border-t border-border shrink-0">
-        <div className="flex items-end gap-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
+        {readOnly ? (
+          <div className="text-[11px] text-muted-foreground italic text-center py-2">
+            Read-only — this is a past conversation. Start a new one to send
+            messages.
+          </div>
+        ) : (
+          <div className="flex items-end gap-2">
+            <textarea
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder={
+                turns.length === 0
+                  ? "Start a new conversation… (Enter to send, Shift+Enter for newline)"
+                  : "Send a follow-up message… (Enter to send, Shift+Enter for newline)"
               }
-            }}
-            placeholder="Send a follow-up message… (Enter to send, Shift+Enter for newline)"
-            rows={2}
-            disabled={disabled || busy}
-            className="flex-1 resize-none rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-          />
-          <button
-            onClick={handleSend}
-            disabled={disabled || busy || !draft.trim()}
-            className="inline-flex items-center justify-center size-9 shrink-0 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Send message"
-          >
-            {busy ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Send className="size-4" />
-            )}
-          </button>
-        </div>
+              rows={2}
+              disabled={composerDisabled}
+              className="flex-1 resize-none rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+            />
+            <button
+              onClick={handleSend}
+              disabled={composerDisabled || !draft.trim()}
+              className="inline-flex items-center justify-center size-9 shrink-0 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Send message"
+            >
+              {busy ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Send className="size-4" />
+              )}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

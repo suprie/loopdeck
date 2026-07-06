@@ -29,6 +29,31 @@ impl CommandEnv for tokio::process::Command {
     }
 }
 
+/// A single assistant content block, recorded in **arrival order**.
+///
+/// This is the persistable/transcript mirror of the internal `ContentBlock`:
+/// `ToolUse` carries its input as a JSON string (like `ToolCallRecord`) so the
+/// shape round-trips cleanly through `active.jsonl`. Keeping the full ordered
+/// sequence — rather than flattening it into separate `text` / `thinking` /
+/// `tool_calls` fields — lets the UI render a turn exactly as it unfolded
+/// (e.g. thinking → text → tool_use → thinking → text), instead of a fixed
+/// grouping that loses the interleaving.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlockRecord {
+    /// One `ContentBlock::Text` from an assistant message.
+    Text { text: String },
+    /// One `ContentBlock::Thinking` from an assistant message.
+    Thinking { thinking: String },
+    /// One `ContentBlock::ToolUse` from an assistant message.
+    ToolUse {
+        /// Tool name, e.g. "Read", "Edit", "Bash".
+        name: String,
+        /// The raw tool input object, serialized to a JSON string.
+        input: String,
+    },
+}
+
 /// Structured result from a `call_agents` invocation.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentResponse {
@@ -46,6 +71,20 @@ pub struct AgentResponse {
     pub duration_ms: u64,
 
     pub session_id: String,
+    /// Tool calls the assistant made during the turn (name + input), in order.
+    /// Captured so the transcript can record how the model reached its answer,
+    /// not just the final summary text.
+    pub tool_calls: Vec<crate::conversation::ToolCallRecord>,
+    /// The assistant content blocks for the turn, in **arrival order**. This is
+    /// the canonical, order-preserving view used for rendering; `text` /
+    /// `thinking` / `tool_calls` above are kept as flattened conveniences and as
+    /// a fallback for callers that don't yet consume `blocks`.
+    pub blocks: Vec<ContentBlockRecord>,
+    /// Task lifecycle events (`tool_use_result.task`) observed during the turn,
+    /// in arrival order. Persisted on the transcript so task creates / updates
+    /// are recorded alongside the tool calls that produced them. Foundation for
+    /// a future live Tasks panel — kept as a flat list per turn for now.
+    pub tasks: Vec<crate::conversation::TaskRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,6 +117,55 @@ pub enum ClaudeEvent {
         /// decides how much to show (path, command, etc.).
         input: String,
     },
+    /// A task lifecycle event from a `tool_use_result.task` line — the agent
+    /// created or updated a Task/TodoWrite item. Surfaced live so the streaming
+    /// bubble can show "✓ Task #10 created: …" alongside tool activity, and
+    /// persisted on the turn for replay. Foundation for a future Tasks panel.
+    TaskUpdate {
+        /// The structured task payload — id / subject / status. Mirrors
+        /// `conversation::TaskRecord` so the persisted and live shapes match.
+        task: crate::conversation::TaskRecord,
+    },
+    /// A permission decision made by the LoopDeck policy layer in response to a
+    /// Claude `control_request`. Ephemeral — not part of the persisted
+    /// transcript.
+    ///
+    /// **Three states for `decision`:**
+    /// - `"pending"` — a mutating/executing tool (Bash/Edit/Write/…) needs
+    ///   manual approval. Emitted BEFORE the `control_response` is written; the
+    ///   read loop then parks until the user resolves it via
+    ///   `agent_answer_permission`. The UI renders an Allow/Deny card and a
+    ///   pending marker in the streaming bubble.
+    /// - `"allow"` / `"deny"` — the final verdict. For manual-approval tools
+    ///   this is emitted a second time (after the user's choice) so the UI's
+    ///   pending marker becomes ✓/✗. For auto-decided tools (read-only tools
+    ///   under allow-by-default, or destructive-floor denies) it's the only
+    ///   emission and serves as post-hoc narration of the synchronous policy.
+    PermissionRequest {
+        request_id: String,
+        tool_name: String,
+        /// The raw tool input object, serialized to a JSON string.
+        input: String,
+        /// `"pending"` (awaiting user), or `"allow"` / `"deny"` (resolved).
+        decision: String,
+        /// Why LoopDeck allowed or denied. Empty for pending and plain allows.
+        reason: String,
+    },
+    /// An `AskUserQuestion` tool call that needs the *human's* answer before
+    /// the turn can proceed. Unlike `PermissionRequest` (auto-decided by the
+    /// policy), this event is emitted **before** the `control_response` is
+    /// written — the read loop parks on a oneshot until the frontend resolves
+    /// it via the `agent_answer_question` command. Carries the structured
+    /// questions/options so the UI can render option buttons directly.
+    AskUserQuestion {
+        /// Correlates to the originating `control_request`. The frontend echoes
+        /// this back in `agent_answer_question`.
+        request_id: String,
+        /// Always `"AskUserQuestion"` — kept for symmetry with the wire shape.
+        tool_name: String,
+        /// The questions to surface, in order.
+        questions: Vec<AskUserQuestionSpec>,
+    },
     /// The terminal event signalling the turn is complete. Carries the full
     /// aggregated `AgentResponse` so the UI can reconcile its streamed deltas
     /// and display usage/duration in a single payload.
@@ -97,6 +185,52 @@ pub enum ClaudeEvent {
         /// The session id (drives `--resume`). Present on all assistant turns.
         session_id: String,
     },
+}
+
+/// One selectable option in an `AskUserQuestion` question.
+///
+/// Mirrors the wire shape of `AskUserQuestion`'s `options` array: a label the
+/// user picks from, plus a longer description shown beneath it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AskUserQuestionOption {
+    /// Short pickable text, e.g. `"suprie/ngopi-yuk"`.
+    pub label: String,
+    /// Longer explanation of what the option entails.
+    pub description: String,
+}
+
+/// One question surfaced to the user via the `AskUserQuestion` tool.
+///
+/// Wire shape (under `control_request.request.input.questions[]`): `question`,
+/// `header`, `options[]`, `multiSelect`. We deserialize the questions array
+/// into these so the UI can render structured option buttons rather than a
+/// flattened string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AskUserQuestionSpec {
+    /// The full question text. Also the key used in the `answers` map sent back
+    /// to Claude (`answers: { "<question>": <label|labels> }`).
+    pub question: String,
+    /// Short tag rendered as a chip above the question (e.g. `"GitHub Repo"`).
+    pub header: String,
+    /// The selectable options.
+    pub options: Vec<AskUserQuestionOption>,
+    /// Whether the user may select multiple options (checkbox vs radio UX).
+    #[serde(rename = "multiSelect")]
+    pub multi_select: bool,
+}
+
+/// Parse the `questions` array out of an `AskUserQuestion` tool input.
+///
+/// Returns an empty vec on any shape mismatch (and the caller falls back to a
+/// deny), so a malformed request can't panic the read loop. Used by
+/// `ClaudeSession::answer_control_request` to build the `AskUserQuestion` event.
+pub(crate) fn parse_ask_user_questions(input: &serde_json::Value) -> Vec<AskUserQuestionSpec> {
+    let Some(arr) = input.get("questions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|q| serde_json::from_value::<AskUserQuestionSpec>(q.clone()).ok())
+        .collect()
 }
 
 // ── NDJSON stream event types (internal) ───────────────────────────────────
@@ -125,11 +259,305 @@ pub(crate) enum StreamEvent {
         #[serde(default)]
         usage: Option<RawUsage>,
     },
+
+    /// A `type: "user"` event carrying a `tool_use_result` for the
+    /// Task/TodoWrite tool. Despite the `user` role, this is NOT a human turn —
+    /// it's the tool's structured result routed back through the user role by
+    /// Claude's stream protocol. We model it distinctly so the read loop never
+    /// confuses it with real user input, and so its task payload can be
+    /// surfaced + persisted.
+    ///
+    /// Only the task-bearing shape is modelled today; other `tool_use_result`
+    /// payloads (file reads, command output) are still skipped as before, since
+    /// their content already reaches us via the assistant `tool_use` block.
+    #[serde(rename = "user")]
+    ToolResult {
+        /// The tool result body. `task` is populated when the originating tool
+        /// was Task/TodoWrite; serde ignores the rest of the wire shape.
+        #[serde(default)]
+        tool_use_result: Option<ToolUseResult>,
+        /// The `message.content[]` of the user event — each `tool_result`
+        /// entry's plain text. We keep it because the create/update verb
+        /// ("created" vs "updated") lives here rather than in the structured
+        /// `task` object, mined by `task_status_from`.
+        #[serde(default)]
+        message: Option<UserMessage>,
+    },
+
+    /// A permission/approval request emitted via `--permission-prompt-tool stdio`.
+    ///
+    /// Claude sends this whenever a tool call doesn't match an allow rule, and
+    /// then **blocks** until we write back a `control_response` with the same
+    /// `request_id`. Before this variant existed, the read loop silently
+    /// skipped these lines (they didn't match any known `type`) and Claude
+    /// hung forever waiting for a response — see `claude_session.rs`.
+    #[serde(rename = "control_request")]
+    ControlRequest {
+        /// Correlates the request to our response. Claude matches its next
+        /// action off this id.
+        request_id: String,
+        /// The request body — we only model the fields we act on; serde
+        /// ignores the rest (permission_suggestions, display_name, …).
+        request: ControlRequestBody,
+    },
+}
+
+/// The body of a `control_request`. Only the `permission`/`can_use_tool`
+/// subtype is modelled; `subtype` is kept as a free-form string so a future
+/// subtype (e.g. a user-input prompt) deserializes instead of failing.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlRequestBody {
+    /// e.g. `"can_use_tool"`. We don't match on it yet — recorded for logs
+    /// and assertions in tests, not read by production code.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) subtype: String,
+    /// Tool name, e.g. "Bash", "Edit". Falls back to empty if absent.
+    #[serde(default)]
+    pub(crate) tool_name: String,
+    /// The raw tool input object (e.g. `{"command":"git add ."}`).
+    #[serde(default = "default_tool_input")]
+    pub(crate) input: serde_json::Value,
+    /// The originating tool_use id, when present. Useful for log correlation.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) tool_use_id: Option<String>,
+}
+
+/// The response we write back to Claude's stdin in reply to a `control_request`.
+///
+/// Wire shape (per the Claude control protocol):
+/// ```json
+/// { "type":"control_response", "response": {
+///     "subtype":"success", "request_id":"<id>",
+///     "response": { "behavior":"allow" }            // or
+///     "response": { "behavior":"deny", "message":"…" }   // or
+///     "response": { "behavior":"allow", "updatedInput": { … } }
+/// }}
+/// ```
+/// Matched by `request_id`, not tool_use_id. Built from a `Decision` so the
+/// `permission` module stays the single source of policy truth. The
+/// `updated_input` arm is used by `AskUserQuestion`: the tool is allowed to
+/// run, but with its input rewritten to carry the user's answers (per the
+/// Claude Code "Handle approvals and user input" protocol).
+pub(crate) struct ControlResponsePayload {
+    request_id: String,
+    behavior: &'static str,
+    /// Present only on deny — Claude surfaces this to the model as the reason.
+    message: Option<String>,
+    /// Present only on the `AskUserQuestion` allow path — the rewritten tool
+    /// input, carrying the user's answers. When set, this is serialized as
+    /// `response.response.updatedInput` alongside `behavior: "allow"`.
+    updated_input: Option<serde_json::Value>,
+}
+
+impl ControlResponsePayload {
+    pub(crate) fn allow(request_id: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+            behavior: "allow",
+            message: None,
+            updated_input: None,
+        }
+    }
+
+    pub(crate) fn deny(request_id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+            behavior: "deny",
+            message: Some(reason.into()),
+            updated_input: None,
+        }
+    }
+
+    /// Allow the tool call but rewrite its input before it runs. Used to feed
+    /// the user's answers back into `AskUserQuestion` — Claude executes the
+    /// tool with `updated_input` (which contains `answers`), reads the result,
+    /// and continues the turn. The envelope is identical to `allow()`; only
+    /// the inner `response` object gains an `updatedInput` key.
+    pub(crate) fn allow_with_updated_input(
+        request_id: impl Into<String>,
+        updated_input: serde_json::Value,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            behavior: "allow",
+            message: None,
+            updated_input: Some(updated_input),
+        }
+    }
+
+    /// Serialize to the single NDJSON line to write to stdin (trailing `\n`
+    /// added by the caller).
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        // Allow-with-updatedInput: behavior + updatedInput, no message.
+        if self.behavior == "allow" {
+            if let Some(updated) = &self.updated_input {
+                return serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": self.request_id,
+                        "response": {
+                            "behavior": "allow",
+                            "updatedInput": updated,
+                        },
+                    }
+                });
+            }
+        }
+        let inner = match &self.message {
+            Some(msg) => serde_json::json!({
+                "behavior": self.behavior,
+                "message": msg,
+            }),
+            None => serde_json::json!({ "behavior": self.behavior }),
+        };
+        serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": self.request_id,
+                "response": inner,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AssistantMessage {
     pub(crate) content: Vec<ContentBlock>,
+}
+
+/// The `tool_use_result` body of a `type: "user"` tool-result event.
+///
+/// Only the `task` field is modelled — it's the structured payload the
+/// Task/TodoWrite tool returns. Other tools' result bodies are ignored (their
+/// content already arrives via the assistant `tool_use` block), so this is a
+/// narrow lens rather than a general tool-result decoder.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ToolUseResult {
+    #[serde(default)]
+    pub(crate) task: Option<TaskWire>,
+}
+
+/// The structured task payload inside a `tool_use_result`.
+///
+/// Wire shape (under `tool_use_result.task`): `id` + `subject`. The
+/// create/update verb isn't carried here — it's mined from the surrounding
+/// text content by `task_status_from`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct TaskWire {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) subject: String,
+}
+
+/// The `message.content[]` entry of a `type: "user"` tool-result event.
+///
+/// Each entry is a `tool_result` carrying plain-text `content`. We extract the
+/// text from all entries to mine the create/update verb (the structured `task`
+/// object doesn't carry it). Other shapes are ignored via the catch-all.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum UserContentItem {
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    /// Any other shape — ignored. Keeping a catch-all (rather than failing)
+    /// means a new content-item type can't break parsing.
+    #[serde(other)]
+    Other,
+}
+
+/// The `message` envelope of a `type: "user"` event.
+///
+/// Mirrors `AssistantMessage`'s shape but for the user role: a `content` array
+/// whose entries are `tool_result` items (or other shapes we ignore). Used only
+/// to mine the create/update verb text from task tool results.
+#[derive(Debug, Deserialize)]
+pub(crate) struct UserMessage {
+    #[serde(default)]
+    pub(crate) content: Vec<UserContentItem>,
+}
+
+/// Read the plain-text content out of a `tool_result` content item, regardless
+/// of whether it's a string or an array of `{type:"text", text:"…"}` blocks
+/// (Claude uses both shapes). Returns `None` for non-text payloads.
+fn user_content_item_text(content: &serde_json::Value) -> Option<String> {
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = content.as_array() {
+        let mut texts = Vec::new();
+        for item in arr {
+            if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                    texts.push(t.to_string());
+                }
+            }
+        }
+        if !texts.is_empty() {
+            return Some(texts.join("\n"));
+        }
+    }
+    None
+}
+
+/// Best-effort mine the task verb ("created"/"updated"/…) from a tool-result
+/// text like `"Task #10 created successfully: …"`. Falls back to `"updated"`
+/// when we can't classify — creating a task is the rarer, more notable event,
+/// so we only claim "created" when the text explicitly says so; everything else
+/// is conservatively an "update". Never returns empty so the UI always has a
+/// label.
+fn task_status_from(text: &str) -> &'static str {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("created") {
+        "created"
+    } else if lower.contains("updated") || lower.contains("modified") {
+        "updated"
+    } else if lower.contains("completed") || lower.contains("done") {
+        "completed"
+    } else if lower.contains("deleted") || lower.contains("removed") {
+        "deleted"
+    } else {
+        "updated"
+    }
+}
+
+/// Extract a `TaskRecord` from a parsed `StreamEvent::ToolResult`, if it
+/// carries a task payload.
+///
+/// Single source of truth for "tool-result line → task record" so the live
+/// streaming path (`send_message_streaming`) and the accumulator
+/// (`ingest_event`) can't drift apart — both call this. Returns `None` for
+/// tool results without a task (the common case: file reads, command output).
+pub(crate) fn extract_task_from_tool_result(event: &StreamEvent) -> Option<crate::conversation::TaskRecord> {
+    let StreamEvent::ToolResult { tool_use_result, message } = event else {
+        return None;
+    };
+    let TaskWire { id, subject } = tool_use_result.as_ref()?.task.as_ref()?;
+    if id.is_empty() && subject.is_empty() {
+        return None;
+    }
+    let status = message
+        .as_ref()
+        .and_then(|m| {
+            m.content.iter().find_map(|item| match item {
+                UserContentItem::ToolResult { content } => user_content_item_text(content),
+                _ => None,
+            })
+        })
+        .map(|t| task_status_from(&t).to_string())
+        .unwrap_or_else(|| String::from("updated"));
+    Some(crate::conversation::TaskRecord {
+        id: id.clone(),
+        subject: subject.clone(),
+        status,
+    })
 }
 
 /// Default for `ContentBlock::ToolUse::input` when the block omits it.
@@ -180,6 +608,20 @@ pub(crate) struct ResponseAccumulator {
     duration_ms: u64,
     usage: Option<UsageInfo>,
     session_id: String,
+    /// Tool calls collected from assistant `tool_use` blocks, in arrival order.
+    /// Populated alongside the live ClaudeEvent::ToolUse emissions so the
+    /// persisted transcript can record how the model reached its answer.
+    tool_calls: Vec<crate::conversation::ToolCallRecord>,
+    /// The assistant content blocks for the turn, in **arrival order**. Each
+    /// `ContentBlock` from each assistant message is pushed here as it's
+    /// ingested, so the flattened `text`/`thinking`/`tool_calls` fields above
+    /// can be reconstructed *without* losing how the blocks interleaved.
+    blocks: Vec<ContentBlockRecord>,
+    /// Task lifecycle events (`tool_use_result.task`) collected from `type:
+    /// "user"` tool-result lines, in arrival order. Populated alongside the
+    /// live ClaudeEvent::TaskUpdate emissions so the persisted transcript
+    /// records task creates / updates.
+    tasks: Vec<crate::conversation::TaskRecord>,
 }
 
 impl ResponseAccumulator {
@@ -198,14 +640,30 @@ impl ResponseAccumulator {
             } => {
                 for block in message.content {
                     match block {
-                        ContentBlock::Text { text: t } => self.text.push_str(&t),
+                        ContentBlock::Text { text: t } => {
+                            self.text.push_str(&t);
+                            self.blocks.push(ContentBlockRecord::Text { text: t });
+                        }
                         ContentBlock::Thinking { thinking: th } => {
                             self.thinking.get_or_insert_default().push_str(&th);
+                            self.blocks
+                                .push(ContentBlockRecord::Thinking { thinking: th });
                         }
-                        // Tool-use blocks aren't part of the aggregated text —
-                        // they're streamed live via ClaudeEvent::ToolUse in
-                        // `send_message_streaming`, so nothing to accumulate here.
-                        ContentBlock::ToolUse { .. } => {}
+                        // Capture tool calls for the aggregated response so the
+                        // transcript records them. Live streaming still emits
+                        // ClaudeEvent::ToolUse separately in send_message_streaming.
+                        ContentBlock::ToolUse { name, input } => {
+                            let input_str = input.to_string();
+                            self.tool_calls
+                                .push(crate::conversation::ToolCallRecord {
+                                    name: name.clone(),
+                                    input: input_str.clone(),
+                                });
+                            self.blocks.push(ContentBlockRecord::ToolUse {
+                                name,
+                                input: input_str,
+                            });
+                        }
                     }
                 }
                 self.session_id = sid;
@@ -229,6 +687,24 @@ impl ResponseAccumulator {
                 true
             }
             StreamEvent::System => false,
+            // Control requests are answered inline in the read loop
+            // (`send_message[_streaming]`) before reaching the accumulator — by
+            // the time we get here, the response has already been written. They
+            // never carry assistant content and are never terminal, so this arm
+            // is a no-op that exists to keep the match exhaustive.
+            StreamEvent::ControlRequest { .. } => false,
+            // A `type: "user"` tool-result line. We only act on the
+            // task-bearing shape: extract the structured task via the shared
+            // helper (same one the streaming path uses for the live event) and
+            // push a `TaskRecord`. Other tool results (file reads, command
+            // output) are silently ignored here — their content already reached
+            // us via the assistant `tool_use` block.
+            StreamEvent::ToolResult { .. } => {
+                if let Some(task) = extract_task_from_tool_result(&event) {
+                    self.tasks.push(task);
+                }
+                false
+            }
         }
     }
 
@@ -248,7 +724,33 @@ impl ResponseAccumulator {
             is_error: self.is_error,
             duration_ms: self.duration_ms,
             session_id: self.session_id,
+            tool_calls: self.tool_calls,
+            blocks: self.blocks,
+            tasks: self.tasks,
         })
+    }
+
+    /// Snapshot the accumulator's state as a partial `AgentResponse`.
+    ///
+    /// Used by the streaming loop on graceful interrupt: the terminal `result`
+    /// event never arrives (the turn was stopped), so we synthesize one from
+    /// whatever was accumulated so far and emit it as a `ClaudeEvent::Result`
+    /// so the frontend reconciles (clears the streaming bubble + reloads the
+    /// transcript). `result_text` is empty until the real result event, so the
+    /// caller stamps a "(interrupted)" marker onto the synthesized result.
+    pub(crate) fn clone_partial(&self) -> AgentResponse {
+        AgentResponse {
+            text: self.text.clone(),
+            thinking: self.thinking.clone(),
+            result: self.result_text.clone(),
+            usage: self.usage.clone(),
+            is_error: self.is_error,
+            duration_ms: self.duration_ms,
+            session_id: self.session_id.clone(),
+            tool_calls: self.tool_calls.clone(),
+            blocks: self.blocks.clone(),
+            tasks: self.tasks.clone(),
+        }
     }
 }
 
@@ -421,6 +923,308 @@ mod tests {
     fn test_parse_response_empty_input() {
         assert!(parse_response("").is_none());
         assert!(parse_response("garbage\n").is_none());
+    }
+
+    // ── control protocol (permission requests) ──────────────────────────
+
+    /// Regression guard for the stall: a `control_request` line MUST parse into
+    /// `StreamEvent::ControlRequest` (with its `request_id`), not fall through
+    /// to `None`. Before this variant existed, the read loop skipped these lines
+    /// silently and Claude hung waiting for a response that was never coming.
+    #[test]
+    fn test_parse_control_request_from_prd_sample() {
+        // Verbatim shape from the PRD's "Sample → Event" block.
+        let line = r#"{"type":"control_request","request_id":"4cce7fc0-bcde-4297-9689-ebd53b1ada0e","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"which golangci-lint 2>/dev/null && golangci-lint --version 2>/dev/null || echo \"golangci-lint not installed locally (will run in CI)\"","description":"Check golangci-lint availability"},"description":"Check golangci-lint availability","permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"golangci-lint --version"}],"behavior":"allow","destination":"localSettings"}],"decision_reason_type":"subcommandResults","tool_use_id":"call_01_pOZIcY2erlyvGrQqTLMT0680"}}"#;
+
+        let event = parse_stream_line(line).expect("control_request must parse");
+        match event {
+            StreamEvent::ControlRequest { request_id, request } => {
+                assert_eq!(request_id, "4cce7fc0-bcde-4297-9689-ebd53b1ada0e");
+                assert_eq!(request.subtype, "can_use_tool");
+                assert_eq!(request.tool_name, "Bash");
+                let cmd = request.input["command"].as_str().expect("command field");
+                assert!(cmd.contains("golangci-lint"));
+                assert_eq!(
+                    request.tool_use_id.as_deref(),
+                    Some("call_01_pOZIcY2erlyvGrQqTLMT0680")
+                );
+            }
+            other => panic!("expected ControlRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_control_request_lenient_on_missing_fields() {
+        // A minimal request must still parse — serde ignores unknown fields and
+        // defaults the optional ones so a malformed/abbreviated request can't
+        // take down the read loop.
+        let line = r#"{"type":"control_request","request_id":"req-1","request":{"tool_name":"Edit","input":{"file_path":"/a.rs"}}}"#;
+        let event = parse_stream_line(line).expect("minimal control_request must parse");
+        match event {
+            StreamEvent::ControlRequest { request_id, request } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(request.subtype, "", "missing subtype → empty default");
+                assert_eq!(request.tool_name, "Edit");
+                assert!(request.tool_use_id.is_none());
+            }
+            other => panic!("expected ControlRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_control_request_input_defaults_to_empty_object() {
+        // No `input` at all → empty object, so downstream `input[...]` lookups
+        // are safe (mirrors the tool_use input default).
+        let line = r#"{"type":"control_request","request_id":"req-2","request":{"tool_name":"Bash"}}"#;
+        let event = parse_stream_line(line).expect("control_request must parse");
+        match event {
+            StreamEvent::ControlRequest { request, .. } => {
+                assert!(request.input.is_object());
+                assert!(request.input.as_object().unwrap().is_empty());
+            }
+            other => panic!("expected ControlRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_control_response_allow_shape_matches_protocol() {
+        // The exact wire shape Claude expects (PRD "Sample → Response").
+        let payload = ControlResponsePayload::allow("4cce7fc0-bcde-4297-9689-ebd53b1ada0e");
+        let json = payload.to_json();
+        assert_eq!(json["type"], "control_response");
+        assert_eq!(json["response"]["subtype"], "success");
+        assert_eq!(
+            json["response"]["request_id"],
+            "4cce7fc0-bcde-4297-9689-ebd53b1ada0e"
+        );
+        assert_eq!(json["response"]["response"]["behavior"], "allow");
+        // Allow carries no message.
+        assert!(
+            json["response"]["response"]["message"].is_null(),
+            "allow must not carry a message"
+        );
+    }
+
+    #[test]
+    fn test_control_response_deny_carries_reason() {
+        let payload =
+            ControlResponsePayload::deny("req-9", "destructive command blocked by policy floor");
+        let json = payload.to_json();
+        assert_eq!(json["response"]["request_id"], "req-9");
+        assert_eq!(json["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            json["response"]["response"]["message"],
+            "destructive command blocked by policy floor"
+        );
+    }
+
+    #[test]
+    fn test_control_response_allow_with_updated_input_shape() {
+        // The AskUserQuestion response: same envelope as allow(), but the inner
+        // `response` carries `behavior: "allow"` + `updatedInput` (the rewritten
+        // tool input, here with the user's answers merged in). This is the exact
+        // shape Claude expects per the "Handle approvals and user input" docs.
+        let updated = serde_json::json!({
+            "questions": [{"question": "Repo?", "header": "GitHub", "options": [], "multiSelect": false}],
+            "answers": { "Repo?": "suprie/ngopi-yuk" }
+        });
+        let payload = ControlResponsePayload::allow_with_updated_input("req-q", updated.clone());
+        let json = payload.to_json();
+
+        // Envelope unchanged.
+        assert_eq!(json["type"], "control_response");
+        assert_eq!(json["response"]["subtype"], "success");
+        assert_eq!(json["response"]["request_id"], "req-q");
+
+        // Inner response carries both behavior and the rewritten input.
+        assert_eq!(json["response"]["response"]["behavior"], "allow");
+        assert_eq!(json["response"]["response"]["updatedInput"], updated);
+        // Must NOT carry a `message` (that's the deny path).
+        assert!(
+            json["response"]["response"]["message"].is_null(),
+            "allow-with-updatedInput must not carry a message"
+        );
+        // And the plain-allow keys must be absent.
+        assert!(
+            json["response"]["response"].get("updatedInput").is_some(),
+            "updatedInput key must be present"
+        );
+    }
+
+    #[test]
+    fn test_plain_allow_does_not_carry_updated_input() {
+        // Regression guard: the original allow() path must not accidentally
+        // emit `updatedInput`. Only allow_with_updated_input does.
+        let json = ControlResponsePayload::allow("req-a").to_json();
+        assert!(
+            json["response"]["response"].get("updatedInput").is_none(),
+            "plain allow must not carry updatedInput"
+        );
+    }
+
+    #[test]
+    fn test_parse_ask_user_questions_extracts_structured_options() {
+        // A realistic AskUserQuestion input: the questions array carries
+        // question/header/options/multiSelect each. We extract them into
+        // structured specs so the UI can render option buttons directly.
+        let input = serde_json::json!({
+            "questions": [
+                {
+                    "question": "Where should I push this repo?",
+                    "header": "GitHub Repo",
+                    "options": [
+                        {"label": "suprie/ngopi-yuk", "description": "personal account"},
+                        {"label": "Create new org repo", "description": "you provide org/repo"}
+                    ],
+                    "multiSelect": false
+                }
+            ]
+        });
+        let specs = parse_ask_user_questions(&input);
+        assert_eq!(specs.len(), 1);
+        let q = &specs[0];
+        assert_eq!(q.question, "Where should I push this repo?");
+        assert_eq!(q.header, "GitHub Repo");
+        assert!(!q.multi_select);
+        assert_eq!(q.options.len(), 2);
+        assert_eq!(q.options[0].label, "suprie/ngopi-yuk");
+        assert_eq!(q.options[1].description, "you provide org/repo");
+    }
+
+    #[test]
+    fn test_parse_ask_user_questions_lenient_on_bad_shape() {
+        // Missing questions array / wrong type / malformed entry: never panic,
+        // just return an empty (or partial) vec. The caller falls back to deny.
+        assert!(parse_ask_user_questions(&serde_json::json!({})).is_empty());
+        assert!(parse_ask_user_questions(&serde_json::json!({"questions": "nope"})).is_empty());
+        // A malformed entry is skipped; a well-formed one alongside it survives.
+        let mixed = serde_json::json!({
+            "questions": [
+                {"question": "ok", "header": "h", "options": [], "multiSelect": true},
+                {"wrong": "shape"}
+            ]
+        });
+        let specs = parse_ask_user_questions(&mixed);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].question, "ok");
+    }
+
+    // ── tool-result task parsing ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_tool_result_extracts_task_create() {
+        // The headline case from the user's sample JSON: a `type: "user"`
+        // tool-result carrying `tool_use_result.task`. Must parse into a
+        // `StreamEvent::ToolResult` whose extracted `TaskRecord` carries the
+        // id + subject + "created" status (mined from the text content).
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"call_e944","type":"tool_result","content":"Task #10 created successfully: Test truncate helper (list.go)"}]},"tool_use_result":{"task":{"id":"10","subject":"Test truncate helper (list.go)"}}}"#;
+        let event = parse_stream_line(line).expect("tool-result line must parse");
+        let task = extract_task_from_tool_result(&event).expect("task must extract");
+        assert_eq!(task.id, "10");
+        assert_eq!(task.subject, "Test truncate helper (list.go)");
+        assert_eq!(task.status, "created");
+    }
+
+    #[test]
+    fn test_parse_tool_result_mines_update_verb() {
+        // An update carries the same task shape but the text says "updated" —
+        // the status field must reflect that, not default or mis-classify.
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Task #3 updated"}]},"tool_use_result":{"task":{"id":"3","subject":"Wire up the thing"}}}"#;
+        let event = parse_stream_line(line).expect("update line must parse");
+        let task = extract_task_from_tool_result(&event).expect("task must extract");
+        assert_eq!(task.id, "3");
+        assert_eq!(task.status, "updated");
+    }
+
+    #[test]
+    fn test_parse_tool_result_handles_array_content_shape() {
+        // Claude sometimes emits tool_result `content` as an array of text
+        // blocks rather than a plain string. The verb mining must handle both.
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"Task #1 completed"}]}]},"tool_use_result":{"task":{"id":"1","subject":"Done thing"}}}"#;
+        let event = parse_stream_line(line).expect("array-content line must parse");
+        let task = extract_task_from_tool_result(&event).expect("task must extract");
+        assert_eq!(task.status, "completed");
+    }
+
+    #[test]
+    fn test_parse_tool_result_without_task_returns_none() {
+        // The common case: a tool result that is NOT a task (file read,
+        // command output). It still parses as `StreamEvent::ToolResult` (so
+        // the read loop doesn't skip it), but extracts no task — keeping task
+        // logic from firing on unrelated tool results.
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"(Bash completed with no output)"}]},"tool_use_result":{}}"#;
+        let event = parse_stream_line(line).expect("non-task result must still parse");
+        assert!(extract_task_from_tool_result(&event).is_none());
+    }
+
+    #[test]
+    fn test_accumulator_collects_tasks_in_arrival_order() {
+        // Two task events in one turn must both land on the accumulated
+        // `AgentResponse.tasks`, in arrival order — this is what gets persisted
+        // on the `ConversationTurn`.
+        let mut acc = ResponseAccumulator::new();
+        let create = parse_stream_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Task #1 created: A"}]},"tool_use_result":{"task":{"id":"1","subject":"A"}}}"#,
+        ).unwrap();
+        let update = parse_stream_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Task #1 updated"}]},"tool_use_result":{"task":{"id":"1","subject":"A"}}}"#,
+        ).unwrap();
+        acc.ingest_event(create);
+        acc.ingest_event(update);
+        // Drive a Result so finish() returns Some.
+        acc.ingest_event(StreamEvent::Result {
+            result: "done".into(),
+            is_error: false,
+            duration_ms: 1,
+            total_cost_usd: None,
+            usage: None,
+        });
+        let resp = acc.finish().expect("finish must produce a response");
+        assert_eq!(resp.tasks.len(), 2);
+        assert_eq!(resp.tasks[0].status, "created");
+        assert_eq!(resp.tasks[1].status, "updated");
+    }
+
+    #[test]
+    fn test_parse_response_blocks_preserve_arrival_order() {
+        // The headline reason `blocks` exists: a turn that interleaves
+        // thinking → text → tool_use → thinking → text must keep that exact
+        // sequence. Flattening into separate fields would lose the interleaving
+        // and the UI would fall back to a fixed thinking→tools→text grouping.
+        // Two assistant messages on separate lines model the real stream, where
+        // each tool round-trip comes back as its own assistant message.
+        let ndjson = concat!(
+            r#"{"type":"assistant","message":{"content":["#,
+            r#"{"type":"thinking","thinking":"plan"},"#,
+            r#"{"type":"text","text":"let me check"},"#,
+            r#"{"type":"tool_use","name":"Read","input":{"file_path":"/a.rs"}}"#,
+            r#"]},"session_id":"session_id"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":["#,
+            r#"{"type":"thinking","thinking":"now edit"},"#,
+            r#"{"type":"text","text":"done"}"#,
+            r#"]},"session_id":"session_id"}"#,
+            "\n",
+            r#"{"type":"result","result":"done","is_error":false,"duration_ms":99}"#,
+        );
+
+        let response = parse_response(ndjson).expect("should parse");
+        let blocks = &response.blocks;
+        assert_eq!(blocks.len(), 5, "all five blocks should be recorded in order");
+
+        assert!(matches!(&blocks[0], ContentBlockRecord::Thinking { thinking } if thinking == "plan"));
+        assert!(matches!(&blocks[1], ContentBlockRecord::Text { text } if text == "let me check"));
+        assert!(matches!(
+            &blocks[2],
+            ContentBlockRecord::ToolUse { name, input } if name == "Read" && input.contains("/a.rs")
+        ));
+        assert!(matches!(&blocks[3], ContentBlockRecord::Thinking { thinking } if thinking == "now edit"));
+        assert!(matches!(&blocks[4], ContentBlockRecord::Text { text } if text == "done"));
+
+        // The flattened fields are still populated (back-compat / fallback).
+        assert_eq!(response.text, "let me checkdone");
+        assert_eq!(response.thinking.as_deref(), Some("plannow edit"));
+        assert_eq!(response.tool_calls.len(), 1);
     }
 
     // ── apply_agent_config tests ─────────────────────────────────────────
