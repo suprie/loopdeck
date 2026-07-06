@@ -282,6 +282,69 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
         }
     }
 
+    // ── permissions.allow list (curated safe-command allowlist) ──
+    //
+    // Under `--permission-mode default`, a tool call only emits a
+    // `control_request` if it doesn't match an allow rule. Seeding a curated
+    // list of known-safe read/build commands means the common dev-loop traffic
+    // (ls, git status, cargo/npm builds, file reads/edits) short-circuits the
+    // control protocol entirely — so it neither stalls nor clutters the
+    // permission log/UI. Anything not on this list still routes through the
+    // `permission::PermissionPolicy` (allow-by-default + destructive floor).
+    // Idempotent + dedup'd, mirroring the hook-insertion pattern above; any
+    // pre-existing rules are preserved.
+    {
+        const CURATED_ALLOW: &[&str] = &[
+            // Read-only filesystem tools.
+            "Read(*)",
+            "Glob(*)",
+            "Grep(*)",
+            // File edits/writes — bounded by the project's git history.
+            "Edit(*)",
+            "Write(*)",
+            // Common safe read-only Bash commands.
+            "Bash(ls:*)",
+            "Bash(cat:*)",
+            "Bash(pwd)",
+            "Bash(which:*)",
+            "Bash(find:*)",
+            "Bash(grep:*)",
+            "Bash(rg:*)",
+            "Bash(echo:*)",
+            "Bash(mkdir:-p:*)",
+            // VCS inspection (no state changes except git add — staging is
+            // reversible and the orchestrator needs it for its write-through).
+            "Bash(git status:*)",
+            "Bash(git diff:*)",
+            "Bash(git log:*)",
+            "Bash(git show:*)",
+            "Bash(git branch:*)",
+            "Bash(git add:*)",
+            // Build / test runners for common stacks.
+            "Bash(cargo:*)",
+            "Bash(npm:*)",
+            "Bash(npx:*)",
+            "Bash(go:*)",
+            "Bash(pnpm:*)",
+            "Bash(yarn:*)",
+        ];
+
+        if root.get("permissions").is_none() {
+            root["permissions"] = serde_json::json!({});
+        }
+        let allow_arr = root["permissions"]["allow"]
+            .as_array_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let mut existing: Vec<serde_json::Value> = allow_arr;
+        for rule in CURATED_ALLOW {
+            if !existing.iter().any(|v| v.as_str() == Some(*rule)) {
+                existing.push(serde_json::Value::from(*rule));
+            }
+        }
+        root["permissions"]["allow"] = serde_json::Value::Array(existing);
+    }
+
     // Write settings.json (pretty-printed for readability)
     let formatted = serde_json::to_string_pretty(&root)
         .map_err(|e| AppError::Config(format!("JSON serialization error: {e}")))?;
@@ -608,6 +671,71 @@ mod tests {
 
         // Hooks should also be present
         assert!(root["hooks"]["Stop"].as_array().unwrap().len() > 0);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_setup_hooks_writes_curated_allowlist() {
+        // Under `default` permission mode, a curated allow list lets common
+        // safe commands short-circuit the control protocol. setup_hooks must
+        // seed it into every bootstrapped project's settings.json.
+        let dir = temp_dir();
+        setup_hooks(&dir).unwrap();
+
+        let raw = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let allow = root["permissions"]["allow"]
+            .as_array()
+            .expect("permissions.allow must exist after setup_hooks");
+
+        // Spot-check a representative sample from each category.
+        let has = |rule: &str| allow.iter().any(|v| v.as_str() == Some(rule));
+        assert!(has("Read(*)"), "read tool missing");
+        assert!(has("Bash(ls:*)"), "safe read command missing");
+        assert!(has("Bash(git status:*)"), "vcs inspection missing");
+        assert!(has("Bash(cargo:*)"), "build runner missing");
+        assert!(has("Bash(npm:*)"), "npm runner missing");
+        assert!(
+            !has("Bash(rm -rf:*)"),
+            "destructive patterns must NOT be in the allow list"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_setup_hooks_curated_allowlist_dedups_against_existing() {
+        // An existing rule must not be duplicated when the curated list is
+        // merged in, and a curated rule must not be added twice on re-run.
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{ "permissions": { "allow": ["Read(*)", "Bash(cargo:*)"] } }"#,
+        )
+        .unwrap();
+
+        setup_hooks(&dir).unwrap();
+        let raw = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let allow = root["permissions"]["allow"].as_array().unwrap();
+
+        let count_read = allow.iter().filter(|v| v.as_str() == Some("Read(*)")).count();
+        let count_cargo = allow.iter().filter(|v| v.as_str() == Some("Bash(cargo:*)")).count();
+        assert_eq!(count_read, 1, "pre-existing Read(*) must not be duplicated");
+        assert_eq!(count_cargo, 1, "pre-existing Bash(cargo:*) must not be duplicated");
+
+        // Re-run is also idempotent.
+        setup_hooks(&dir).unwrap();
+        let raw2 = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let root2: serde_json::Value = serde_json::from_str(&raw2).unwrap();
+        let allow2 = root2["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(
+            allow2.len(),
+            allow.len(),
+            "second setup_hooks run must not add duplicates"
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }

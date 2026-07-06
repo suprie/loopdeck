@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "LoopDeck",
-        "width": 900,
-        "height": 650,
+        "width": 1500,
+        "height": 1000,
         "resizable": true,
         "fullscreen": false
       }
@@ -27,10 +27,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png"
-    ]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png"]
   }
 }
