@@ -1,14 +1,21 @@
 # Loops
 
 ## Current
-- **Started**: 2026-06-22
-- **Goal**: Decide next V2 feature after agent memory layer is complete
+- **Started**: 2026-06-24
+- **Goal**: UI restyling — match AI Project Command aesthetic (Tailwind CSS v4, OKLCH dark palette, sidebar layout, gradient accents, Inter+JetBrains Mono fonts)
 - **Status**: in_progress
 
 ## Next Steps
-- [ ] User decides what to build next (V2 polish, app launch readiness, agent execution, etc.)
-- [ ] Wire up the actual tauri dev run to see the UI working
-- [ ] Add system tray or keyboard shortcuts (if chosen)
+- [ ] Add Agent Runner view (`/agent`) — terminal-based AI agent runner UI
+- [ ] Add Activity Feed view (`/activity`) — chronological event feed
+- [ ] Add standalone Decisions page (currently only accessible via project detail)
+- [ ] Add standalone Next Loop page (currently only accessible via project detail)
+- [ ] Add TanStack Router for proper client-side routing (replace Zustand view switching)
+- [ ] Add shadcn/ui component library for polished UI primitives
+- [ ] Add keyboard shortcut (⌘K) command palette
+- [ ] Add unit tests for status derivation logic (0 days, 6 days, 7 days, 30 days, 31+ days, no git)
+- [ ] Run `npm run tauri dev` to verify UI renders correctly with color-coded status badges
+- [ ] Consider: should status also update on `list_projects` (not just rescan)?
 - [ ] Cross-platform testing
 
 ## Parking Lot
