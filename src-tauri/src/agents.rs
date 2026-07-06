@@ -3,6 +3,8 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+/// Structured result from a `call_agents` invocation.
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentResponse {
     /// The concatenated text from assistant `text` blocks (streaming deltas).
     pub text: String,
@@ -34,7 +36,7 @@ pub struct UsageInfo {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-enum StreamEvent {
+pub(crate) enum StreamEvent {
     #[serde(rename = "system")]
     System,
     #[serde(rename = "assistant")]
@@ -79,17 +81,32 @@ struct RawUsage {
 
 // ── Parsing ────────────────────────────────────────────────────────────────
 
-/// Parse a full NDJSON stream into a structured `AgentResponse`.
-pub fn parse_response(ndjson: &str) -> Option<AgentResponse> {
-    let mut text = String::new();
-    let mut thinking: Option<String> = None;
-    let mut result_text = String::new();
-    let mut is_error = false;
-    let mut duration_ms = 0u64;
-    let mut usage: Option<UsageInfo> = None;
-    let mut session_id = String::new();
+/// Incrementally accumulate stream events into an `AgentResponse`.
+///
+/// Shared between `parse_response` (which drains a full NDJSON blob at once)
+/// and `ClaudeSession::send_message` (which feeds events line-by-line as they
+/// arrive over the persistent process's stdout). Keeping one accumulation
+/// implementation means the two paths can never drift.
+#[derive(Default)]
+pub(crate) struct ResponseAccumulator {
+    text: String,
+    thinking: Option<String>,
+    result_text: String,
+    is_error: bool,
+    duration_ms: u64,
+    usage: Option<UsageInfo>,
+    session_id: String,
+}
 
-    for event in parse_stream_events(ndjson) {
+impl ResponseAccumulator {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one parsed stream event. Returns true if this event was the
+    /// terminal `Result` event — callers drive their read loop off this.
+    #[must_use]
+    pub(crate) fn ingest_event(&mut self, event: StreamEvent) -> bool {
         match event {
             StreamEvent::Assistant {
                 message,
@@ -97,14 +114,15 @@ pub fn parse_response(ndjson: &str) -> Option<AgentResponse> {
             } => {
                 for block in message.content {
                     match block {
-                        ContentBlock::Text { text: t } => text.push_str(&t),
+                        ContentBlock::Text { text: t } => self.text.push_str(&t),
                         ContentBlock::Thinking { thinking: th } => {
-                            thinking.get_or_insert_default().push_str(&th);
+                            self.thinking.get_or_insert_default().push_str(&th);
                         }
                         ContentBlock::ToolUse => { /* not collected yet */ }
                     }
                 }
-                session_id = sid;
+                self.session_id = sid;
+                false
             }
             StreamEvent::Result {
                 result: r,
@@ -113,43 +131,85 @@ pub fn parse_response(ndjson: &str) -> Option<AgentResponse> {
                 total_cost_usd,
                 usage: u,
             } => {
-                result_text = r;
-                is_error = e;
-                duration_ms = d;
-                usage = u.map(|u| UsageInfo {
+                self.result_text = r;
+                self.is_error = e;
+                self.duration_ms = d;
+                self.usage = u.map(|u| UsageInfo {
                     input_tokens: u.input_tokens,
                     output_tokens: u.output_tokens,
                     total_cost_usd: total_cost_usd.unwrap_or(0.0),
                 });
+                true
             }
-            StreamEvent::System => { /* metadata, skip */ }
+            StreamEvent::System => false,
         }
     }
 
-    if result_text.is_empty() && text.is_empty() {
-        return None;
-    }
+    /// Produce the final response. Returns `None` if we never saw any
+    /// assistant text or a result event — useful for the caller to detect
+    /// "claude produced nothing".
+    pub(crate) fn finish(self) -> Option<AgentResponse> {
+        if self.result_text.is_empty() && self.text.is_empty() {
+            return None;
+        }
 
-    Some(AgentResponse {
-        text,
-        thinking,
-        result: result_text,
-        usage,
-        is_error,
-        duration_ms,
-        session_id: session_id,
-    })
+        Some(AgentResponse {
+            text: self.text,
+            thinking: self.thinking,
+            result: self.result_text,
+            usage: self.usage,
+            is_error: self.is_error,
+            duration_ms: self.duration_ms,
+            session_id: self.session_id,
+        })
+    }
 }
 
-/// Lazily parse an NDJSON string into typed `StreamEvent` items.
-fn parse_stream_events(ndjson: &str) -> impl Iterator<Item = StreamEvent> + '_ {
-    ndjson
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<StreamEvent>(line).ok())
+/// Parse a single NDJSON line into a `StreamEvent`, if it is one.
+///
+/// Non-JSON / unrecognized lines (blank lines, stray stderr leaking into the
+/// stream, etc.) silently yield `None` — callers decide whether to skip or err.
+pub(crate) fn parse_stream_line(line: &str) -> Option<StreamEvent> {
+    serde_json::from_str::<StreamEvent>(line.trim()).ok()
+}
+
+/// Parse a full NDJSON string into a structured `AgentResponse`.
+fn parse_response(ndjson: &str) -> Option<AgentResponse> {
+    let mut acc = ResponseAccumulator::new();
+    for line in ndjson.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(event) = parse_stream_line(line) {
+            // The returned "is_result" flag is meaningless here: we drain the
+            // whole blob regardless. Batch parse doesn't short-circuit.
+            let _ = acc.ingest_event(event);
+        }
+    }
+    acc.finish()
 }
 
 // ── Agent runner ───────────────────────────────────────────────────────────
+
+/// Apply agent config as environment variables on a `Command`.
+///
+/// Extracted for testability — allows verifying env vars without spawning.
+/// Also reused by `ClaudeSession::spawn`, so both the single-shot
+/// (`call_agents`) and persistent (`ClaudeSession`) paths stay in sync.
+pub(crate) fn apply_agent_config(cmd: &mut Command, agent_config: &AgentConfig) {
+    if let Some(auth_token) = &agent_config.auth_token {
+        cmd.env("ANTHROPIC_AUTH_TOKEN", auth_token);
+    }
+
+    if let Some(base_url) = &agent_config.base_url {
+        cmd.env("ANTHROPIC_BASE_URL", base_url);
+    }
+
+    if let Some(model) = &agent_config.model {
+        cmd.env("ANTHROPIC_MODEL", model);
+    }
+
+    if let Some(effort) = &agent_config.effort {
+        cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
+    }
+}
 
 /// Call claude with a prompt and return the structured response.
 ///
@@ -163,17 +223,7 @@ pub fn call_agents(prompt: String, agent_config: &AgentConfig) -> Result<AgentRe
     cmd.arg(&prompt);
 
     // Provider / model configuration via environment variables
-    if let Some(auth_token) = &agent_config.auth_token {
-        cmd.env("ANTHROPIC_AUTH_TOKEN", auth_token);
-    }
-
-    if let Some(base_url) = &agent_config.base_url {
-        cmd.env("ANTHROPIC_BASE_URL", base_url);
-    }
-
-    if let Some(model) = &agent_config.model {
-        cmd.env("ANTROPHIC_MODEL", model);
-    }
+    apply_agent_config(&mut cmd, agent_config);
 
     debug_command(&cmd);
 
@@ -231,8 +281,6 @@ fn debug_command(cmd: &Command) {
 
 #[cfg(test)]
 mod tests {
-    use crate::agents;
-
     use super::*;
 
     #[test]
@@ -318,6 +366,116 @@ mod tests {
     fn test_parse_response_empty_input() {
         assert!(parse_response("").is_none());
         assert!(parse_response("garbage\n").is_none());
+    }
+
+    // ── apply_agent_config tests ─────────────────────────────────────────
+
+    /// Helper: collect env vars from a Command as Vec<(String, String)>.
+    fn get_envs(cmd: &Command) -> Vec<(String, String)> {
+        cmd.get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_apply_agent_config_all_fields() {
+        let config = AgentConfig {
+            auth_token: Some("sk-test-token".into()),
+            base_url: Some("https://api.example.com".into()),
+            model: Some("claude-opus-4-8".into()),
+            effort: Some("max".into()),
+        };
+
+        let mut cmd = Command::new("claude");
+        apply_agent_config(&mut cmd, &config);
+
+        let envs = get_envs(&cmd);
+        assert!(envs.contains(&("ANTHROPIC_AUTH_TOKEN".into(), "sk-test-token".into())));
+        assert!(envs.contains(&(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://api.example.com".into()
+        )));
+        assert!(envs.contains(&("ANTHROPIC_MODEL".into(), "claude-opus-4-8".into())));
+        assert!(envs.contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "max".into())));
+    }
+
+    #[test]
+    fn test_apply_agent_config_empty_fields_set_nothing() {
+        let config = AgentConfig {
+            auth_token: None,
+            base_url: None,
+            model: None,
+            effort: None,
+        };
+
+        let mut cmd = Command::new("claude");
+
+        // Record env vars that *already exist* after construction (inherited from
+        // the test process). Then apply config and verify no NEW agent-specific vars
+        // were added.
+        let before: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        apply_agent_config(&mut cmd, &config);
+
+        let after: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+
+        let agent_vars = [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_MODEL",
+            "CLAUDE_CODE_EFFORT_LEVEL",
+        ];
+
+        for var in agent_vars {
+            let was_present_before = before.contains(&var.to_string());
+            let is_present_after = after.contains(&var.to_string());
+            assert_eq!(
+                was_present_before, is_present_after,
+                "{var} should not have been added"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_agent_config_partial_fields() {
+        // Only set base_url and model — auth_token and effort remain None
+        let config = AgentConfig {
+            auth_token: None,
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            model: Some("deepseek-v4-pro[1m]".into()),
+            effort: None,
+        };
+
+        let mut cmd = Command::new("claude");
+        apply_agent_config(&mut cmd, &config);
+
+        let envs = get_envs(&cmd);
+
+        // Should contain the fields we set
+        assert!(envs.contains(&(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://api.deepseek.com/anthropic".into()
+        )));
+        assert!(envs.contains(&(
+            "ANTHROPIC_MODEL".into(),
+            "deepseek-v4-pro[1m]".into()
+        )));
+
+        // Should NOT contain auth_token or effort
+        let env_keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!env_keys.contains(&"ANTHROPIC_AUTH_TOKEN"));
+        assert!(!env_keys.contains(&"CLAUDE_CODE_EFFORT_LEVEL"));
     }
 
     // Integration test, disable since it rely on calling the real agent

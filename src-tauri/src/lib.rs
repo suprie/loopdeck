@@ -1,4 +1,5 @@
 mod agents;
+mod claude_session;
 mod commands;
 mod config;
 mod error;
