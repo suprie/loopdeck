@@ -1207,40 +1207,51 @@ fn derive_run_states(state: &AppState, projects: &mut [ProjectEntry]) {
         perms.keys().chain(answers.keys()).cloned().collect()
     };
 
-    // Snapshot live session keys so we don't hold the outer map lock across awaits.
-    let live_paths: std::collections::HashSet<PathBuf> = {
-        let Ok(sessions) = state.claude_sessions.lock() else {
-            return;
-        };
-        sessions.keys().cloned().collect()
-    };
-
     for entry in projects.iter_mut() {
         if pending_paths.contains(&entry.path) {
             entry.run_state = RunState::Waiting;
             continue;
         }
-        if !live_paths.contains(&entry.path) {
-            entry.run_state = RunState::Idle;
-            continue;
-        }
-
-        // Entry exists in the session map. Try to acquire its inner lock without
-        // blocking: failure ⇒ held by a streaming turn ⇒ Working. We re-lock
-        // the outer map briefly to clone the Arc. The outer guard is held only
-        // over the synchronous lookup, never across an `.await`.
-        let session_arc = state
-            .claude_sessions
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&entry.path).cloned());
-
-        let busy = match session_arc {
-            Some(arc) => arc.try_lock().is_err(),
-            None => false,
+        entry.run_state = if project_busy(state, &entry.path) {
+            RunState::Working
+        } else {
+            RunState::Idle
         };
-        entry.run_state = if busy { RunState::Working } else { RunState::Idle };
     }
+}
+
+/**
+ * Is a streaming agent turn currently in flight for `path`?
+ *
+ * True when a `claude_sessions` entry exists AND its inner `tokio::Mutex` is
+ * held (a turn is streaming). Checked via non-blocking `try_lock`. Used both by
+ * `derive_run_states` (for `list_projects`/`rescan_project`) and by the
+ * `agent_is_busy` command (for frontend reconciliation after navigation).
+ *
+ * Outer-map guards are held only over the synchronous Arc lookup, never across
+ * an `.await`.
+ */
+fn project_busy(state: &AppState, path: &Path) -> bool {
+    let session_arc = state
+        .claude_sessions
+        .lock()
+        .ok()
+        .and_then(|m| m.get(path).cloned());
+    match session_arc {
+        Some(arc) => arc.try_lock().is_err(),
+        None => false,
+    }
+}
+
+/// Report whether an agent turn is currently in flight for a project.
+///
+/// Used by the frontend to reconcile `busy` state after navigating away and
+/// back to the Agent page mid-turn. Without it, the unmounted AgentPanel loses
+/// the streaming thread entirely; this command lets a freshly-mounted panel
+/// honestly report "still working" and poll the transcript until it lands.
+#[tauri::command]
+pub async fn agent_is_busy(path: String, state: State<'_, AppState>) -> Result<bool, AppError> {
+    Ok(project_busy(&state, &PathBuf::from(&path)))
 }
 
 /// Shared send pipeline used by `agent_start_loop` and `agent_send_message`.

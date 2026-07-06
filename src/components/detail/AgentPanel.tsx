@@ -200,6 +200,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // Load transcript + history on mount / project change.
   useEffect(() => {
     let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     async function load() {
       setLoading(true);
       // Default to the active conversation on fresh mount of this project.
@@ -212,8 +213,11 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       // Start (which the backend would reject with "agent is busy" anyway —
       // this just makes the UI honest about it up front).
       const pending = usePendingInteractions.getState();
-      if (pending.permissions[projectPath] || pending.questions[projectPath]) {
+      const hasPendingParking =
+        !!pending.permissions[projectPath] || !!pending.questions[projectPath];
+      if (hasPendingParking) {
         setBusy(true);
+        busyRef.current = true;
       }
       try {
         const [turnData, convList] = await Promise.all([
@@ -232,10 +236,82 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       } finally {
         if (!cancelled) setLoading(false);
       }
+
+      // Reconcile a turn that's in flight but NOT parked on the user. This
+      // happens when the previous mount unmounted mid-streaming: the Tauri
+      // Channel it subscribed to is gone, so streaming events from the
+      // still-running backend can no longer reach the UI. We ask the backend
+      // whether a turn is in flight; if so, show an honest "Agent is working…"
+      // state and poll the transcript until the persisted turn lands or the
+      // backend reports idle. We snapshot the turn count to detect landing
+      // (the assistant turn only appears in `active.jsonl` once the backend
+      // finishes writing it).
+      if (cancelled || hasPendingParking) return;
+      let busy = false;
+      try {
+        busy = await api.agentIsBusy(projectPath);
+      } catch {
+        // If the probe fails, assume idle — don't block the UI.
+      }
+      if (!busy || cancelled) return;
+
+      // Snapshot the turn count we just loaded; the assistant turn lands as a
+      // new entry once the backend finishes writing active.jsonl. We use this
+      // to detect "the in-flight turn just landed" as the polling stop signal.
+      let lastTurnCount = 0;
+      try {
+        lastTurnCount = (
+          await api.agentGetConversationById(projectPath, "active")
+        ).length;
+      } catch {
+        // ignore — we'll fall back to time-based polling
+      }
+
+      if (!mountedRef.current || cancelled) return;
+      setBusy(true);
+      busyRef.current = true;
+
+      const poll = async () => {
+        if (cancelled || !mountedRef.current) return;
+        try {
+          const [stillBusy, freshTurns] = await Promise.all([
+            api.agentIsBusy(projectPath).catch(() => false),
+            api.agentGetConversationById(projectPath, "active").catch(() => null),
+          ]);
+          if (cancelled || !mountedRef.current) return;
+
+          // Turn landed (assistant turn appeared in the transcript) or the
+          // backend reports idle. Either way, swap in the canonical record and
+          // drop busy. Also refresh the history list so a fresh archive (if the
+          // turn triggered a reset) shows up.
+          const landed = freshTurns !== null && freshTurns.length > lastTurnCount;
+          if (landed || !stillBusy) {
+            if (freshTurns) setTurns(freshTurns);
+            try {
+              const convList = await api.agentListConversations(projectPath);
+              if (!cancelled && mountedRef.current) setConversations(convList);
+            } catch {
+              // non-fatal
+            }
+            setBusy(false);
+            busyRef.current = false;
+            return;
+          }
+          // Still in flight — keep the transcript fresh and poll again.
+          if (freshTurns) setTurns(freshTurns);
+          lastTurnCount = freshTurns?.length ?? lastTurnCount;
+          pollTimer = setTimeout(poll, 1500);
+        } catch {
+          // Network/IPC hiccup — retry rather than tear down.
+          pollTimer = setTimeout(poll, 2000);
+        }
+      };
+      pollTimer = setTimeout(poll, 1500);
     }
     load();
     return () => {
       cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [projectPath]);
 

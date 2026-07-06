@@ -338,3 +338,18 @@ export async function agentInterrupt(path: string): Promise<void> {
 export async function agentResetSession(path: string): Promise<void> {
   return invoke<void>("agent_reset_session", { path });
 }
+
+/**
+ * Report whether an agent turn is currently in flight for the project.
+ *
+ * Used by AgentPanel to reconcile `busy` state after the component unmounts
+ * (user navigated away mid-turn) and remounts. The Tauri Channel the previous
+ * mount subscribed to is gone, so streaming events from the still-running
+ * backend can no longer reach the UI — this command lets a fresh mount detect
+ * the in-flight turn, show an honest "Agent is working…" state, and poll the
+ * transcript until the persisted assistant turn lands.
+ * Rust: agent_is_busy(path: String) -> Result<bool, AppError>
+ */
+export async function agentIsBusy(path: string): Promise<boolean> {
+  return invoke<boolean>("agent_is_busy", { path });
+}

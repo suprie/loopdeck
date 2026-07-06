@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Bot, Circle, ChevronRight, Clock, Hash, Plus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
@@ -22,11 +22,25 @@ import { cn } from "../../lib/utils";
  * the user can see at a glance which projects have a turn running or are
  * parked waiting on them.
  */
+/**
+ * Module-level last selection. Survives unmount/remount when the user navigates
+ * away from /agent and back, so they don't lose their picked project. Falls
+ * back to the first project if the saved one is gone.
+ */
+let lastSelectedPath: string | null = null;
+
 export function AgentRunner() {
   const projects = useAppStore((s) => s.projects);
   const [selectedPath, setSelectedPath] = useState<string | null>(
-    projects[0]?.path ?? null,
+    lastSelectedPath && projects.some((p) => p.path === lastSelectedPath)
+      ? lastSelectedPath
+      : (projects[0]?.path ?? null),
   );
+
+  // Persist the selection across remounts.
+  useEffect(() => {
+    if (selectedPath) lastSelectedPath = selectedPath;
+  }, [selectedPath]);
 
   const { scanFolder } = useProjects();
 
