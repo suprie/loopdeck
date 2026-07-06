@@ -824,23 +824,21 @@ impl ClaudeSession {
                 // means it died — treat as an error rather than a turn boundary.
                 // The per-read timeout catches a stuck peer (no stdout for
                 // READ_LINE_TIMEOUT seconds) without bounding the parked phase.
-                let n = match tokio::time::timeout(
-                    READ_LINE_TIMEOUT,
-                    self.stdout.read_line(&mut line),
-                )
-                .await
-                {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(e)) => {
-                        return Err(AppError::Agent(format!("read failed: {}", e)));
-                    }
-                    Err(_) => {
-                        return Err(AppError::Agent(format!(
-                            "claude produced no stdout for {}s — assuming stuck",
-                            READ_LINE_TIMEOUT.as_secs()
-                        )));
-                    }
-                };
+                let n =
+                    match tokio::time::timeout(READ_LINE_TIMEOUT, self.stdout.read_line(&mut line))
+                        .await
+                    {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(e)) => {
+                            return Err(AppError::Agent(format!("read failed: {}", e)));
+                        }
+                        Err(_) => {
+                            return Err(AppError::Agent(format!(
+                                "claude produced no stdout for {}s — assuming stuck",
+                                READ_LINE_TIMEOUT.as_secs()
+                            )));
+                        }
+                    };
 
                 if n == 0 {
                     return Err(AppError::Agent(
@@ -953,9 +951,7 @@ impl ClaudeSession {
             // same pattern as the question/permission slots.
             let (interrupt_tx, mut interrupt_rx) = oneshot::channel::<()>();
             {
-                let mut guard = interrupt_slot
-                    .lock()
-                    .map_err(|_| AppError::LockError)?;
+                let mut guard = interrupt_slot.lock().map_err(|_| AppError::LockError)?;
                 // Overwrite any sender left by a prior turn that ended without
                 // clearing (defensive — the turn-end paths clear it below).
                 *guard = Some(interrupt_tx);
@@ -1014,9 +1010,7 @@ impl ClaudeSession {
                         duration_ms: partial.duration_ms,
                         session_id: partial.session_id.clone(),
                     });
-                    return Err(AppError::Agent(
-                        "turn interrupted by user".into(),
-                    ));
+                    return Err(AppError::Agent("turn interrupted by user".into()));
                 }
                 let n = match read_or_interrupt {
                     ReadOutcome::ReadResult(n) => n,
@@ -1208,15 +1202,25 @@ fn poll_reap(child: &mut Child, window: Duration) -> bool {
 mod tests {
     use super::*;
 
-    /// Test agent config — same as the commented-out block in `agents.rs`.
+    /// Test agent config.
     ///
     /// Centralised here so both integration tests share one source of truth.
     /// Lower `effort` (e.g. `"low"`) if the tests feel slow.
+    ///
+    /// The auth token is read from `LOOPDECK_TEST_AUTH_TOKEN` (never committed).
+    /// If unset, returns `None` and the ignored integration tests will fail
+    /// with a clear error rather than running with no credential — set the env
+    /// var before invoking `cargo test -- --ignored`. The `base_url`/`model`
+    /// defaults are non-secret and committed for convenience.
     fn test_config() -> AgentConfig {
         AgentConfig {
-            base_url: Some(String::from("https://api.deepseek.com/anthropic")),
-            model: Some(String::from("deepseek-v4-pro[1m]")),
-            auth_token: Some(String::from("sk-64a7220f24e241dc8139ba445cd634f0")),
+            base_url: std::env::var("LOOPDECK_TEST_BASE_URL")
+                .ok()
+                .or_else(|| Some(String::from("https://api.deepseek.com/anthropic"))),
+            model: std::env::var("LOOPDECK_TEST_MODEL")
+                .ok()
+                .or_else(|| Some(String::from("deepseek-v4-pro[1m]"))),
+            auth_token: std::env::var("LOOPDECK_TEST_AUTH_TOKEN").ok(),
             effort: Some(String::from("low")),
         }
     }

@@ -535,8 +535,14 @@ fn task_status_from(text: &str) -> &'static str {
 /// streaming path (`send_message_streaming`) and the accumulator
 /// (`ingest_event`) can't drift apart — both call this. Returns `None` for
 /// tool results without a task (the common case: file reads, command output).
-pub(crate) fn extract_task_from_tool_result(event: &StreamEvent) -> Option<crate::conversation::TaskRecord> {
-    let StreamEvent::ToolResult { tool_use_result, message } = event else {
+pub(crate) fn extract_task_from_tool_result(
+    event: &StreamEvent,
+) -> Option<crate::conversation::TaskRecord> {
+    let StreamEvent::ToolResult {
+        tool_use_result,
+        message,
+    } = event
+    else {
         return None;
     };
     let TaskWire { id, subject } = tool_use_result.as_ref()?.task.as_ref()?;
@@ -654,11 +660,10 @@ impl ResponseAccumulator {
                         // ClaudeEvent::ToolUse separately in send_message_streaming.
                         ContentBlock::ToolUse { name, input } => {
                             let input_str = input.to_string();
-                            self.tool_calls
-                                .push(crate::conversation::ToolCallRecord {
-                                    name: name.clone(),
-                                    input: input_str.clone(),
-                                });
+                            self.tool_calls.push(crate::conversation::ToolCallRecord {
+                                name: name.clone(),
+                                input: input_str.clone(),
+                            });
                             self.blocks.push(ContentBlockRecord::ToolUse {
                                 name,
                                 input: input_str,
@@ -849,7 +854,8 @@ mod tests {
         // parse their `name` and `input` so the streaming UI can show live
         // activity during agentic turns. If this regresses to a unit variant,
         // long turns show only a spinner again.
-        let json = r#"{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/a/b.rs"}}"#;
+        let json =
+            r#"{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/a/b.rs"}}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("parse tool_use block");
         match block {
             ContentBlock::ToolUse { name, input } => {
@@ -938,7 +944,10 @@ mod tests {
 
         let event = parse_stream_line(line).expect("control_request must parse");
         match event {
-            StreamEvent::ControlRequest { request_id, request } => {
+            StreamEvent::ControlRequest {
+                request_id,
+                request,
+            } => {
                 assert_eq!(request_id, "4cce7fc0-bcde-4297-9689-ebd53b1ada0e");
                 assert_eq!(request.subtype, "can_use_tool");
                 assert_eq!(request.tool_name, "Bash");
@@ -961,7 +970,10 @@ mod tests {
         let line = r#"{"type":"control_request","request_id":"req-1","request":{"tool_name":"Edit","input":{"file_path":"/a.rs"}}}"#;
         let event = parse_stream_line(line).expect("minimal control_request must parse");
         match event {
-            StreamEvent::ControlRequest { request_id, request } => {
+            StreamEvent::ControlRequest {
+                request_id,
+                request,
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(request.subtype, "", "missing subtype → empty default");
                 assert_eq!(request.tool_name, "Edit");
@@ -975,7 +987,8 @@ mod tests {
     fn test_parse_control_request_input_defaults_to_empty_object() {
         // No `input` at all → empty object, so downstream `input[...]` lookups
         // are safe (mirrors the tool_use input default).
-        let line = r#"{"type":"control_request","request_id":"req-2","request":{"tool_name":"Bash"}}"#;
+        let line =
+            r#"{"type":"control_request","request_id":"req-2","request":{"tool_name":"Bash"}}"#;
         let event = parse_stream_line(line).expect("control_request must parse");
         match event {
             StreamEvent::ControlRequest { request, .. } => {
@@ -1210,15 +1223,23 @@ mod tests {
 
         let response = parse_response(ndjson).expect("should parse");
         let blocks = &response.blocks;
-        assert_eq!(blocks.len(), 5, "all five blocks should be recorded in order");
+        assert_eq!(
+            blocks.len(),
+            5,
+            "all five blocks should be recorded in order"
+        );
 
-        assert!(matches!(&blocks[0], ContentBlockRecord::Thinking { thinking } if thinking == "plan"));
+        assert!(
+            matches!(&blocks[0], ContentBlockRecord::Thinking { thinking } if thinking == "plan")
+        );
         assert!(matches!(&blocks[1], ContentBlockRecord::Text { text } if text == "let me check"));
         assert!(matches!(
             &blocks[2],
             ContentBlockRecord::ToolUse { name, input } if name == "Read" && input.contains("/a.rs")
         ));
-        assert!(matches!(&blocks[3], ContentBlockRecord::Thinking { thinking } if thinking == "now edit"));
+        assert!(
+            matches!(&blocks[3], ContentBlockRecord::Thinking { thinking } if thinking == "now edit")
+        );
         assert!(matches!(&blocks[4], ContentBlockRecord::Text { text } if text == "done"));
 
         // The flattened fields are still populated (back-compat / fallback).
@@ -1333,27 +1354,4 @@ mod tests {
         assert!(!env_keys.contains(&"ANTHROPIC_AUTH_TOKEN"));
         assert!(!env_keys.contains(&"CLAUDE_CODE_EFFORT_LEVEL"));
     }
-
-    // Integration test, disable since it rely on calling the real agent
-    // #[test]
-    // fn test_call_agents() {
-    //     let config = AgentConfig {
-    //         base_url: Some(String::from("https://api.deepseek.com/anthropic")),
-    //         model: Some(String::from("deepseek-v4-pro[1m]")),
-    //         auth_token: Some(String::from("sk-64a7220f24e241dc8139ba445cd634f0")),
-    //         effort: Some(String::from("max")),
-    //     };
-    //     let result = call_agents(String::from("reply with exactly: hello"), &config);
-    //     assert!(result.is_ok(), "call_agents failed: {:?}", result.err());
-
-    //     let response = result.unwrap();
-    //     assert!(!response.text.is_empty(), "text should not be empty");
-    //     assert!(
-    //         response.text.contains("hello"),
-    //         "text should contain 'hello', got: {}",
-    //         response.text
-    //     );
-    //     assert!(!response.result.is_empty(), "result should not be empty");
-    //     assert!(!response.is_error, "should not be an error");
-    // }
 }

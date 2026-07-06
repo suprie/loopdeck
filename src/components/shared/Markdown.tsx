@@ -42,25 +42,40 @@ export function Markdown({ children }: { children: string }) {
           em: (props) => <em className="italic" {...props} />,
           del: (props) => <del className="text-muted-foreground line-through" {...props} />,
 
-          // Links — external only. opens via Tauri shell plugin.
-          a: ({ children, href, ...rest }) => (
-            <a
-              href={href}
-              title={href}
-              onClick={(e) => {
-                // Defer the dynamic import so it doesn't dominate first paint.
-                e.preventDefault();
-                void import("@tauri-apps/plugin-shell").then((m) => m.open(href ?? "#")).catch(() => {
-                  // Fallback: open in whatever the platform allows.
-                  window.open(href, "_blank", "noopener,noreferrer");
-                });
-              }}
-              className="text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/70 transition-colors"
-              {...rest}
-            >
-              {children}
-            </a>
-          ),
+          // Links — external http(s)/mailto only. Anything else (file://,
+          // javascript:, custom schemes) is suppressed: the CSP blocks
+          // javascript:, and we drop the href entirely so the rendered anchor
+          // becomes inert rather than handing an unknown scheme to the OS via
+          // Tauri's shell `open`.
+          a: ({ children, href, ...rest }) => {
+            const safe =
+              typeof href === "string" &&
+              /^(https?:|mailto:)/i.test(href);
+            return (
+              <a
+                href={safe ? href : undefined}
+                title={safe ? href : undefined}
+                onClick={(e) => {
+                  if (!safe) {
+                    e.preventDefault();
+                    return;
+                  }
+                  // Defer the dynamic import so it doesn't dominate first paint.
+                  e.preventDefault();
+                  void import("@tauri-apps/plugin-shell")
+                    .then((m) => m.open(href as string))
+                    .catch(() => {
+                      // Fallback: open in whatever the platform allows.
+                      window.open(href, "_blank", "noopener,noreferrer");
+                    });
+                }}
+                className="text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/70 transition-colors"
+                {...rest}
+              >
+                {children}
+              </a>
+            );
+          },
 
           // Lists.
           ul: (props) => <ul className="my-2 ml-5 list-disc space-y-1 marker:text-muted-foreground" {...props} />,

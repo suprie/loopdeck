@@ -1,13 +1,15 @@
 use crate::agents::AgentResponse;
 use crate::agents::ClaudeEvent;
-use crate::claude_session::{ClaudeSession, InterruptSlot, PermissionSlot, QuestionAnswers, QuestionSlot};
+use crate::claude_session::{
+    ClaudeSession, InterruptSlot, PermissionSlot, QuestionAnswers, QuestionSlot,
+};
 use crate::config::{self, AgentConfig, GlobalConfig, ProjectEntry, ProjectStatus, RunState};
 use crate::conversation::{self, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
 use crate::git;
 use crate::memory::{self, Decision, LoopStatus};
-use crate::permission::{PermissionPolicy};
 use crate::permission::Decision as PermissionDecision;
+use crate::permission::PermissionPolicy;
 use crate::project::{self, ProjectMeta};
 use crate::scanner::{self, DiscoveredRepo};
 use chrono::Utc;
@@ -292,15 +294,33 @@ pub async fn remove_project(path: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
+/// Resolve and validate a user-supplied path before handing it to an OS
+/// opener (Finder/Terminal/explorer). The path originates from a Tauri IPC
+/// argument, so although it is normally a legitimate repo path we treat it as
+/// untrusted: this canonicalizes it and rejects anything that doesn't resolve
+/// to an existing directory. That blocks scheme-handler tricks (e.g. macOS
+/// `open "x-apple-..."`) and shell-metachar injection downstream.
+fn resolve_dir_arg(path: &str) -> Result<PathBuf, AppError> {
+    let resolved = std::fs::canonicalize(path)
+        .map_err(|_| AppError::Scan(format!("Path does not exist or is not accessible: {path}")))?;
+    if !resolved.is_dir() {
+        return Err(AppError::Scan(format!("Not a directory: {path}")));
+    }
+    Ok(resolved)
+}
+
 /// Open the repository path in the system file manager (Finder on macOS).
 #[tauri::command]
 pub async fn open_in_finder(path: String) -> Result<(), AppError> {
     debug!("open_in_finder called for path: {path}");
+    // Validate before any opener sees it. `open`, `xdg-open`, and `explorer`
+    // otherwise interpret some strings as URLs / handlers.
+    let resolved = resolve_dir_arg(&path)?;
 
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&path)
+            .arg(&resolved)
             .spawn()
             .map_err(|e| AppError::Scan(format!("Failed to open Finder: {e}")))?;
     }
@@ -308,7 +328,7 @@ pub async fn open_in_finder(path: String) -> Result<(), AppError> {
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("xdg-open")
-            .arg(&path)
+            .arg(&resolved)
             .spawn()
             .map_err(|e| AppError::Scan(format!("Failed to open file manager: {e}")))?;
     }
@@ -316,7 +336,7 @@ pub async fn open_in_finder(path: String) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
-            .arg(&path)
+            .arg(&resolved)
             .spawn()
             .map_err(|e| AppError::Scan(format!("Failed to open Explorer: {e}")))?;
     }
@@ -329,56 +349,59 @@ pub async fn open_in_finder(path: String) -> Result<(), AppError> {
 #[tauri::command]
 pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
     debug!("open_in_terminal called for path: {path}");
+    let resolved = resolve_dir_arg(&path)?;
+    let path_str = resolved.to_string_lossy().to_string();
 
     #[cfg(target_os = "macos")]
     {
-        // Try popular terminal apps in order of preference.
-        // Each app needs its own mechanism to open at a specific directory.
-        let terminals: &[(&str, fn(&str) -> std::process::Command)] = &[
-            // Ghostty: `open -a Ghostty --args --dir=<path>`
-            ("Ghostty", |p| {
-                use std::process::Stdio;
+        use std::process::Stdio;
 
-                let mut cmd = std::process::Command::new("ghostty");
-                cmd.arg(format!("--working-directory={}", p));
-                cmd.stdout(Stdio::null());
-                cmd.stderr(Stdio::null());
-                cmd
-            }),
-            // iTerm2: AppleScript to create a new window
-            ("iTerm", |p| {
-                let script = format!(
-                    "tell application \"iTerm\" to create window with default profile command \"cd '{}' && clear\"",
-                    p.replace('\'', "'\\''")
-                );
-                let mut cmd = std::process::Command::new("osascript");
-                cmd.args(["-e", &script]);
-                cmd
-            }),
-            // Terminal.app: AppleScript
-            ("Terminal", |p| {
-                let script = format!(
-                    "tell application \"Terminal\" to do script \"cd '{}' && clear\"",
-                    p.replace('\'', "'\\''")
-                );
-                let mut cmd = std::process::Command::new("osascript");
-                cmd.args(["-e", &script]);
-                cmd
-            }),
+        // Try popular terminal apps in order of preference. The path is NEVER
+        // interpolated into a shell/AppleScript string body: where a terminal
+        // needs a working directory it is either passed as a dedicated argv
+        // (Ghostty `--working-directory`, OSAScript `on run argv`) or set as
+        // the spawned process's `current_dir`.
+        fn ghostty(p: &str) -> std::process::Command {
+            let mut cmd = std::process::Command::new("ghostty");
+            cmd.arg(format!("--working-directory={p}"));
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+            cmd
+        }
+        // OSAScript: read the path from argv and `cd` to its quoted form. The
+        // path content is never embedded in the script source.
+        fn iterm(p: &str) -> std::process::Command {
+            let script = "on run argv\n tell application \"iTerm\" to create window with default profile command (\"cd \" & quoted form of (item 1 of argv))\nend run";
+            let mut cmd = std::process::Command::new("osascript");
+            cmd.args(["-e", script, p]);
+            cmd
+        }
+        fn terminal_app(p: &str) -> std::process::Command {
+            let script = "on run argv\n tell application \"Terminal\" to do script (\"cd \" & quoted form of (item 1 of argv))\nend run";
+            let mut cmd = std::process::Command::new("osascript");
+            cmd.args(["-e", script, p]);
+            cmd
+        }
+
+        type Builder = fn(&str) -> std::process::Command;
+        let builders: &[(&str, Builder)] = &[
+            ("Ghostty", ghostty),
+            ("iTerm", iterm),
+            ("Terminal", terminal_app),
         ];
 
         let mut spawned = false;
-        for (_name, builder) in terminals {
-            if let Ok(()) = builder(&path).spawn().map(|_| ()) {
+        for (_name, builder) in builders {
+            if builder(&path_str).spawn().is_ok() {
                 spawned = true;
                 break;
             }
         }
 
         if !spawned {
-            // Last resort: just open the directory in Finder
+            // Last resort: just open the directory in Finder.
             std::process::Command::new("open")
-                .arg(&path)
+                .arg(&resolved)
                 .spawn()
                 .map_err(|e| AppError::Scan(format!("Failed to open directory: {e}")))?;
         }
@@ -386,7 +409,8 @@ pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
 
     #[cfg(target_os = "linux")]
     {
-        // Try common terminal emulators
+        // Try common terminal emulators. Path is passed as a distinct argv,
+        // never concatenated into a shell string.
         let terminals = [
             "gnome-terminal",
             "konsole",
@@ -400,10 +424,10 @@ pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
         for term in &terminals {
             if let Ok(mut child) = std::process::Command::new(term)
                 .arg("--working-directory")
-                .arg(&path)
+                .arg(&path_str)
                 .spawn()
             {
-                // Don't wait — let the terminal run independently
+                // Don't wait — let the terminal run independently.
                 let _ = child.process_group();
                 spawned = true;
                 break;
@@ -419,8 +443,12 @@ pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
 
     #[cfg(target_os = "windows")]
     {
+        // `current_dir` sets the working directory without injecting the path
+        // into a `cd /d <path>` shell string (the previous form ran arbitrary
+        // commands if `path` contained `&` or other metacharacters).
         std::process::Command::new("cmd")
-            .args(["/C", "start", "cmd", "/K", &format!("cd /d {}", path)])
+            .arg("/K")
+            .current_dir(&resolved)
             .spawn()
             .map_err(|e| AppError::Scan(format!("Failed to open Command Prompt: {e}")))?;
     }
@@ -561,7 +589,9 @@ pub async fn agent_start_loop(
     debug!("agent_start_loop called for path: {path}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
 
     let prompt = build_next_loop_prompt(&repo_path);
@@ -589,7 +619,9 @@ pub async fn agent_send_message(
     debug!("agent_send_message called for path: {path}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
 
     let response = send_and_record(&state, &repo_path, &prompt).await?;
@@ -618,7 +650,9 @@ pub async fn agent_start_loop_streaming(
     debug!("agent_start_loop_streaming called for path: {path}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
 
     let prompt = build_next_loop_prompt(&repo_path);
@@ -647,7 +681,9 @@ pub async fn agent_send_message_streaming(
     debug!("agent_send_message_streaming called for path: {path}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
 
     send_and_record_streaming(&state, &repo_path, &prompt, &on_event).await?;
@@ -667,7 +703,9 @@ pub async fn agent_get_conversation(
     debug!("agent_get_conversation called for path: {path}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
     Ok(conversation::load_conversation(&repo_path))
 }
@@ -686,7 +724,9 @@ pub async fn agent_list_conversations(
     debug!("agent_list_conversations called for path: {path}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
     Ok(conversation::list_conversations(&repo_path))
 }
@@ -705,7 +745,9 @@ pub async fn agent_get_conversation_by_id(
     debug!("agent_get_conversation_by_id called for path: {path}, id: {id}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
     Ok(conversation::load_conversation_by_id(&repo_path, &id))
 }
@@ -733,7 +775,9 @@ pub async fn agent_promote_to_active(
     debug!("agent_promote_to_active called for path: {path}, id: {id}");
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!("Path does not exist: {path}")));
+        return Err(AppError::ProjectNotFound(format!(
+            "Path does not exist: {path}"
+        )));
     }
 
     // Extract the resume id BEFORE promoting (after promotion the turns live
@@ -767,10 +811,7 @@ pub async fn agent_promote_to_active(
 /// The next `agent_start_loop` starts a fresh conversation (no `--resume`).
 /// The archived transcript is preserved as `archive-<ts>.jsonl` for history.
 #[tauri::command]
-pub async fn agent_reset_session(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<(), AppError> {
+pub async fn agent_reset_session(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("agent_reset_session called for path: {path}");
     let repo_path = PathBuf::from(&path);
 
@@ -871,13 +912,11 @@ pub async fn agent_answer_question(
         })
         .collect();
 
-    sender
-        .send(mapped)
-        .map_err(|_| {
-            AppError::Agent(
-                "the pending question is no longer waiting for an answer (turn ended)".into(),
-            )
-        })?;
+    sender.send(mapped).map_err(|_| {
+        AppError::Agent(
+            "the pending question is no longer waiting for an answer (turn ended)".into(),
+        )
+    })?;
 
     info!("agent_answer_question delivered for: {path}");
     Ok(())
@@ -953,13 +992,11 @@ pub async fn agent_answer_permission(
         )
     };
 
-    sender
-        .send(verdict)
-        .map_err(|_| {
-            AppError::Agent(
-                "the pending approval is no longer waiting for an answer (turn ended)".into(),
-            )
-        })?;
+    sender.send(verdict).map_err(|_| {
+        AppError::Agent(
+            "the pending approval is no longer waiting for an answer (turn ended)".into(),
+        )
+    })?;
 
     info!("agent_answer_permission delivered for: {path}");
     Ok(())
@@ -983,10 +1020,7 @@ pub async fn agent_answer_permission(
 /// turn — the user should dismiss the card instead. The next turn picks up
 /// the interrupt slot fresh.
 #[tauri::command]
-pub async fn agent_interrupt(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<(), AppError> {
+pub async fn agent_interrupt(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("agent_interrupt called for path: {path}");
     let repo_path = PathBuf::from(&path);
 
@@ -1045,7 +1079,10 @@ async fn with_session(
     path: &Path,
 ) -> Result<Arc<tokio::sync::Mutex<ClaudeSession>>, AppError> {
     // ── Outer (map) lock: held only to read/insert the Arc. ──
-    let mut map_guard = state.claude_sessions.lock().map_err(|_| AppError::LockError)?;
+    let mut map_guard = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?;
 
     if let Some(arc) = map_guard.get(path) {
         // Existing live session — clone the Arc and reuse it. No .await here.
@@ -1204,8 +1241,14 @@ fn derive_run_states(state: &AppState, projects: &mut [ProjectEntry]) {
     // Snapshot the pending-slot keys without holding the locks across the
     // (potentially async-blocking) inner session `try_lock`.
     let pending_paths: std::collections::HashSet<PathBuf> = {
-        let perms = state.pending_permissions.lock().map_err(|_| AppError::LockError);
-        let answers = state.pending_answers.lock().map_err(|_| AppError::LockError);
+        let perms = state
+            .pending_permissions
+            .lock()
+            .map_err(|_| AppError::LockError);
+        let answers = state
+            .pending_answers
+            .lock()
+            .map_err(|_| AppError::LockError);
         let (Ok(perms), Ok(answers)) = (perms, answers) else {
             // If we can't observe pending state, leave everything as-is.
             return;
@@ -1391,9 +1434,7 @@ async fn send_and_record(
     //    un-ignorable at the IPC boundary: every caller surfaces it instead of
     //    silently treating the turn as a success.
     if response.is_error {
-        return Err(AppError::Agent(
-            response.result.clone().trim().to_string(),
-        ));
+        return Err(AppError::Agent(response.result.clone().trim().to_string()));
     }
 
     Ok(response)
@@ -1487,7 +1528,10 @@ async fn spawn_fresh(
     // ── Phase 1: try_lock the existing arc to prove it's idle. ──
     // Scoped so the map's std Mutex guard is dropped before we await anything.
     {
-        let map_guard = state.claude_sessions.lock().map_err(|_| AppError::LockError)?;
+        let map_guard = state
+            .claude_sessions
+            .lock()
+            .map_err(|_| AppError::LockError)?;
         if let Some(arc) = map_guard.get(path) {
             // Try to acquire the per-project turn lock non-blockingly. Holding
             // the std Mutex here is fine — try_lock is synchronous, no .await.
@@ -1508,7 +1552,10 @@ async fn spawn_fresh(
         .map_err(|_| AppError::LockError)?
         .remove(path);
     if dropped.is_some() {
-        debug!("dropped live claude session for fresh start: {}", path.display());
+        debug!(
+            "dropped live claude session for fresh start: {}",
+            path.display()
+        );
     }
 
     // ── Phase 3: archive the transcript (rotate active.jsonl aside). ──

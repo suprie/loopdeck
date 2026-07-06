@@ -73,8 +73,8 @@ static LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// hold it forever. This is the documented pattern for `tracing-appender`.
 pub fn init_logging() {
     INIT.call_once(|| {
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
         // Stderr layer — always installed. Useful under `tauri dev` and when
         // capturing from a terminal; mirrors the file content.
@@ -165,8 +165,7 @@ fn resolve_log_dir() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .or_else(|| platform_log_dir())
         .unwrap_or_else(|| PathBuf::from("./logs"));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("create log dir {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create log dir {}: {e}", dir.display()))?;
     Ok(dir)
 }
 

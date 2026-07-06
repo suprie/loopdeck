@@ -513,10 +513,7 @@ projects: []
         let config: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
         let agent = config.agent.expect("agent block should be present");
         assert_eq!(agent.auth_token.as_deref(), Some("sk-test-123"));
-        assert_eq!(
-            agent.base_url.as_deref(),
-            Some("https://api.anthropic.com")
-        );
+        assert_eq!(agent.base_url.as_deref(), Some("https://api.anthropic.com"));
         assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(agent.effort.as_deref(), Some("high"));
     }

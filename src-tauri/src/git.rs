@@ -44,12 +44,7 @@ pub fn check_git_info(path: &Path) -> GitInfo {
         } else {
             UncommittedStats::default()
         };
-        (
-            last_commit_date,
-            last_commit_message,
-            dirty,
-            uncommitted,
-        )
+        (last_commit_date, last_commit_message, dirty, uncommitted)
     } else {
         (None, None, false, UncommittedStats::default())
     };
@@ -399,7 +394,10 @@ mod tests {
 
     #[test]
     fn test_parse_shortstat_insertions_only() {
-        assert_eq!(parse_shortstat(" 1 file changed, 42 insertions(+)"), (42, 0));
+        assert_eq!(
+            parse_shortstat(" 1 file changed, 42 insertions(+)"),
+            (42, 0)
+        );
     }
 
     #[test]
@@ -431,7 +429,14 @@ mod tests {
         commit(&dir, "init");
 
         let stats = uncommitted_stats(&dir);
-        assert_eq!(stats, UncommittedStats { files: 0, added: 0, deleted: 0 });
+        assert_eq!(
+            stats,
+            UncommittedStats {
+                files: 0,
+                added: 0,
+                deleted: 0
+            }
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -307,14 +307,16 @@ fn parse_turns(content: &str) -> Vec<ConversationTurn> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter_map(|line| match serde_json::from_str::<ConversationTurn>(line) {
-            Ok(turn) => Some(turn),
-            Err(e) => {
-                // A corrupt line mid-file shouldn't hide earlier valid turns.
-                tracing::warn!("skipping malformed conversation line: {e}");
-                None
-            }
-        })
+        .filter_map(
+            |line| match serde_json::from_str::<ConversationTurn>(line) {
+                Ok(turn) => Some(turn),
+                Err(e) => {
+                    // A corrupt line mid-file shouldn't hide earlier valid turns.
+                    tracing::warn!("skipping malformed conversation line: {e}");
+                    None
+                }
+            },
+        )
         .collect();
 
     filter_orphaned_user_turns(&mut turns);
@@ -344,7 +346,11 @@ fn filter_orphaned_user_turns(turns: &mut Vec<ConversationTurn>) {
 
     // Apply the mask: retain only kept indices, preserving order. Collecting
     // indices first avoids borrowing `turns` mutably while iterating it.
-    let kept: Vec<usize> = keep.iter().enumerate().filter_map(|(i, &k)| k.then_some(i)).collect();
+    let kept: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &k)| k.then_some(i))
+        .collect();
     let mut write = 0;
     for i in kept {
         turns.swap(write, i);
@@ -429,7 +435,10 @@ pub fn promote_to_active(repo_path: &Path, id: &str) -> Result<(), std::io::Erro
     let mut content = String::new();
     for turn in &turns {
         let mut line = serde_json::to_string(turn).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("serialize turn: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("serialize turn: {e}"),
+            )
         })?;
         line.push('\n');
         content.push_str(&line);
@@ -448,7 +457,10 @@ pub fn append_turn(repo_path: &Path, turn: &ConversationTurn) -> Result<(), std:
     std::fs::create_dir_all(&dir)?;
 
     let mut line = serde_json::to_string(turn).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("serialize turn: {e}"))
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("serialize turn: {e}"),
+        )
     })?;
     line.push('\n');
 
@@ -619,7 +631,17 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("hello")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("hi there", "sess-1".into(), false, Some(usage()), 1500, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "hi there",
+                "sess-1".into(),
+                false,
+                Some(usage()),
+                1500,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -768,14 +790,22 @@ mod tests {
                     input: r#"{"file_path":"/a.rs"}"#.into(),
                 }],
                 vec![
-                    ContentBlockRecord::Thinking { thinking: "plan".into() },
-                    ContentBlockRecord::Text { text: "let me check".into() },
+                    ContentBlockRecord::Thinking {
+                        thinking: "plan".into(),
+                    },
+                    ContentBlockRecord::Text {
+                        text: "let me check".into(),
+                    },
                     ContentBlockRecord::ToolUse {
                         name: "Read".into(),
                         input: r#"{"file_path":"/a.rs"}"#.into(),
                     },
-                    ContentBlockRecord::Thinking { thinking: "now edit".into() },
-                    ContentBlockRecord::Text { text: "done".into() },
+                    ContentBlockRecord::Thinking {
+                        thinking: "now edit".into(),
+                    },
+                    ContentBlockRecord::Text {
+                        text: "done".into(),
+                    },
                 ],
                 Vec::new(),
             ),
@@ -785,14 +815,22 @@ mod tests {
         let turns = load_conversation(&dir);
         assert_eq!(turns.len(), 1);
         let blocks = &turns[0].blocks;
-        assert_eq!(blocks.len(), 5, "all five blocks should round-trip in order");
-        assert!(matches!(&blocks[0], ContentBlockRecord::Thinking { thinking } if thinking == "plan"));
+        assert_eq!(
+            blocks.len(),
+            5,
+            "all five blocks should round-trip in order"
+        );
+        assert!(
+            matches!(&blocks[0], ContentBlockRecord::Thinking { thinking } if thinking == "plan")
+        );
         assert!(matches!(&blocks[1], ContentBlockRecord::Text { text } if text == "let me check"));
         assert!(matches!(
             &blocks[2],
             ContentBlockRecord::ToolUse { name, input } if name == "Read" && input.contains("/a.rs")
         ));
-        assert!(matches!(&blocks[3], ContentBlockRecord::Thinking { thinking } if thinking == "now edit"));
+        assert!(
+            matches!(&blocks[3], ContentBlockRecord::Thinking { thinking } if thinking == "now edit")
+        );
         assert!(matches!(&blocks[4], ContentBlockRecord::Text { text } if text == "done"));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -844,7 +882,11 @@ mod tests {
         std::fs::write(active_file(&dir), content).unwrap();
 
         let turns = load_conversation(&dir);
-        assert_eq!(turns.len(), 2, "malformed line should be skipped, not fatal");
+        assert_eq!(
+            turns.len(),
+            2,
+            "malformed line should be skipped, not fatal"
+        );
         assert_eq!(turns[0].text, "first");
         assert_eq!(turns[1].text, "second");
 
@@ -860,14 +902,28 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("answered q")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a1", "s1".into(), false, None, 10, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a1",
+                "s1".into(),
+                false,
+                None,
+                10,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         // Orphan — never got a reply (process died mid-turn).
         append_turn(&dir, &ConversationTurn::user("orphan q")).unwrap();
 
         let turns = load_conversation(&dir);
-        assert_eq!(turns.len(), 2, "trailing orphaned user turn should be dropped");
+        assert_eq!(
+            turns.len(),
+            2,
+            "trailing orphaned user turn should be dropped"
+        );
         assert_eq!(turns[0].text, "answered q");
         assert_eq!(turns[1].text, "a1");
 
@@ -881,7 +937,17 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("q1")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a1", "s1".into(), false, None, 10, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a1",
+                "s1".into(),
+                false,
+                None,
+                10,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         append_turn(&dir, &ConversationTurn::user("orphan1")).unwrap();
@@ -900,13 +966,33 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("q1")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a1", "s1".into(), false, None, 10, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a1",
+                "s1".into(),
+                false,
+                None,
+                10,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         append_turn(&dir, &ConversationTurn::user("q2")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a2", "s2".into(), false, None, 20, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a2",
+                "s2".into(),
+                false,
+                None,
+                20,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         append_turn(&dir, &ConversationTurn::user("orphan")).unwrap();
@@ -929,7 +1015,10 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("q2")).unwrap();
 
         let turns = load_conversation(&dir);
-        assert!(turns.is_empty(), "unanswered prompts should all be filtered");
+        assert!(
+            turns.is_empty(),
+            "unanswered prompts should all be filtered"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -948,13 +1037,33 @@ mod tests {
         let dir = temp_repo();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a", "old".into(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a",
+                "old".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         append_turn(&dir, &ConversationTurn::user("follow up")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("b", "new".into(), false, None, 2, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "b",
+                "new".into(),
+                false,
+                None,
+                2,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -969,7 +1078,17 @@ mod tests {
         // An assistant turn with an empty session_id shouldn't be picked.
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a", String::new(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a",
+                String::new(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
         assert!(last_session_id(&dir).is_none());
@@ -1014,11 +1133,7 @@ mod tests {
         let archives: Vec<_> = std::fs::read_dir(sessions_dir(&dir))
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("archive-")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("archive-"))
             .collect();
         assert_eq!(archives.len(), 1, "expected exactly one archive file");
 
@@ -1045,11 +1160,7 @@ mod tests {
         let archives: Vec<_> = std::fs::read_dir(sessions_dir(&dir))
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("archive-")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("archive-"))
             .collect();
         assert_eq!(archives.len(), 2, "two archives should both survive");
 
@@ -1120,7 +1231,17 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("hello world prompt")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("hi", "s1".into(), false, None, 10, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "hi",
+                "s1".into(),
+                false,
+                None,
+                10,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -1145,7 +1266,17 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user(&long)).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("ok", "s1".into(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "ok",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -1162,10 +1293,24 @@ mod tests {
         // Multi-line prompts collapse to one space-joined line in the excerpt.
         // User+assistant pair so the user turn isn't orphan-filtered.
         let dir = temp_repo();
-        append_turn(&dir, &ConversationTurn::user("line one\nline two\n  spaced")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("ok", "s1".into(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::user("line one\nline two\n  spaced"),
+        )
+        .unwrap();
+        append_turn(
+            &dir,
+            &ConversationTurn::assistant(
+                "ok",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -1220,11 +1365,24 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("q")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("a", "s1".into(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "a",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
-        assert_eq!(load_conversation(&dir), load_conversation_by_id(&dir, "active"));
+        assert_eq!(
+            load_conversation(&dir),
+            load_conversation_by_id(&dir, "active")
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1239,7 +1397,17 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("live")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("reply", "s1".into(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "reply",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
@@ -1264,13 +1432,27 @@ mod tests {
         append_turn(&dir, &ConversationTurn::user("live")).unwrap();
         append_turn(
             &dir,
-            &ConversationTurn::assistant("reply", "s1".into(), false, None, 1, None, Vec::new(), Vec::new(), Vec::new()),
+            &ConversationTurn::assistant(
+                "reply",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .unwrap();
 
         // Unknown id.
         promote_to_active(&dir, "archive-doesnotexist").unwrap();
-        assert_eq!(load_conversation(&dir).len(), 2, "active untouched by unknown id");
+        assert_eq!(
+            load_conversation(&dir).len(),
+            2,
+            "active untouched by unknown id"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1329,7 +1511,9 @@ mod tests {
         assert_eq!(archives.len(), 2, "source archive + rotated active");
         // The source archive we promoted FROM is still on disk (we don't move it).
         assert!(
-            archives.iter().any(|n| n == "archive-20260101T000000Z.jsonl"),
+            archives
+                .iter()
+                .any(|n| n == "archive-20260101T000000Z.jsonl"),
             "source archive preserved"
         );
 

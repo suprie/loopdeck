@@ -444,8 +444,7 @@ mod tests {
     use super::*;
 
     fn create_temp_repo() -> (PathBuf, String) {
-        let dir =
-            std::env::temp_dir().join(format!("loopdeck-mem-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-mem-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         (dir, name)
@@ -572,7 +571,8 @@ Migration from Context API was straightforward.
 
     #[test]
     fn test_empty_loops_file() {
-        let content = "# Loops\n\n## Current\n\n_No active loop._\n\n## Next Steps\n\n## History\n\n";
+        let content =
+            "# Loops\n\n## Current\n\n_No active loop._\n\n## Next Steps\n\n## History\n\n";
         let status = parse_loops_content(content);
         assert!(status.current.is_none());
         assert!(status.next_steps.is_empty());

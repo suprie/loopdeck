@@ -22,8 +22,7 @@ const SKILL_TAURI_EXPERT: &str =
     include_str!("../../templates/skills/loopdeck-tauri-expert/SKILL.md");
 const SKILL_TAURI_CODE_REVIEWER: &str =
     include_str!("../../templates/skills/loopdeck-tauri-code-reviewer/SKILL.md");
-const SKILL_API_EXPERT: &str =
-    include_str!("../../templates/skills/loopdeck-api-expert/SKILL.md");
+const SKILL_API_EXPERT: &str = include_str!("../../templates/skills/loopdeck-api-expert/SKILL.md");
 
 // ── Embedded hook scripts ──
 
@@ -364,10 +363,7 @@ fn find_or_create_matcher_group(event_array: &mut serde_json::Value, matcher: &s
 
     // Look for an existing group with the same matcher
     for (i, entry) in arr.iter().enumerate() {
-        let entry_matcher = entry
-            .get("matcher")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let entry_matcher = entry.get("matcher").and_then(|v| v.as_str()).unwrap_or("");
         if entry_matcher == matcher {
             return i;
         }
@@ -390,11 +386,9 @@ fn hook_command_exists_in_group(group: &serde_json::Value, command: &str) -> boo
         .get("hooks")
         .and_then(|v| v.as_array())
         .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    == Some(command)
-            })
+            hooks
+                .iter()
+                .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
         })
         .unwrap_or(false)
 }
@@ -405,8 +399,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir() -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -519,7 +512,10 @@ mod tests {
         fs::create_dir_all(dir.join("src-tauri")).unwrap();
         let skills = determine_skills(&dir, &markers);
         // Each name should appear exactly once
-        let count_rust_expert = skills.iter().filter(|s| s.as_str() == NAME_RUST_EXPERT).count();
+        let count_rust_expert = skills
+            .iter()
+            .filter(|s| s.as_str() == NAME_RUST_EXPERT)
+            .count();
         assert_eq!(count_rust_expert, 1);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -662,12 +658,8 @@ mod tests {
 
         // Permissions should still be intact
         let perms = root["permissions"]["allow"].as_array().unwrap();
-        assert!(perms
-            .iter()
-            .any(|v| v.as_str().unwrap() == "Read(*)"));
-        assert!(perms
-            .iter()
-            .any(|v| v.as_str().unwrap() == "Write(*)"));
+        assert!(perms.iter().any(|v| v.as_str().unwrap() == "Read(*)"));
+        assert!(perms.iter().any(|v| v.as_str().unwrap() == "Write(*)"));
 
         // Hooks should also be present
         assert!(root["hooks"]["Stop"].as_array().unwrap().len() > 0);
@@ -721,10 +713,19 @@ mod tests {
         let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let allow = root["permissions"]["allow"].as_array().unwrap();
 
-        let count_read = allow.iter().filter(|v| v.as_str() == Some("Read(*)")).count();
-        let count_cargo = allow.iter().filter(|v| v.as_str() == Some("Bash(cargo:*)")).count();
+        let count_read = allow
+            .iter()
+            .filter(|v| v.as_str() == Some("Read(*)"))
+            .count();
+        let count_cargo = allow
+            .iter()
+            .filter(|v| v.as_str() == Some("Bash(cargo:*)"))
+            .count();
         assert_eq!(count_read, 1, "pre-existing Read(*) must not be duplicated");
-        assert_eq!(count_cargo, 1, "pre-existing Bash(cargo:*) must not be duplicated");
+        assert_eq!(
+            count_cargo, 1,
+            "pre-existing Bash(cargo:*) must not be duplicated"
+        );
 
         // Re-run is also idempotent.
         setup_hooks(&dir).unwrap();
@@ -774,7 +775,10 @@ mod tests {
         setup_hooks(&dir).unwrap();
 
         // Modify a script to simulate user customization
-        let stop_py = dir.join(".loopdeck").join("hooks").join("loopdeck-stop-hook.py");
+        let stop_py = dir
+            .join(".loopdeck")
+            .join("hooks")
+            .join("loopdeck-stop-hook.py");
         let custom = "# Customized by user\nprint('hello')\n";
         fs::write(&stop_py, custom).unwrap();
 
