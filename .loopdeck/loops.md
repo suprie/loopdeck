@@ -1,5 +1,14 @@
 # Loops
 
+## Current
+
+- **Started**: 2026-06-30
+- **Goal**: Global agent configuration — move hardcoded API keys, model, and
+  provider settings from `agents.rs` into `~/.config/loopdeck/config.yaml`.
+  One agent config shared across all projects (per-project overrides deferred).
+- **Status**: in_progress
+- **PRD**: [docs/PRD-agent-config.md](../../docs/PRD-agent-config.md)
+
 ## Next Steps
 - [ ] Add Agent Runner view (`/agent`) — terminal-based AI agent runner UI
 - [ ] Add Activity Feed view (`/activity`) — chronological event feed

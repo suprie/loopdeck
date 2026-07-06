@@ -29,6 +29,9 @@ pub enum AppError {
 
     #[error("Project already exists at: {0}")]
     ProjectAlreadyExists(String),
+
+    #[error("Agent error: {0}")]
+    Agent(String),
 }
 
 impl Serialize for AppError {
@@ -51,6 +54,7 @@ impl Serialize for AppError {
                 AppError::Config(_) => "config",
                 AppError::LockError => "lockError",
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
+                AppError::Agent(_) => "agent",
             },
         )?;
         state.end()

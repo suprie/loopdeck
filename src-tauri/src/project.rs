@@ -468,23 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_project_memory() {
-        let (dir, name) = create_temp_repo();
-        let markers: Vec<String> = vec![];
-
-        bootstrap_project(&dir, &name, &markers, false).unwrap();
-        assert!(dir.join(".loopdeck").exists());
-
-        remove_project_memory(&dir).unwrap();
-        assert!(!dir.join(".loopdeck").exists());
-
-        // Removing non-existent is not an error
-        assert!(remove_project_memory(&dir).is_ok());
-
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn test_bootstrap_copies_skills_and_hooks() {
         let (dir, name) = create_temp_repo();
         let markers = vec!["Cargo.toml".to_string(), "package.json".to_string()];

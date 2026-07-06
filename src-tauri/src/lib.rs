@@ -6,6 +6,7 @@ mod memory;
 mod project;
 mod scanner;
 mod skills;
+mod agents;
 
 use commands::AppState;
 use config::GlobalConfig;
