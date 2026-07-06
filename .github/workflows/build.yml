@@ -1,0 +1,69 @@
+name: build
+
+on:
+  push:
+    tags: ['v*']          # build installers when you tag a release, e.g. git tag v0.1.0
+  workflow_dispatch: {}   # or run manually from the Actions tab
+
+permissions:
+  contents: write         # needed to upload artifacts to a release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest      # Apple Silicon → .dmg
+          - platform: ubuntu-22.04      # → .AppImage + .deb
+          - platform: windows-latest    # → .exe (NSIS) + .msi
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v5        # v5 = Node.js 24 runtime (v4 = deprecated Node 20)
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5      # v5 = Node.js 24 runtime
+        with:
+          node-version: lts/*            # currently 22; pin '24' if you prefer
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      # Builds installers for the current OS and attaches them to the release.
+      # tauri-action only code-signs when the env vars below are populated,
+      # so on a fresh repo with no secrets it just produces unsigned installers.
+      # To enable macOS signing/notarization, add these as repo secrets and the
+      # build will pick them up automatically:
+      #   APPLE_CERTIFICATE (.p12 base64), APPLE_CERTIFICATE_PASSWORD,
+      #   APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID
+      - name: Build & release installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: '${{ github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
