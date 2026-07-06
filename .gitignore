@@ -5,9 +5,10 @@ node_modules/
 /dist/
 /src-tauri/target/
 
-# IDE
+# IDE / local tooling
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
