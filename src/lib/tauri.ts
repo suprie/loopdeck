@@ -14,6 +14,7 @@ import type {
   ApprovalDecision,
   AskUserQuestionAnswers,
   AskUserQuestionSpec,
+  SkillEntry,
 } from "../types";
 
 /**
@@ -452,4 +453,20 @@ export async function searchProjectFiles(
     query,
     maxResults,
   });
+}
+
+/**
+ * List the skills installed for a project, for the composer's `/`-skill
+ * discovery menu.
+ *
+ * Reads `<repo>/.claude/skills/<dir>/SKILL.md` (the files `copy_skills` writes
+ * during project bootstrap) and parses each frontmatter for `name` (the
+ * invocation token) and `description`. A project that hasn't been bootstrapped
+ * yet — no `.claude/skills/` — returns an empty array, not an error; the menu
+ * shows "no skills" in that case. Results are sorted by name.
+ *
+ * Rust: list_skills(path: String) -> Result<Vec<SkillEntry>, AppError>
+ */
+export async function listSkills(path: string): Promise<SkillEntry[]> {
+  return invoke<SkillEntry[]>("list_skills", { path });
 }

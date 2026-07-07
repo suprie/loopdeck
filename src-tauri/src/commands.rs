@@ -67,6 +67,30 @@ pub struct DirEntry {
     pub path: String,
 }
 
+/// A skill installed for a project, surfaced by the composer's `/`-skill
+/// discovery menu. Read from `<repo>/.claude/skills/<dir>/SKILL.md` — the files
+/// `copy_skills()` writes during project bootstrap.
+///
+/// `name` is the SKILL.md frontmatter `name` (e.g. `loopdeck:rust-expert`),
+/// which is what the `claude` CLI invokes the skill by — so the frontend
+/// inserts it verbatim as `/<name>`. It is distinct from `directory`, the
+/// on-disk folder name (`loopdeck-rust-expert`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEntry {
+    /// Frontmatter `name` — the invocation token the `claude` CLI recognizes.
+    pub name: String,
+    /// On-disk skill directory name (e.g. `loopdeck-rust-expert`).
+    pub directory: String,
+    /// Frontmatter `description`, used by the menu to show what each skill does.
+    /// Empty string if the SKILL.md has no `description:` field.
+    pub description: String,
+    /// Frontmatter `argument-hint`, shown as a dimmed placeholder next to the
+    /// skill name (e.g. `<prd-file-path>`) to cue the user what to type after.
+    /// Empty string when the skill takes no arguments.
+    #[serde(default)]
+    pub argument_hint: String,
+}
+
 /// List the direct children of a directory inside a project, for the
 /// composer's `@`-mention autocomplete.
 ///
@@ -274,6 +298,133 @@ pub async fn search_project_files(
     hits.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
     let results = hits.into_iter().take(cap).map(|(e, _, _)| e).collect();
     Ok(results)
+}
+
+/// Parse the `name`, `description`, and `argument-hint` fields out of a
+/// SKILL.md's YAML frontmatter.
+///
+/// The frontmatter is the block between an opening `---` and the next `---` at
+/// the very start of the file. We only need a few simple `key: value` lines, so
+/// a line-based scan avoids pulling in a YAML crate — the loopdeck SKILL.md
+/// templates use only flat scalar values here. Returns `(name, description,
+/// argument_hint)`, defaulting to empty strings when a field is absent or
+/// there's no frontmatter block at all.
+fn parse_skill_frontmatter(content: &str) -> (String, String, String) {
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut argument_hint = String::new();
+
+    // Collect the frontmatter block: the lines strictly between the first `---`
+    // and the following `---`. If the file doesn't start with `---`, there's no
+    // frontmatter — bail with empties (the body alone is still a usable skill,
+    // just without a discoverable name).
+    let mut lines = content.lines();
+    let first = lines.next();
+    if first.map(str::trim) != Some("---") {
+        return (name, description, argument_hint);
+    }
+    let mut block: Vec<&str> = Vec::new();
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        block.push(line);
+    }
+
+    // Walk the block pulling `name:`, `description:`, and `argument-hint:`
+    // values. We take the rest of the line after the `key:` prefix and trim it
+    // — YAML scalars don't need quoting here, and the templates never wrap them
+    // in quotes. `argument-hint` carries a hyphen, so its prefix is matched
+    // literally (the others are bare `word:`).
+    for line in block {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            if name.is_empty() {
+                name = rest.trim().to_string();
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("description:") {
+            if description.is_empty() {
+                description = rest.trim().to_string();
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("argument-hint:") {
+            if argument_hint.is_empty() {
+                argument_hint = rest.trim().to_string();
+            }
+        }
+    }
+
+    (name, description, argument_hint)
+}
+
+/// List the skills installed for a project, for the composer's `/`-skill
+/// discovery menu.
+///
+/// Reads `<root>/.claude/skills/<dir>/SKILL.md` for each installed skill and
+/// parses its YAML frontmatter for `name` (the invocation token the `claude`
+/// CLI recognizes) and `description`. The skills land there via
+/// `import_project` → `copy_skills` during project bootstrap; a project that
+/// hasn't been bootstrapped yet simply has no `.claude/skills/` directory, which
+/// is reported as an empty list (not an error) — the menu shows "no skills".
+///
+/// `path` is the canonical project root (the same key used by every other
+/// project command). Results are sorted by `name` for stable arrow-key
+/// navigation.
+#[tauri::command]
+pub async fn list_skills(path: String) -> Result<Vec<SkillEntry>, AppError> {
+    debug!("list_skills called: path={path:?}");
+
+    let root = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("Invalid project path: {e}")))?;
+
+    let skills_dir = root.join(".claude").join("skills");
+
+    // Not bootstrapped yet — no skills to show. Treat as empty rather than an
+    // error so the menu degrades gracefully on a fresh project.
+    let read_dir = match std::fs::read_dir(&skills_dir) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut entries: Vec<SkillEntry> = Vec::new();
+    for entry in read_dir.flatten() {
+        // Only directories are skills — a stray file directly under skills/ is
+        // ignored. We don't filter dotfiles here: `.claude/skills/` is itself a
+        // dotfile path, but the skill dirs inside (e.g. `loopdeck-rust-expert`)
+        // aren't, and any user-added skill should appear regardless.
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let directory = entry.file_name().to_string_lossy().into_owned();
+        let skill_md = entry.path().join("SKILL.md");
+        let content = match std::fs::read_to_string(&skill_md) {
+            Ok(c) => c,
+            Err(_) => continue, // dir without a SKILL.md — skip silently
+        };
+
+        let (name, description, argument_hint) = parse_skill_frontmatter(&content);
+        // A skill with no parseable `name` can't be invoked, so don't surface
+        // it — the frontend inserts `/<name>` verbatim and an empty name would
+        // produce a malformed token.
+        if name.is_empty() {
+            continue;
+        }
+
+        entries.push(SkillEntry {
+            name,
+            directory,
+            description,
+            argument_hint,
+        });
+    }
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
 }
 
 /// Scan a directory for project repositories.
@@ -2069,6 +2220,162 @@ mod tests {
         let prompt = build_next_loop_prompt(&dir);
         assert!(prompt.contains("propose and start"));
         assert!(!prompt.contains("next unchecked step is"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── parse_skill_frontmatter ──
+
+    #[test]
+    fn parse_frontmatter_extracts_name_and_description() {
+        let content = "---\n\
+             name: loopdeck:rust-expert\n\
+             description: Use when writing Rust backend code.\n\
+             allowed-tools: [Read, Write, Edit]\n\
+             ---\n\n\
+             # Rust Expert\n\nBody text.";
+        let (name, description, argument_hint) = parse_skill_frontmatter(content);
+        assert_eq!(name, "loopdeck:rust-expert");
+        assert_eq!(description, "Use when writing Rust backend code.");
+        // No `argument-hint:` field → empty.
+        assert!(argument_hint.is_empty());
+    }
+
+    #[test]
+    fn parse_frontmatter_extracts_argument_hint() {
+        // The orchestrator skill carries an `argument-hint` with a hyphenated
+        // key — the parser must match it literally, not just bare `word:` keys.
+        let content = "---\n\
+             name: loopdeck:orchestrator\n\
+             description: Orchestrate feature implementation from a PRD.\n\
+             argument-hint: <prd-file-path>\n\
+             allowed-tools: [Read, Write, Edit, Skill]\n\
+             ---\n\n\
+             # Orchestrator";
+        let (name, description, argument_hint) = parse_skill_frontmatter(content);
+        assert_eq!(name, "loopdeck:orchestrator");
+        assert_eq!(description, "Orchestrate feature implementation from a PRD.");
+        assert_eq!(argument_hint, "<prd-file-path>");
+    }
+
+    #[test]
+    fn parse_frontmatter_handles_indented_keys() {
+        // Frontmatter keys may carry leading spaces in hand-edited files; the
+        // parser trims before matching the `key:` prefix.
+        let content = "---\n  name: spaced-name\n  description: spaced desc\n---\nbody";
+        let (name, description, _) = parse_skill_frontmatter(content);
+        assert_eq!(name, "spaced-name");
+        assert_eq!(description, "spaced desc");
+    }
+
+    #[test]
+    fn parse_frontmatter_returns_empties_without_frontmatter() {
+        // A SKILL.md with no frontmatter block can't be invoked by name, so the
+        // parser returns empties and `list_skills` skips it.
+        let content = "# Just a heading\n\nNo frontmatter here.";
+        let (name, description, argument_hint) = parse_skill_frontmatter(content);
+        assert!(name.is_empty());
+        assert!(description.is_empty());
+        assert!(argument_hint.is_empty());
+    }
+
+    #[test]
+    fn parse_frontmatter_missing_description_defaults_empty() {
+        // `name` is required for the menu, `description` is optional.
+        let content = "---\nname: only-name\n---\nbody";
+        let (name, description, _) = parse_skill_frontmatter(content);
+        assert_eq!(name, "only-name");
+        assert!(description.is_empty());
+    }
+
+    #[test]
+    fn parse_frontmatter_ignores_body_hrs() {
+        // A `---` in the body (horizontal rule) must not confuse the parser —
+        // only the FIRST closing `---` after the opening one ends the block.
+        let content = "---\nname: a\n---\n\nparagraph\n\n---\n\nmore";
+        let (name, _, _) = parse_skill_frontmatter(content);
+        assert_eq!(name, "a");
+    }
+
+    // ── list_skills ──
+
+    #[tokio::test]
+    async fn list_skills_reads_installed_skills() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
+        let skills_dir = dir.join(".claude").join("skills");
+        std::fs::create_dir_all(skills_dir.join("loopdeck-rust-expert")).unwrap();
+        std::fs::write(
+            skills_dir
+                .join("loopdeck-rust-expert")
+                .join("SKILL.md"),
+            "---\nname: loopdeck:rust-expert\ndescription: Rust expert skill.\n---\nbody",
+        )
+        .unwrap();
+        // The orchestrator carries an `argument-hint` — verify it round-trips.
+        std::fs::create_dir_all(skills_dir.join("loopdeck-orchestrator")).unwrap();
+        std::fs::write(
+            skills_dir
+                .join("loopdeck-orchestrator")
+                .join("SKILL.md"),
+            "---\nname: loopdeck:orchestrator\ndescription: Orchestrates.\nargument-hint: <prd-file-path>\n---\nbody",
+        )
+        .unwrap();
+
+        let result = list_skills(dir.to_string_lossy().to_string()).await.unwrap();
+
+        // Sorted by name → orchestrator before rust-expert.
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "loopdeck:orchestrator");
+        assert_eq!(result[0].directory, "loopdeck-orchestrator");
+        assert_eq!(result[0].description, "Orchestrates.");
+        assert_eq!(result[0].argument_hint, "<prd-file-path>");
+        assert_eq!(result[1].name, "loopdeck:rust-expert");
+        assert_eq!(result[1].directory, "loopdeck-rust-expert");
+        assert_eq!(result[1].description, "Rust expert skill.");
+        // No `argument-hint` field → empty string.
+        assert!(result[1].argument_hint.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_skills_empty_when_not_bootstrapped() {
+        // A project with no `.claude/skills/` (not yet bootstrapped) returns an
+        // empty list, not an error — the menu shows "no skills".
+        let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = list_skills(dir.to_string_lossy().to_string()).await.unwrap();
+        assert!(result.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_skills_skips_dir_without_skillmd() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
+        let skills_dir = dir.join(".claude").join("skills");
+        std::fs::create_dir_all(skills_dir.join("valid-skill")).unwrap();
+        std::fs::write(
+            skills_dir.join("valid-skill").join("SKILL.md"),
+            "---\nname: valid\n---\nbody",
+        )
+        .unwrap();
+        // A dir with no SKILL.md — should be skipped, not crash.
+        std::fs::create_dir_all(skills_dir.join("empty-dir")).unwrap();
+        // A dir whose SKILL.md has no parseable name — also skipped.
+        std::fs::create_dir_all(skills_dir.join("no-name")).unwrap();
+        std::fs::write(
+            skills_dir.join("no-name").join("SKILL.md"),
+            "# no frontmatter\nbody",
+        )
+        .unwrap();
+        // A loose file directly under skills/ — ignored (only dirs are skills).
+        std::fs::write(skills_dir.join("loose-file.md"), "whatever").unwrap();
+
+        let result = list_skills(dir.to_string_lossy().to_string()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "valid");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

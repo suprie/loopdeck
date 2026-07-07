@@ -27,6 +27,27 @@ export interface DirEntry {
   path: string;
 }
 
+/** A skill installed for a project, surfaced by the composer's `/`-skill
+ *  discovery menu. Read from `<repo>/.claude/skills/<dir>/SKILL.md`.
+ *
+ *  `name` is the frontmatter `name` (e.g. `loopdeck:rust-expert`) — the
+ *  invocation token the `claude` CLI recognizes, so the menu inserts it
+ *  verbatim as `/<name>`. It is distinct from `directory`, the on-disk folder
+ *  name (`loopdeck-rust-expert`). */
+export interface SkillEntry {
+  /** Frontmatter `name` — the invocation token the `claude` CLI recognizes. */
+  name: string;
+  /** On-disk skill directory name, e.g. `loopdeck-rust-expert`. */
+  directory: string;
+  /** Frontmatter `description`, shown under the name in the menu. Empty string
+   *  if the SKILL.md has no `description:` field. */
+  description: string;
+  /** Frontmatter `argument-hint`, shown as a dimmed placeholder next to the
+   *  skill name (e.g. `<prd-file-path>`) to cue the user what to type after.
+   *  Empty string when the skill takes no arguments. */
+  argumentHint: string;
+}
+
 /** Project status from Rust ProjectStatus enum. */
 export type ProjectStatus = "active" | "archived" | "nonactive" | "warning";
 

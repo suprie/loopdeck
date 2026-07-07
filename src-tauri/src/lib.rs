@@ -45,6 +45,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_dir_entries,
             commands::search_project_files,
+            commands::list_skills,
             commands::scan_directory,
             commands::import_project,
             commands::list_projects,
