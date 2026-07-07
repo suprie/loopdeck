@@ -24,6 +24,7 @@ import type {
 } from "../../types";
 import { Markdown } from "../shared/Markdown";
 import { FileMentionMenu, useFileMention } from "./FileMentionMenu";
+import { SkillMenu, useSkillDiscovery } from "./SkillMenu";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -997,6 +998,21 @@ export function Chat({
       disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission,
   });
 
+  // ── `/`-skill discovery ──
+  // Same lifecycle pattern as the `@`-mention hook above (and shares the same
+  // `draft`/`caret` state owners), but triggers on `/` and lists the project's
+  // installed skills instead of files. The two are mutually exclusive at the
+  // caret: a `/` span and an `@` span can't both be active at once.
+  const skills = useSkillDiscovery({
+    projectPath,
+    draft,
+    caret,
+    setDraft,
+    setCaret,
+    disabled:
+      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission,
+  });
+
   // Whether auto-scroll is armed — i.e. the user is parked at the bottom and
   // wants new content to scroll into view. Flips to false the moment the user
   // scrolls up (to read history or, importantly, to drag-select text). While
@@ -1249,6 +1265,16 @@ export function Chat({
               onHover={mention.setSelectedIndex}
               onPick={mention.pick}
             />
+            {/* `/`-skill discovery popup — same anchoring as the `@`-mention
+                popup above. The two never open at the same caret at once. */}
+            <SkillMenu
+              open={skills.open}
+              items={skills.items}
+              loading={skills.loading}
+              selectedIndex={skills.selectedIndex}
+              onHover={skills.setSelectedIndex}
+              onPick={skills.pick}
+            />
             <textarea
               ref={inputRef}
               value={draft}
@@ -1262,11 +1288,12 @@ export function Chat({
                 setCaret((e.target as HTMLTextAreaElement).selectionStart)
               }
               onKeyDown={(e) => {
-                // Mention nav consumes the key first (arrows, Enter, Esc, Tab).
-                // Only when it doesn't (returns false) do we fall through to
-                // the normal Enter-to-send — so an open popup's Enter inserts
-                // the mention instead of sending the message.
+                // Mention/skill nav consume the key first (arrows, Enter, Esc,
+                // Tab). Only when neither does (returns false) do we fall
+                // through to the normal Enter-to-send — so an open popup's
+                // Enter inserts the selection instead of sending the message.
                 if (mention.onKeyDown(e)) return;
+                if (skills.onKeyDown(e)) return;
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   handleSend();
@@ -1274,12 +1301,15 @@ export function Chat({
               }}
               placeholder={
                 turns.length === 0
-                  ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files)"
-                  : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files)"
+                  ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
+                  : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
               }
               rows={2}
               disabled={composerDisabled}
-              onBlur={() => mention.close()}
+              onBlur={() => {
+                mention.close();
+                skills.close();
+              }}
               className="flex-1 resize-none rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
             />
             <button
