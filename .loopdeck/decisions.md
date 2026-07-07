@@ -146,3 +146,21 @@
 - **Status**: proposed
 - **Context**: AI session active on LoopDeck development.
 
+## 2026-07-08 — Spec layer in `docs/epics/`, runtime layer in `.loopdeck/`
+
+- **Status**: accepted
+- **Context**: LoopDeck executed work as a flat list of loops in `.loopdeck/loops.md`, mixing plan + execution in one file. Planning past ~10 items broke down — no grouping, no ownership boundary, no reviewable spec. The original proposal put epics in `.loopdeck/epics.md`, but that would conflate the plan (intention, authored deliberately) with runtime state (what the app writes during execution) and treat the plan as mutable app state that drifts.
+- **Consequences**: Epics and PRDs live under `docs/epics/<slug>/` (one directory per epic, co-located PRDs), committed to git and reviewable in PRs. `.loopdeck/` stays the runtime layer — current loop, history, decisions. The bridge is a single promote-to-loop action that writes a PRD checklist item into `loops.md ## Current` carrying `**Epic**`/`**PRD**` back-references. The agent stays unaware of the hierarchy (no change to `build_next_loop_prompt`); the app owns the spec layer, the human owns the commit. Two views of the same work (PRD checklist vs. History) will drift — 0.2.0 makes that drift visible rather than auto-syncing. Full spec: `docs/epics/support-project-management/`.
+
+## 2026-07-08 — Split `loopdeck-orchestrator` into runner + author + memory
+
+- **Status**: accepted
+- **Context**: The single `loopdeck-orchestrator` skill conflated runtime mechanics (how to execute a loop) with strategy (how to plan a project). Once the spec layer lives in `docs/epics/`, the strategy content collides with the app-owned plan — the agent would keep re-decomposing plans the human already authored. The skill needed stripping to mechanics.
+- **Consequences**: Three focused skills replace one: `loopdeck-loop-runner` (mechanics + a new read-context rule that follows a loop's epic/prd back-reference as context, not mandate), `loopdeck-epic-author` (human-invoked drafting aid that elaborates a coarse goal via clarifying questions into reviewable drafts — never commits or promotes), `loopdeck-memory` (decisions.md + loops.md write conventions). Authoring intelligence moves to app-invoked dialogues in 0.3.0, not standing skills. Skill descriptions must be phrased on-demand ("when the user wants to draft") to avoid recreating autonomous-planning drift.
+
+## 2026-07-08 — Managed-skills refresh via version manifest
+
+- **Status**: accepted
+- **Context**: `copy_skills` skips any skill whose `SKILL.md` already exists, to preserve user customizations. This made the orchestrator split unreachable on existing projects — they'd keep the fat self-directing version forever. Real fix is runtime skill injection (Parking Lot: "Move agent control into LoopDeck app"), but that shouldn't gate 0.2.0.
+- **Consequences**: Stopgap: a `.claude/skills/.loopdeck-manifest.json` records installed skills + app version. The `loopdeck-` prefix is the ownership boundary — app-managed skills are overwritten when app version advances; user-owned skills (no prefix) are never touched. A one-time migration removes the legacy `loopdeck-orchestrator` directory, logged. Users customize by copying to a non-prefixed name. The convention carries forward to the runtime-injection model when it lands.
+
