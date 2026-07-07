@@ -15,6 +15,18 @@ export interface DiscoveredRepo {
   last_modified: string | null;
 }
 
+/** A child entry (file or folder) of a project directory, for the `@`-mention
+ *  autocomplete in the chat composer. `path` is project-relative (forward
+ *  slashes) so it can be inserted verbatim as `@<path>`. */
+export interface DirEntry {
+  /** Entry basename, e.g. `Chat.tsx`. */
+  name: string;
+  /** Whether the entry is a directory. */
+  isDir: boolean;
+  /** Project-relative path, e.g. `src/components/detail/Chat.tsx`. */
+  path: string;
+}
+
 /** Project status from Rust ProjectStatus enum. */
 export type ProjectStatus = "active" | "archived" | "nonactive" | "warning";
 

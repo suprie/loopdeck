@@ -100,6 +100,9 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   const streamingResult = useStreamingState(
     (s) => s.byPath[projectPath]?.streamingResult ?? null,
   );
+  const pendingUserText = useStreamingState(
+    (s) => s.byPath[projectPath]?.pendingUserText ?? null,
+  );
   const error = useStreamingState((s) => s.byPath[projectPath]?.error ?? null);
 
   // ── Composer focus nonce — bumped to ask Chat to focus its composer. ──
@@ -584,6 +587,10 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           void reload().finally(() => {
             setStreamingBlocks(null);
             setStreamingResult(null);
+            // Clear the ephemeral user bubble — the canonical user turn is now
+            // in `turns` (via reload), so this field must drop to avoid a flash
+            // of two user bubbles during the swap.
+            useStreamingState.getState().patch(projectPath, { pendingUserText: null });
             // Keep the TaskPanel visible a beat longer than the streaming
             // bubble — the turn's completed tasks are the most useful thing to
             // glance at right as the turn lands, so collapsing them instantly
@@ -611,7 +618,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       if (!resultHandled) {
         setStreamingBlocks(null);
         setStreamingResult(null);
-        useStreamingState.getState().patch(projectPath, { tasks: {} });
+        useStreamingState.getState().patch(projectPath, { tasks: {}, pendingUserText: null });
         setBusy(false);
         clearPendingQuestion(projectPath);
         clearPendingPermission(projectPath);
@@ -626,7 +633,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       setError(describeError(err));
       setStreamingBlocks(null);
       setStreamingResult(null);
-      useStreamingState.getState().patch(projectPath, { tasks: {} });
+      useStreamingState.getState().patch(projectPath, { tasks: {}, pendingUserText: null });
       setBusy(false);
       clearPendingQuestion(projectPath);
       clearPendingPermission(projectPath);
@@ -688,21 +695,17 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       }
     }
 
-    // Optimistic insertion: surface the user's message immediately instead of
-    // waiting for the post-turn transcript reload. Without this the bubble the
-    // user just typed vanishes for the entire turn — `turns` only refreshes
-    // after the terminal `result` event round-trips through Rust + reparses
-    // active.jsonl. The canonical record from `reload()` replaces this entry
-    // after the turn completes (same text, same tail position, index-keyed) so
-    // the swap is seamless — no flicker, no duplicate. Loop starts are excluded:
-    // those turns are `source: "loop"` and render as collapsed LoopStepRow
-    // markers, not user bubbles.
-    if (mountedRef.current) {
-      setTurns((prev) => [
-        ...prev,
-        { ts: new Date().toISOString(), role: "user", source: "user", text },
-      ]);
-    }
+    // Surface the user's message as an EPHEMERAL bubble via the streaming
+    // store (pendingUserText), NOT by appending to `turns`. The old approach —
+    // an optimistic `setTurns` append — raced with the canonical transcript
+    // reload: under React's async batching the optimistic append could flush
+    // AFTER the `setTurns(data)` replace, re-appending a second copy of the
+    // message and rendering it twice. Carrying the in-flight text here, outside
+    // `turns`, means `turns` only ever holds canonical disk records — a
+    // duplicate is structurally impossible. Chat renders `pendingUserText` as a
+    // user bubble above the streaming bubble; the canonical user turn lands in
+    // `turns` after reload and this field clears in the same cleanup pass.
+    useStreamingState.getState().patch(projectPath, { pendingUserText: text });
 
     await runStreamingTurn(text);
   }
@@ -993,9 +996,11 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
 
       {/* ── Chat (transcript + streaming bubble + composer) ── */}
       <Chat
+        projectPath={projectPath}
         turns={turns}
         streamingBlocks={isActiveView ? streamingBlocks : null}
         streamingResult={isActiveView ? streamingResult : null}
+        pendingUserText={isActiveView ? pendingUserText : null}
         busy={busy}
         error={error}
         onSend={runSendMessage}

@@ -43,6 +43,19 @@ export interface StreamingState {
    * still mounted. Carries usage, duration, and is_error for the meta row.
    */
   streamingResult: (ClaudeEvent & { type: "result" }) | null;
+  /**
+   * The user's message for the in-flight turn, surfaced as an ephemeral user
+   * bubble above the streaming bubble. Set when a turn starts; cleared when the
+   * turn ends (the canonical user turn then lives in `turns` after reload).
+   *
+   * This REPLACES the old optimistic-`setTurns` insert, which raced with the
+   * canonical transcript reload and could render the user's message twice.
+   * Carrying the in-flight text here — outside `turns` — means `turns` only
+   * ever holds canonical disk records, so a duplicate is structurally
+   * impossible. `null` hides the bubble (e.g. for loop starts, which have no
+   * user-typed message).
+   */
+  pendingUserText: string | null;
   /** Error banner text. */
   error: string | null;
   /**
@@ -95,6 +108,7 @@ const EMPTY: StreamingState = {
   busy: false,
   streamingBlocks: null,
   streamingResult: null,
+  pendingUserText: null,
   error: null,
   tasks: {},
 };
@@ -112,6 +126,7 @@ export const useStreamingState = create<StreamingStateMap>((set, get) => ({
           busy: true,
           streamingBlocks: [],
           streamingResult: null,
+          pendingUserText: null,
           error: null,
           // Fresh todo set each turn — a new turn's TodoWrite starts clean.
           tasks: {},

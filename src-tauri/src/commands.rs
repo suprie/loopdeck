@@ -13,7 +13,7 @@ use crate::permission::PermissionPolicy;
 use crate::project::{self, ProjectMeta};
 use crate::scanner::{self, DiscoveredRepo};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -52,6 +52,228 @@ pub struct AppState {
     /// writes the `interrupt` control_request, ending the turn while keeping
     /// the live process (and its context) alive.
     pub interrupt_slots: Mutex<HashMap<PathBuf, InterruptSlot>>,
+}
+
+/// A single child entry of a project directory, for the chat composer's
+/// `@`-mention file/folder autocomplete. `path` is project-relative (forward
+/// slashes) so the frontend can insert it verbatim as `@<path>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    /// Entry basename (e.g. `Chat.tsx`).
+    pub name: String,
+    /// Whether the entry is a directory.
+    pub is_dir: bool,
+    /// Project-relative path (forward slashes), e.g. `src/components/detail/Chat.tsx`.
+    pub path: String,
+}
+
+/// List the direct children of a directory inside a project, for the
+/// composer's `@`-mention autocomplete.
+///
+/// `path` is the canonical project root (the same key used by every other
+/// project command); `subdir` is a project-relative path identifying which
+/// directory to list (empty string = project root). The user navigates into
+/// subfolders by selecting folders, which the frontend turns into successive
+/// calls with deeper `subdir` values.
+///
+/// Security: `subdir` is joined onto the canonicalized root and the result is
+/// canonicalized and checked with `starts_with(&root)`, so `../` escapes and
+/// symlink-redirected paths are rejected. Hidden entries (dotfiles) and the
+/// same `IGNORED_DIRS` used by project scanning are filtered out.
+#[tauri::command]
+pub async fn list_dir_entries(path: String, subdir: String) -> Result<Vec<DirEntry>, AppError> {
+    debug!("list_dir_entries called: path={path:?}, subdir={subdir:?}");
+
+    // Canonicalize the root first — every comparison below depends on an
+    // absolute, normalized form. `subdir` is then resolved relative to it.
+    let root = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("Invalid project path: {e}")))?;
+
+    // An empty subdir means "list the root itself". `join("")` would behave
+    // correctly, but being explicit avoids ambiguity on edge cases (trailing
+    // slashes, root-relative weirdness on some platforms).
+    let target = if subdir.is_empty() {
+        root.clone()
+    } else {
+        root.join(&subdir)
+    };
+
+    // Canonicalize the target too, then verify it's still under the root. This
+    // is the path-escape guard: a `subdir` like `../../etc/passwd` resolves to
+    // a path outside `root`, and symlinks pointing out of the project likewise
+    // resolve out, so both are rejected here.
+    let target = target
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("Invalid subdirectory: {e}")))?;
+    if !target.starts_with(&root) {
+        return Err(AppError::InvalidPath(
+            "Subdirectory is outside the project root".to_string(),
+        ));
+    }
+
+    let read_dir = std::fs::read_dir(&target).map_err(AppError::Io)?;
+
+    let mut dirs: Vec<DirEntry> = Vec::new();
+    let mut files: Vec<DirEntry> = Vec::new();
+
+    for entry in read_dir {
+        let entry = entry.map_err(AppError::Io)?;
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            // Couldn't stat (broken symlink, permission) — skip rather than
+            // failing the whole listing.
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        // Filter hidden entries (dotfiles/dotdirs) and ignored build/dep dirs
+        // so the autocomplete surface stays relevant. Mirrors what gets hidden
+        // during project scanning.
+        if name.starts_with('.') || scanner::IGNORED_DIRS.iter().any(|d| *d == name) {
+            continue;
+        }
+
+        // Build the project-relative path with forward slashes so the frontend
+        // can insert `@<path>` verbatim regardless of platform.
+        let rel = entry
+            .path()
+            .strip_prefix(&root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| name.clone());
+
+        let item = DirEntry {
+            name: name.clone(),
+            is_dir: file_type.is_dir(),
+            path: rel,
+        };
+        if file_type.is_dir() {
+            dirs.push(item);
+        } else {
+            files.push(item);
+        }
+    }
+
+    // Sort each bucket case-insensitively, directories first then files — the
+    // conventional file-explorer ordering, and stable for arrow-key navigation.
+    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.append(&mut files);
+
+    Ok(dirs)
+}
+
+/// Recursively search the project for files/folders whose path contains the
+/// query string (case-insensitive). Used by the `@`-mention autocomplete when
+/// the user types a filter after `@` — it searches the whole tree at once
+/// rather than requiring the user to drill in folder by folder.
+///
+/// Results are ranked and capped (`max_results`, default 50) so a giant
+/// monorepo doesn't flood the popup. Ranking:
+///   1. Exact basename match (score 0)
+///   2. Basename starts with query (score 1)
+///   3. Basename contains query (score 2)
+///   4. Path contains query elsewhere (score 3)
+/// Within a tier, shorter paths rank first (shallower, less noise).
+///
+/// `walk_root` is a recursion helper that walks `dir` and pushes matches.
+fn walk_root(dir: &Path, root: &Path, query_lower: &str, out: &mut Vec<(DirEntry, u8, usize)>) {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return, // permission denied / vanished — skip this subtree
+    };
+    for entry in read_dir.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        // Skip hidden entries and the same ignored dirs as scanning. We do NOT
+        // descend into them either, so node_modules/target/.git are pruned
+        // entirely — critical for performance and result relevance.
+        if name.starts_with('.') || scanner::IGNORED_DIRS.iter().any(|d| *d == name) {
+            continue;
+        }
+
+        let is_dir = file_type.is_dir();
+        // Build the project-relative path (forward slashes for the frontend).
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| name.clone());
+
+        // Match against basename AND full relative path. Score by closeness of
+        // the match to the basename (exact > prefix > contains > path-elsewhere).
+        let name_lower = name.to_lowercase();
+        let rel_lower = rel.to_lowercase();
+        let score: u8 = if name_lower == query_lower {
+            0
+        } else if name_lower.starts_with(query_lower) {
+            1
+        } else if name_lower.contains(query_lower) {
+            2
+        } else if rel_lower.contains(query_lower) {
+            3
+        } else {
+            // No match — descend if it's a dir, otherwise skip this entry.
+            if is_dir {
+                walk_root(&entry.path(), root, query_lower, out);
+            }
+            continue;
+        };
+
+        out.push((
+            DirEntry {
+                name,
+                is_dir,
+                path: rel.clone(),
+            },
+            score,
+            rel.len(),
+        ));
+
+        // Keep walking into matched directories too, so a query like "src"
+        // surfaces nested files under it. The ranking keeps shallow/exact
+        // matches on top regardless of how many deeper matches pile up.
+        if is_dir {
+            walk_root(&entry.path(), root, query_lower, out);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn search_project_files(
+    path: String,
+    query: String,
+    max_results: Option<usize>,
+) -> Result<Vec<DirEntry>, AppError> {
+    let query_lower = query.trim().to_lowercase();
+    debug!(
+        "search_project_files called: path={path:?}, query={query:?} ({} chars)",
+        query_lower.len()
+    );
+
+    // Empty query → nothing to search. The frontend should use
+    // `list_dir_entries` for the no-filter (root listing) case, but guard here
+    // too so an accidental empty call doesn't walk the whole tree.
+    if query_lower.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let root = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("Invalid project path: {e}")))?;
+
+    let cap = max_results.unwrap_or(50);
+    let mut hits: Vec<(DirEntry, u8, usize)> = Vec::new();
+    walk_root(&root, &root, &query_lower, &mut hits);
+
+    // Sort by (score asc, path-length asc) → best, shallowest matches first.
+    hits.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+    let results = hits.into_iter().take(cap).map(|(e, _, _)| e).collect();
+    Ok(results)
 }
 
 /// Scan a directory for project repositories.
