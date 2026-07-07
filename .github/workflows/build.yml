@@ -46,22 +46,29 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       # Builds installers for the current OS and attaches them to the release.
-      # tauri-action only code-signs when the env vars below are populated,
-      # so on a fresh repo with no secrets it just produces unsigned installers.
-      # To enable macOS signing/notarization, add these as repo secrets and the
-      # build will pick them up automatically:
-      #   APPLE_CERTIFICATE (.p12 base64), APPLE_CERTIFICATE_PASSWORD,
-      #   APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID
+      # macOS code-signing is intentionally OFF (matches loops.md P2 — signing
+      # is not yet configured).
+      #
+      # IMPORTANT: the APPLE_* env vars are deliberately *omitted*, not set to
+      # `${{ secrets.X }}`. A missing secret expands to an empty string "", the
+      # env var is still exported, and tauri-bundler reads `APPLE_CERTIFICATE`
+      # as `Some("")` — it then base64-decodes nothing, hands an empty blob to
+      # `security import`, and fails with "failed to import keychain certificate".
+      # Leaving the var unset makes `env::var(...).ok()` return `None` so the
+      # bundler skips signing entirely and emits an unsigned .dmg.
+      #
+      # To turn signing + notarization back on later: create these repo secrets,
+      # then re-add the matching env lines below. All six are required together.
+      #   APPLE_CERTIFICATE          # Developer ID Application .p12, base64-encoded
+      #   APPLE_CERTIFICATE_PASSWORD # export password for the .p12
+      #   APPLE_SIGNING_IDENTITY     # "Developer ID Application: Your Name (TEAMID)"
+      #   APPLE_ID                   # Apple ID of the notarization account
+      #   APPLE_PASSWORD             # app-specific password (appleid.apple.com)
+      #   APPLE_TEAM_ID              # 10-char team identifier
       - name: Build & release installers
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: '${{ github.ref_name }}'
