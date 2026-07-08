@@ -1,14 +1,19 @@
-# Epic — Support Project Management
+---
+title: Support Project Management
+slug: support-project-management
+milestone: "0.2.0"
+status: in_progress
+started: 2026-07-08
+owner: Suprie
+description: >
+  Introduce an Epic → PRD → Phase → Loop planning hierarchy so a human can
+  structure a large feature as a reviewable, git-tracked spec in docs/epics/,
+  then promote its atomic work into .loopdeck/loops.md where the existing
+  agent runtime executes it. The agent stays unaware of the hierarchy; the app
+  owns the spec layer, the human owns the commit.
+---
 
-- **Milestone**: 0.2.0
-- **Status**: in_progress
-- **Started**: 2026-07-08
-- **Goal**: Introduce a `Epic → PRD → Phase → Loop` planning hierarchy so a
-  human can structure a large feature as a reviewable, git-tracked spec in
-  `docs/epics/`, then promote its atomic work into `.loopdeck/loops.md` where
-  the existing agent runtime executes it. The agent stays unaware of the
-  hierarchy; the app owns the spec layer, the human owns the commit.
-- **Owner**: Suprie
+# Epic — Support Project Management
 
 ## Motivation
 
@@ -35,9 +40,12 @@ executed loop remembers which epic/PRD/phase it came from.
 
 In scope:
 
-- `docs/epics/<slug>/` directory convention — epic README + co-located PRDs.
-- `epic.rs` parser that reads the spec layer (sibling to `memory.rs`).
-- Cross-project `/epics` view + Epics tab in `ProjectDetail`.
+- `docs/epics/<slug>/` directory convention — epic README + co-located PRDs,
+  each with YAML frontmatter for indexing.
+- `epic.rs` parser that reads the spec layer (frontmatter + body, sibling to
+  `memory.rs`).
+- Cross-project `/epics` view + Epics tab in `ProjectDetail`, grouped by
+  milestone via frontmatter.
 - The promote-to-loop bridge with the back-reference tag.
 - Skill split: `loopdeck-orchestrator` → `loopdeck-loop-runner` +
   `loopdeck-epic-author` + `loopdeck-memory`. Runner/author are mechanics;
@@ -74,8 +82,8 @@ Out of scope (deferred to later milestones):
 
 | PRD | Covers |
 |-----|--------|
-| [prd-spec-layer.md](./prd-spec-layer.md) | `docs/epics/` layout, `epic.rs` parser, format contract with the authoring skill |
-| [prd-epics-view.md](./prd-epics-view.md) | Cross-project `/epics` view, Epics tab, promote-to-loop bridge |
+| [prd-spec-layer.md](./prd-spec-layer.md) | `docs/epics/` layout, frontmatter spec, `epic.rs` parser, format contract with the authoring skill |
+| [prd-epics-view.md](./prd-epics-view.md) | Cross-project `/epics` view (grouped by milestone), Epics tab, promote-to-loop bridge |
 | [prd-skill-split.md](./prd-skill-split.md) | Orchestrator → runner + author + memory; managed-skills refresh; migration |
 
 ## Architecture Decisions
@@ -110,7 +118,28 @@ docs/epics/support-gemini/` shows everything about that epic.
 more code; much better scaling. The directory name is the slug and the
 back-reference key.
 
-### ADR-3: The `loopdeck-` prefix is the skills ownership boundary
+### ADR-3: YAML frontmatter for spec files, `**Field**` bullets for runtime files
+
+**Context.** The first draft used `**Milestone**: 0.2.0` bullets in the epic
+body, mirroring `decisions.md` / `loops.md`. But epics need to be *indexed*
+(grouped by milestone, filtered by status) — and that's the job SKILL.md
+solves with YAML frontmatter: a small structured header for discovery, prose
+body for content. Bullets conflate the two layers.
+
+**Decision.** Spec-layer files (`docs/epics/**/*.md`) carry YAML frontmatter
+with the index fields (`title`, `slug`, `milestone`, `status`, `started`,
+`completed`, `owner`, `description`). The body is pure prose.
+Runtime-layer files (`.loopdeck/loops.md`, `decisions.md`) keep the
+`**Field**: value` bullet convention — they're agent-written and lenient.
+
+**Consequences.** The `/epics` view groups by `milestone` via a frontmatter
+query, no body parsing. The format difference *reinforces* the layer
+separation: structured where humans index, lenient where agents write. The
+back-reference the app writes into `loops.md` on promote stays as bullets,
+because it's writing into a runtime file. `epic.rs` uses `serde_yaml` (already
+in the dep tree) for frontmatter and line-scans only the `### Phase` sections.
+
+### ADR-4: The `loopdeck-` prefix is the skills ownership boundary
 
 **Context.** `copy_skills` skips any skill whose `SKILL.md` already exists, to
 preserve user customizations. That makes the orchestrator split unreachable on
@@ -130,7 +159,7 @@ re-litigating the ownership rule.
 ## Success Criteria
 
 - A user can create an epic README + one PRD by hand (or with the authoring
-  skill) and see it in the `/epics` view.
+  skill) and see it in the `/epics` view, grouped under its milestone.
 - The user can promote a PRD checklist item into `.loopdeck/loops.md` via the
   UI; the promoted loop carries its epic/prd back-reference.
 - The agent executes the promoted loop with no change to `build_next_loop_prompt`.
@@ -149,3 +178,4 @@ re-litigating the ownership rule.
 | Back-reference format gets unwieldy as epics grow | Keep it to two fields (`**Epic**` / `**PRD**`); phase is inferred from checklist position. Revisit if it proves insufficient. |
 | Managed-skills refresh clobbers a user's in-place edit of a `loopdeck-` skill | Document the prefix convention in CONTRIBUTING; the refresh is version-gated, not every-run. The escape hatch is renaming. |
 | The skill split changes agent behavior for existing projects mid-stream | Migration is explicit (logged), user-triggered via Refresh, not silent. The user opts in per project. |
+| Frontmatter diverges between hand-authored and AI-drafted epics | The `loopdeck-epic-author` skill carries the frontmatter schema as its format contract; `epic.rs` and the skill ship together. Schema validation on parse surfaces mismatches loudly. |

@@ -1,7 +1,15 @@
-# PRD — Skill Split + Managed-Skills Refresh
+---
+prd: prd-skill-split
+epic: support-project-management
+milestone: "0.2.0"
+status: proposed
+description: >
+  Split the single fat loopdeck-orchestrator skill into three focused skills
+  (runner + author + memory) and add a version-aware refresh so the split
+  reaches existing projects. Strips strategy out of skills; mechanics only.
+---
 
-**Epic**: support-project-management
-**Status**: Proposed (2026-07-08)
+# PRD — Skill Split + Managed-Skills Refresh
 
 ## Overview
 

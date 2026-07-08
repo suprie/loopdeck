@@ -1,7 +1,16 @@
-# PRD — Spec Layer: `docs/epics/` + `epic.rs` parser
+---
+prd: prd-spec-layer
+epic: support-project-management
+milestone: "0.2.0"
+status: proposed
+description: >
+  Define the on-disk format for the spec layer (epics + PRDs under
+  docs/epics/<slug>/) and build the Rust parser that reads it. Establishes the
+  frontmatter schema that enables milestone grouping and the format contract
+  between epic.rs and the loopdeck-epic-author skill.
+---
 
-**Epic**: support-project-management
-**Status**: Proposed (2026-07-08)
+# PRD — Spec Layer: `docs/epics/` + `epic.rs` parser
 
 ## Overview
 
@@ -13,9 +22,9 @@ everything downstream is mechanical.
 
 This PRD also establishes the **format contract** between `epic.rs` (what the
 app reads) and `loopdeck-epic-author` (what the AI writes). They must agree on
-the same headings and field syntax, or hand-authored and AI-drafted epics
-parse inconsistently. They ship in the same binary, so they don't drift within
-a release.
+the same frontmatter schema and body structure, or hand-authored and
+AI-drafted epics parse inconsistently. They ship in the same binary, so they
+don't drift within a release.
 
 ## Problem Statement
 
@@ -25,15 +34,22 @@ artifact, and it mixes plan + execution in one flat file. `memory.rs` parses
 `loopdeck-orchestrator` skill self-directs planning because there's no
 external plan for it to read.
 
+A second problem surfaced during drafting: the first format proposal used
+`**Milestone**: 0.2.0` bullets in the epic body, mirroring the runtime-file
+convention. But epics need to be *indexed* — grouped by milestone, filtered by
+status — and that's structurally the same job SKILL.md solves with YAML
+frontmatter. Bullets conflate the index layer with the content layer.
+
 ## Goals
 
 | Priority | Goal |
 |----------|------|
-| P0 | A documented `docs/epics/<slug>/` directory layout — epic README + co-located PRDs |
+| P0 | A documented `docs/epics/<slug>/` directory layout — epic README + co-located PRDs, each with YAML frontmatter |
+| P0 | A frontmatter schema that enables grouping by milestone and filtering by status without body parsing |
 | P0 | `epic.rs` with `parse_epics(project_path) -> Vec<Epic>` and `parse_prd(path) -> Prd` |
-| P0 | Epic and PRD structs that carry the fields the UI needs (status, goal, phase checklists) |
+| P0 | Epic and PRD structs that carry the frontmatter fields + the phase checklists from the body |
 | P1 | `ensure_memory_files`-style bootstrap: new projects get an empty `docs/epics/` |
-| P1 | Lenient parsing — missing fields, em dashes, missing headings don't panic (mirror `memory.rs`) |
+| P1 | Lenient body parsing — missing `## Scope`, em dashes in prose, empty `docs/epics/` don't panic (mirror `memory.rs`); frontmatter is strict (serde_yaml) |
 
 ## Non-Goals
 
@@ -42,48 +58,71 @@ external plan for it to read.
 - Promoting loops (that's `prd-epics-view.md`).
 - Parsing the existing flat `docs/PRD-*.md` files into the new model — those
   are legacy and stay where they are. Only `docs/epics/` is the new layer.
+- Strict schema validation that rejects unknown frontmatter fields — accept
+  extras, require only the known ones. Forward-compatibility over strictness.
 
 ## Format Spec
 
-### Epic README — `docs/epics/<slug>/README.md`
+### Layer convention (reinforces ADR-1 + ADR-3)
 
-```markdown
-# Epic — <Title>
+| Layer | Location | Format | Parsed by |
+|---|---|---|---|
+| Spec | `docs/epics/**/*.md` | YAML frontmatter + prose body | `epic.rs` (serde_yaml frontmatter, line-scan body) |
+| Runtime | `.loopdeck/*.md` | `**Field**: value` bullets | `memory.rs` (lenient line-scan) |
 
-- **Milestone**: 0.2.0
-- **Status**: in_progress | proposed | completed | abandoned
-- **Started**: YYYY-MM-DD
-- **Completed**: YYYY-MM-DD        # omitted unless completed
-- **Goal**: <one paragraph>
-- **Owner**: <name>
+The format difference is the layer's job: spec files are indexed (need
+structured fields), runtime files are written by agents (need lenience).
 
-## Scope
-...
+### Frontmatter schema (epic README)
 
-## Non-Goals
-...
-
-## PRD Index
-
-| PRD | Covers |
-|-----|--------|
-| [prd-<topic>.md](./prd-<topic>.md) | <summary> |
+```yaml
+---
+title: Support Project Management      # human-readable
+slug: support-project-management       # kebab-case; MUST match directory name
+milestone: "0.2.0"                     # quoted to keep it a string, not a float
+status: in_progress                    # proposed | in_progress | completed | abandoned
+started: 2026-07-08                    # ISO date
+completed: 2026-07-20                  # omit unless status is completed
+owner: Suprie
+description: >                         # one-paragraph goal; folded scalar
+  Introduce an Epic → PRD → Phase → Loop planning hierarchy...
+---
 ```
 
-The directory name (`<slug>`) is the epic's identity and the back-reference
-key. Slug rules: lowercase, kebab-case, no spaces.
+Required: `title`, `slug`, `milestone`, `status`, `description`.
+Optional: `started`, `completed`, `owner`. Extras ignored.
 
-### PRD — `docs/epics/<slug>/prd-<topic>.md`
+`milestone` is quoted because YAML parses `0.2.0` as a float (`0.2`) without
+quotes. This is the kind of detail the format contract exists to nail down.
+
+### Frontmatter schema (PRD)
+
+```yaml
+---
+prd: prd-spec-layer                    # filename without .md
+epic: support-project-management       # parent epic slug
+milestone: "0.2.0"
+status: proposed                       # proposed | accepted | completed
+description: >
+  Define the on-disk format for the spec layer...
+---
+```
+
+Required: `prd`, `epic`, `status`, `description`. `milestone` is inherited
+from the epic but denormalized here so the `/epics` view can group/filter PRDs
+without joining back to the epic README.
+
+### Body structure
+
+Epic README body: `## Motivation`, `## Scope`, `## Non-Goals`, `## PRD Index`
+(table), `## Architecture Decisions`, `## Success Criteria`, `## Risks`.
+Headings are conventional, not enforced — `epic.rs` reads only the PRD Index
+table from the body.
+
+PRD body: `## Overview`, `## Problem Statement`, `## Goals`, `## Non-Goals`,
+`## Phases`. Only `## Phases` is structurally parsed:
 
 ```markdown
-# PRD — <Title>
-
-**Epic**: <slug>
-**Status**: Proposed | Accepted | Completed
-
-## Overview
-...
-
 ## Phases
 
 ### Phase 1 — <Name>
@@ -96,39 +135,48 @@ key. Slug rules: lowercase, kebab-case, no spaces.
 
 A phase is a `### Phase N — Name` heading followed by a GFM checklist. Each
 unchecked `- [ ]` item is a **planned loop** — the atomic unit the
-promote-to-loop action acts on.
+promote-to-loop action acts on. Checked `- [x]` items are done.
 
-### Back-reference (written into `loops.md` on promote)
+### Back-reference (written into `loops.md` on promote — runtime layer, bullets)
 
 When a PRD checklist item is promoted into `.loopdeck/loops.md ## Current`, the
-promoted entry carries:
+promoted entry carries bullets (runtime convention, not frontmatter):
 
 ```markdown
-- **Title**: <the checklist item text>
+## Current
+
+- **Started**: <today>
+- **Goal**: <the checklist item text>
+- **Status**: in_progress
 - **Epic**: <slug>
 - **PRD**: <prd-filename-without-.md>
 ```
 
-The runner skill's read-context rule follows `**Epic**`/`**PRD**` to load the
-origin PRD as context before executing. No other fields — phase is inferred
-from the checklist position the item was promoted from.
+This reuses the existing `## Current` shape that `build_next_loop_prompt` and
+`read_current_loop` already read — they ignore the unknown `**Epic**`/`**PRD**`
+fields. The agent's prompt is built from `**Goal**` exactly as today. The
+runner skill's read-context rule follows the bullet back-references to load
+the origin PRD as context.
 
 ## Phases
 
 ### Phase 1 — Core structs and parser
 
-- [ ] Define `Epic`, `EpicLoop`, `Prd`, `PrdPhase` structs in `epic.rs` with serde derives
-- [ ] Implement `parse_epic_readme(path) -> Epic` — read the `**Field**: value` header block + PRD index table
-- [ ] Implement `parse_prd(path) -> Prd` — read overview + `### Phase N` sections into `Vec<PrdPhase>` with checklist items
+- [ ] Define `Epic`, `Prd`, `PrdPhase`, `PrdLoop` structs in `epic.rs` with serde derives; frontmatter fields via `serde_yaml`
+- [ ] Implement frontmatter extractor: split `---\n...\n---` from body, deserialize with `serde_yaml`
+- [ ] Implement `parse_epic_readme(path) -> Epic` — frontmatter + PRD Index table from body
+- [ ] Implement `parse_prd(path) -> Prd` — frontmatter + `### Phase N` sections into `Vec<PrdPhase>` with checklist items
 - [ ] Implement `parse_epics(project_path) -> Vec<Epic>` — walk `docs/epics/*/`, parse each README, attach parsed PRDs
-- [ ] Lenient edge cases: missing `## Scope`, missing PRD index table, em dashes in fields, empty `docs/epics/`
-- [ ] Unit tests mirroring `memory.rs` coverage (≥15 tests)
+- [ ] Milestone grouping: `epics_by_milestone(project_path) -> BTreeMap<String, Vec<Epic>>` (ordered by milestone)
+- [ ] Lenient body edge cases: missing `## Scope`, missing PRD Index table, em dashes in prose, empty `docs/epics/`
+- [ ] Strict frontmatter: missing required field → parse error with the file path (not a panic)
+- [ ] Unit tests mirroring `memory.rs` coverage (≥15 tests) + frontmatter round-trip tests
 
 ### Phase 2 — Bootstrap and integration
 
 - [ ] Add `docs/epics/` to the bootstrap path in `project.rs` (create-on-absent, idempotent)
-- [ ] Register `get_epics(project_path)` Tauri command in `commands.rs` + `lib.rs`
-- [ ] Typed `getEpics` wrapper in `src/lib/tauri.ts` + `Epic`/`Prd`/`PrdPhase` types in `src/types/index.ts`
+- [ ] Register `get_epics(project_path)` + `get_epics_by_milestone(project_path)` Tauri commands in `commands.rs` + `lib.rs`
+- [ ] Typed `getEpics` / `getEpicsByMilestone` wrappers in `src/lib/tauri.ts` + `Epic`/`Prd`/`PrdPhase`/`PrdLoop` types in `src/types/index.ts`
 - [ ] Verify LoopDeck's own `docs/epics/support-project-management/` parses cleanly (dogfood)
 
 ## Open Questions
@@ -137,3 +185,7 @@ from the checklist position the item was promoted from.
   `get_prds(epic_slug)` call? **Lean:** nested — the UI renders epic → PRD →
   phase as a tree, one fetch. Revisit if a PRD gets large enough that eager
   parsing is slow.
+- Should `milestone` on the PRD be validated against the epic's milestone?
+  **Lean:** no in 0.2.0 — denormalization is for query convenience, and a
+  mismatch would surface in the UI (PRD under the wrong milestone group).
+  Add a lint later if it bites.

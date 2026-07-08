@@ -1,7 +1,15 @@
-# PRD — Epics View + Promote-to-Loop Bridge
+---
+prd: prd-epics-view
+epic: support-project-management
+milestone: "0.2.0"
+status: proposed
+description: >
+  Surface the spec layer in the UI grouped by milestone, and build the single
+  bridge action that connects a planned PRD checklist item to .loopdeck/loops.md
+  execution. Cross-project /epics view + ProjectDetail Epics tab + promote-to-loop.
+---
 
-**Epic**: support-project-management
-**Status**: Proposed (2026-07-08)
+# PRD — Epics View + Promote-to-Loop Bridge
 
 ## Overview
 
@@ -31,7 +39,9 @@ flat-list model painful past ~10 items.
 
 | Priority | Goal |
 |----------|------|
-| P0 | `/epics` route — epic cards grouped by project, with goal, status, progress per PRD |
+| P0 | `/epics` route — epic cards grouped by **milestone** (from frontmatter), then by project within a milestone |
+| P0 | Milestone groups are collapsible sections; milestone-less epics fall into an "Unmilestoned" group |
+| P0 | Epic card: title, status badge, milestone, goal preview, PRD count, progress bar (done/total loops across PRDs) |
 | P0 | Epics tab in `ProjectDetail` showing the open project's epics + PRD phase checklists |
 | P0 | **Promote to current loop** action on any unchecked PRD checklist item |
 | P0 | Promote writes the back-reference (`**Epic**`/`**PRD**`) into `loops.md ## Current` |
@@ -80,11 +90,13 @@ marks it done after the loop completes and lands in History.
 
 ## Phases
 
-### Phase 1 — Cross-project `/epics` view
+### Phase 1 — Cross-project `/epics` view, grouped by milestone
 
-- [ ] `EpicsView.tsx` — load all projects' epics via `getEpics`, group by project
+- [ ] `EpicsView.tsx` — load all projects' epics via `getEpicsByMilestone`, render milestone sections (collapsible)
+- [ ] Milestone section: header with milestone label + epic count; epics grouped by project within the section
 - [ ] Epic card: title, status badge, milestone, goal preview, PRD count, progress bar (done/total loops across PRDs)
 - [ ] Expand-in-place: click epic → show PRD list; click PRD → show phase checklists
+- [ ] Unmilestoned group for epics whose frontmatter omits `milestone`
 - [ ] Empty / loading / error states (mirror `DecisionsView.tsx` patterns)
 - [ ] Add `/epics` route in `router.tsx` + nav item in `AppShell.tsx`
 
