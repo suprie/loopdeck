@@ -228,6 +228,14 @@ export async function setAgentConfig(config: AgentConfig): Promise<AgentConfig> 
   return invoke<AgentConfig>("set_agent_config", { agentConfig: config });
 }
 
+/**
+ * Remove the stored auth token from the OS keychain.
+ * Rust: clear_auth_token() -> Result<(), AppError>
+ */
+export async function clearAuthToken(): Promise<void> {
+  return invoke<void>("clear_auth_token");
+}
+
 // ── Agent session commands ─────────────────────────────────────────────────
 
 /**

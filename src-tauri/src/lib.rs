@@ -11,6 +11,7 @@ mod memory;
 mod permission;
 mod project;
 mod scanner;
+mod secrets;
 mod skills;
 
 use commands::AppState;
@@ -23,7 +24,7 @@ pub fn run() {
     logging::init_logging();
 
     // Load config — if it fails, start with a clean default and persist it
-    let config = GlobalConfig::load().unwrap_or_else(|e| {
+    let mut config = GlobalConfig::load().unwrap_or_else(|e| {
         tracing::warn!("failed to load config, starting fresh: {e}");
         let fresh = GlobalConfig::default();
         // Try to save the fresh config so next restart succeeds
@@ -32,6 +33,24 @@ pub fn run() {
         }
         fresh
     });
+
+    // One-time migration: move any plaintext auth token out of config.yaml into
+    // the OS keychain. Best-effort — if the keychain is unavailable we keep the
+    // token in memory and carry on; `save()` still applies the 0600 interim
+    // floor below so any plaintext copy that remains is owner-only.
+    match config.migrate_auth_token_to_keychain() {
+        Ok(true) => tracing::info!("migrated plaintext auth token from config.yaml to OS keychain"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            "keychain unavailable; keeping auth token in 0600 config.yaml as interim floor: {e}"
+        ),
+    }
+    // Persist: scrubs the token from the file when migration succeeded, and
+    // (re)applies the 0600 permission floor in every case so a pre-existing
+    // world-readable file is tightened even if nothing else changed.
+    if let Err(e) = config.save() {
+        tracing::warn!("failed to persist config after auth-token migration: {e}");
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -68,6 +87,7 @@ pub fn run() {
             commands::write_spec_file,
             commands::get_agent_config,
             commands::set_agent_config,
+            commands::clear_auth_token,
             commands::agent_start_loop,
             commands::agent_start_loop_streaming,
             commands::agent_send_message,

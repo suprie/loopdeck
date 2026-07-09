@@ -15,6 +15,17 @@ pub struct AgentConfig {
     pub auth_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Presence flag for a token stored in the OS keychain (`secrets` module).
+    ///
+    /// Populated *only* on the `get_agent_config` read path so the UI can show
+    /// a "token stored" affordance without the plaintext ever crossing to the
+    /// renderer. It is **never** persisted to `config.yaml`: every path that
+    /// saves the config leaves it `false` (the default), so
+    /// `skip_serializing_if = "is_false"` keeps it out of the file. It is also
+    /// ignored on the `set_agent_config` write path, where presence is always
+    /// recomputed from the keychain.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_auth_token: bool,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -31,6 +42,7 @@ impl std::fmt::Debug for AgentConfig {
                 },
             )
             .field("effort", &self.effort)
+            .field("has_auth_token", &self.has_auth_token)
             .finish()
     }
 }
@@ -131,6 +143,14 @@ fn is_run_state_idle(state: &RunState) -> bool {
     matches!(state, RunState::Idle)
 }
 
+/// serde `skip_serializing_if` predicate for `AgentConfig::has_auth_token`:
+/// omit the keychain-presence flag when false so it never clutters the
+/// persisted YAML — it is only ever `true` on the transient `get_agent_config`
+/// response clone, never on the config held in `Mutex<GlobalConfig>`.
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 impl Default for ProjectEntry {
     fn default() -> Self {
         Self {
@@ -195,6 +215,11 @@ impl GlobalConfig {
 
     /// Save global config to `~/.config/loopdeck/config.yaml`.
     /// Creates parent directories if needed.
+    ///
+    /// Also applies an owner-only permission floor (0600 on Unix) as
+    /// defense-in-depth: the auth token itself lives in the OS keychain now
+    /// (see `secrets`), but the file still holds provider config, so we don't
+    /// rely on the process umask to keep it private.
     pub fn save(&self) -> Result<(), AppError> {
         let config_path = Self::config_path()?;
 
@@ -204,8 +229,49 @@ impl GlobalConfig {
 
         let contents = serde_yaml::to_string(self)?;
         std::fs::write(&config_path, contents)?;
+        restrict_file_perms(&config_path);
 
         Ok(())
+    }
+
+    /// Migrate any plaintext `agent.auth_token` still present in the loaded
+    /// config into the OS keychain, scrubbing it from the in-memory (and, on
+    /// the next `save()`, on-disk) config.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — a token was moved; the caller should `save()` so the
+    ///   plaintext copy is gone from disk.
+    /// - `Ok(false)` — nothing to migrate (no agent block, or no/empty token).
+    /// - `Err` — a token was present but the keychain rejected it. The token is
+    ///   put back in place so it is not silently lost; the caller should keep
+    ///   it in the 0600 file as the interim floor rather than drop it.
+    pub fn migrate_auth_token_to_keychain(&mut self) -> Result<bool, AppError> {
+        let Some(agent) = self.agent.as_mut() else {
+            return Ok(false);
+        };
+        // Only a non-empty token is a real credential worth moving. `None` and
+        // an empty string are left untouched — checked *before* mutating so an
+        // empty value isn't silently cleared.
+        let Some(token) = agent.auth_token.as_deref() else {
+            return Ok(false);
+        };
+        if token.is_empty() {
+            return Ok(false);
+        }
+        let token = token.to_string();
+        // Scrub from config first, then store. If the keychain rejects it we
+        // restore the token so it is never silently lost.
+        agent.auth_token = None;
+        match crate::secrets::store_auth_token(&token) {
+            Ok(()) => {
+                debug!("migrated plaintext auth token from config.yaml to OS keychain");
+                Ok(true)
+            }
+            Err(e) => {
+                agent.auth_token = Some(token);
+                Err(e)
+            }
+        }
     }
 
     /// Find a project entry by path.
@@ -253,6 +319,24 @@ impl GlobalConfig {
         Ok(Self::config_dir()?.join("config.yaml"))
     }
 }
+
+/// Lock the config file down to owner-only. Best-effort: a failure here is
+/// logged but not fatal (the file's contents are no longer secret once the
+/// auth token has moved to the keychain; this is defense-in-depth).
+#[cfg(unix)]
+fn restrict_file_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("failed to set 0600 on {}: {e}", path.display());
+    }
+}
+
+/// No-op on non-Unix: the config file lives under `%APPDATA%` / `~/Library`,
+/// which the OS already scopes to the current user via ACLs. There is no
+/// portable `chmod` equivalent, and the keychain backends handle their own
+/// access control.
+#[cfg(not(unix))]
+fn restrict_file_perms(_path: &Path) {}
 
 /// Fallback to `~/.config/loopdeck` using the `dirs` crate (part of `directories`).
 fn dirs_fallback() -> Option<PathBuf> {
@@ -560,6 +644,7 @@ projects:
             base_url: Some("https://api.example.com/v1".into()),
             model: Some("claude-opus-4-8".into()),
             effort: Some("max".into()),
+            ..Default::default()
         };
 
         let config = GlobalConfig {
@@ -586,6 +671,7 @@ projects:
             base_url: None,
             model: Some("claude-haiku-4-5".into()),
             effort: None,
+            ..Default::default()
         };
 
         let config = GlobalConfig {
@@ -612,6 +698,7 @@ projects:
             base_url: Some("https://api.anthropic.com".into()),
             model: None,
             effort: None,
+            ..Default::default()
         };
 
         let debug_str = format!("{:?}", agent);
@@ -627,9 +714,103 @@ projects:
             base_url: None,
             model: None,
             effort: None,
+            ..Default::default()
         };
         let debug_no_token = format!("{:?}", agent_no_token);
         assert!(debug_no_token.contains("None"));
+    }
+
+    #[test]
+    fn test_has_auth_token_not_persisted_to_yaml() {
+        // The presence flag must never reach config.yaml. With `skip_serializing_if
+        // = "is_false"` it is omitted when false — and every save path leaves it
+        // false. Verify a saved config carries no `has_auth_token` key.
+        let agent = AgentConfig {
+            auth_token: None,
+            base_url: Some("https://api.anthropic.com".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            effort: None,
+            has_auth_token: false,
+        };
+        let config = GlobalConfig {
+            agent: Some(agent),
+            projects: vec![],
+            settings: Settings::default(),
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(!yaml.contains("has_auth_token"));
+    }
+
+    #[test]
+    fn test_has_auth_token_round_trips_on_wire_but_not_from_yaml() {
+        // On the IPC wire (serde_json) the flag CAN be true so the frontend
+        // learns a token is stored. It deserializes back faithfully here.
+        let agent = AgentConfig {
+            auth_token: None,
+            base_url: None,
+            model: Some("claude-sonnet-4-5".into()),
+            effort: None,
+            has_auth_token: true,
+        };
+        let json = serde_json::to_string(&agent).unwrap();
+        assert!(json.contains("has_auth_token"));
+        let back: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.has_auth_token);
+
+        // But a YAML config file that never wrote the flag deserializes to
+        // the default (false) — old configs keep working.
+        let yaml = r#"
+agent:
+  model: claude-sonnet-4-5
+"#;
+        let cfg: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.agent.unwrap().has_auth_token);
+    }
+
+    // ── migrate_auth_token_to_keychain (offline no-op paths) ──
+    //
+    // The "token present" branch writes to the real OS keychain, so it is
+    // covered by the `#[ignore]`d live test in `secrets.rs`. These exercise
+    // the early-return paths that never touch the keychain.
+
+    #[test]
+    fn migrate_noop_when_no_agent_block() {
+        let mut config = GlobalConfig::default();
+        assert!(!config.migrate_auth_token_to_keychain().unwrap());
+        assert!(config.agent.is_none());
+    }
+
+    #[test]
+    fn migrate_noop_when_token_none() {
+        let mut config = GlobalConfig {
+            agent: Some(AgentConfig {
+                auth_token: None,
+                base_url: Some("https://api.anthropic.com".into()),
+                model: Some("claude-sonnet-4-5".into()),
+                effort: None,
+                has_auth_token: false,
+            }),
+            ..Default::default()
+        };
+        assert!(!config.migrate_auth_token_to_keychain().unwrap());
+        assert!(config.agent.as_ref().unwrap().auth_token.is_none());
+    }
+
+    #[test]
+    fn migrate_noop_when_token_empty() {
+        let mut config = GlobalConfig {
+            agent: Some(AgentConfig {
+                auth_token: Some(String::new()),
+                base_url: None,
+                model: None,
+                effort: None,
+                has_auth_token: false,
+            }),
+            ..Default::default()
+        };
+        // Empty string is treated as "no token" — must not call the keychain.
+        assert!(!config.migrate_auth_token_to_keychain().unwrap());
+        assert_eq!(config.agent.as_ref().unwrap().auth_token.as_deref(), Some(""));
     }
 
     // ── RunState / UncommittedStats tests ──

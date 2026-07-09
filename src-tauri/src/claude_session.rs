@@ -222,6 +222,10 @@ impl ClaudeSession {
         // edits and left every Bash call stalling — see
         // docs/PRD-agent-permission-stall.md for the evidence.)
         cmd.args(["--permission-mode", "acceptEdits"]);
+        if let Some(model) = agent_config.model.clone() {
+            cmd.args(["--model", &model]);
+        }
+
         // Load user + project + local settings so the curated
         // `permissions.allow` list written by `skills::setup_hooks` (and any
         // user allow rules) short-circuit the control protocol for known-safe
@@ -237,6 +241,20 @@ impl ClaudeSession {
         // OS pipe buffer and deadlock. A drain task below keeps it empty and
         // surfaces the output via tracing.
         cmd.stderr(Stdio::piped());
+
+        // Log the resolved spawn config at INFO so a gateway error (e.g. 529
+        // overloaded, 401 bad token, wrong base URL) is diagnosable without
+        // guessing what model/endpoint the CLI actually used. The
+        // AgentConfig Debug impl redacts the auth token.
+        tracing::info!(
+            "spawning claude in {} | model={} | base_url={} | auth_token={} | effort={} | resume={}",
+            project_path.display(),
+            agent_config.model.as_deref().unwrap_or("<cli default>"),
+            agent_config.base_url.as_deref().unwrap_or("<cli default>"),
+            if agent_config.auth_token.is_some() { "set" } else { "<none>" },
+            agent_config.effort.as_deref().unwrap_or("<none>"),
+            resume_session_id.unwrap_or("none"),
+        );
 
         let mut child = cmd
             .spawn()
@@ -1234,6 +1252,7 @@ mod tests {
                 .or_else(|| Some(String::from("deepseek-v4-pro[1m]"))),
             auth_token: std::env::var("LOOPDECK_TEST_AUTH_TOKEN").ok(),
             effort: Some(String::from("low")),
+            ..Default::default()
         }
     }
 
@@ -1413,6 +1432,7 @@ mod tests {
                 model: None,
                 auth_token: None,
                 effort: None,
+                ..Default::default()
             };
             let mut session = ClaudeSession::spawn(
                 &test_path(),

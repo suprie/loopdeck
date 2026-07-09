@@ -126,6 +126,12 @@ export interface AgentConfig {
   base_url?: string;
   model?: string;
   effort?: string;
+  /**
+   * Read-only signal from the backend: true when an auth token is stored in
+   * the OS keychain. The plaintext token itself is never sent over IPC, so the
+   * Settings UI uses this to show a "token stored" affordance.
+   */
+  has_auth_token?: boolean;
 }
 
 /** A single architectural decision record from .loopdeck/decisions.md. */

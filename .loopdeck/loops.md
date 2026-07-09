@@ -4,22 +4,17 @@
 
 - **Started**: 2026-07-05
 - **Goal**: Make LoopDeck production-ready. Phase 1 (security stop-the-bleeding)
-  is done; Phases 2-6 remain — distribution, hardening, quality gates, docs/policy,
-  and UX polish. Audit was a three-pronged review (Rust backend, React frontend,
-  ops/tooling) that produced the action items below.
+  is done; Phase 2 (hardening) is underway — the agent auth token now lives in
+  the OS keychain, not plaintext config.yaml. Phases 3-6 remain — quality gates,
+  docs/policy, and UX polish. Audit was a three-pronged review (Rust backend,
+  React frontend, ops/tooling) that produced the action items below.
 - **Status**: in_progress
+- **Last completed**: 2026-07-10 — auth token moved to OS keychain (P2 secret hygiene); `config.yaml` tightened to `0600`.
 
 ## Next Steps
 
-### P2 — Distribution (signing / notarization / updater)
-- [ ] Configure macOS signing identity in `tauri.conf.json` (`bundle.macOS.signingIdentity`) + Windows `certificateThumbprint`/`tsp` server; feed via CI secrets
-- [ ] Notarization: wire `APPLE_ID` / `APPLE_PASSWORD` / team ID into the macOS release pipeline
-- [ ] Updater: add `tauri-plugin-updater` config (`pubkey` + `endpoints`) and a `TAURI_SIGNING_PRIVATE_KEY`-based release workflow
-- [ ] Release CI: `tauri-apps/tauri-action` workflow producing signed `.dmg` / `.msi` / `.AppImage` + signed `latest.json`
-- [ ] Bundle metadata: fill in `bundle.publisher`, `bundle.category`, `bundle.copyright`, `bundle.shortDescription`
-
-### P3 — Hardening (correctness, robustness, secret hygiene)
-- [ ] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
+### P2 — Hardening (correctness, robustness, secret hygiene)
+- [x] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
 - [ ] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they currently run sync walkdir + git subprocess spawning inside `async` Tauri commands
 - [ ] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — move to `spawn_blocking` or kill+detach with tokio `wait`
 - [ ] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs:202`, `git.rs:68,91,114,144,162`) to defeat PATH hijack
@@ -32,7 +27,7 @@
 - [ ] Strengthen `check_destructive_floor` further: prefix deny-list is now argv-analyzed, but `mv`/`cp` targeting `/`, `/etc`, `/usr`, `$HOME` root are still best-effort
 - [ ] Reconcile the `claude_session.rs:218-224` doc comment ("default") with the actual `--permission-mode acceptEdits` arg
 
-### P4 — Quality gates (CI, lint, tests)
+### P3 — Quality gates (CI, lint, tests)
 - [ ] CI: `.github/workflows/ci.yml` running `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm ci`, `tsc --noEmit`, `npm run build` on macOS/Linux/Windows matrices
 - [ ] Frontend lint/format: ESLint + @typescript-eslint + eslint-plugin-react-hooks + Prettier; add `npm run lint`
 - [ ] Rust lint/format: `rustfmt.toml` + `clippy.toml`; enforce `-D warnings`
@@ -76,6 +71,69 @@
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
 ## History
+
+### 2026-07-10 — Auth token moved to OS keychain (P2 secret hygiene)
+
+- **Status**: completed
+- **Completed**: 2026-07-10
+
+Moved the agent auth token out of plaintext `~/.config/loopdeck/config.yaml`
+into the platform-native credential store, and hardened the config file's
+permissions as a defense-in-depth floor.
+
+**Backend.**
+- `secrets.rs` (already scaffolded): `load_auth_token` / `store_auth_token` /
+  `delete_auth_token` over the `keyring` crate (macOS Keychain / Windows
+  Credential Manager / Linux Secret Service). Failures degrade gracefully — a
+  missing token is `Ok(None)`; an unrecoverable backend is `AppError::Config`.
+- `config.rs`: `AgentConfig` gained a `has_auth_token: bool` presence flag
+  (`#[serde(default, skip_serializing_if = "is_false")]`) — populated only on
+  the `get_agent_config` read path so the UI can show a "token stored"
+  affordance; never persisted to YAML. `GlobalConfig::save()` now applies a
+  `0600` owner-only floor on Unix (`restrict_file_perms`). New
+  `migrate_auth_token_to_keychain()` moves a plaintext token to the keychain
+  and scrubs it from the in-memory config (`Ok(true)` if it moved something,
+  `Ok(false)` for none/empty, `Err` if the keychain rejected a real token —
+  then the token is put back so it's never lost).
+- `commands.rs`: `set_agent_config` stores a newly-typed token in the keychain
+  and scrubs it from the persisted YAML; an empty/`None` token means "leave the
+  existing keychain token untouched" (the UI never receives the plaintext back,
+  so an unchanged field shows up empty). `get_agent_config` never returns the
+  plaintext token — only `has_auth_token`. New `resolve_agent_config` helper
+  injects the keychain token at spawn time into a local `AgentConfig` (the
+  token lives only for the spawn call, never on `Mutex<GlobalConfig>`), used by
+  both `with_session` and the reset-spawn path. New `clear_auth_token` command.
+- `lib.rs`: startup migration — `migrate_auth_token_to_keychain` + `save` so a
+  plaintext token left by a prior version is moved on first launch and the file
+  is (re)tightened to `0600`. If the keychain is unavailable the token stays in
+  the `0600` file as the interim floor.
+- Drive-by: removed a dead `use tokio::process::Command;` in `agents.rs` left
+  by the prior `CommandEnv` refactor.
+
+**Frontend.**
+- `types/index.ts`: `AgentConfig.has_auth_token?: boolean`.
+- `lib/tauri.ts`: `clearAuthToken()` IPC wrapper.
+- `Settings.tsx`: the auth-token field no longer pre-fills the plaintext token
+  (it isn't returned over IPC); a "Token stored in OS keychain" badge with a
+  "Clear stored token" button appears when a token is set and the field is
+  empty; saving a new token clears the field and flips to the stored badge;
+  the hint now says the token is stored in the OS keychain, not config.yaml.
+
+**Design decisions.** The plaintext token never crosses IPC to the renderer —
+only a presence flag does. The token is resolved from the keychain at spawn
+time into a local value, not held on long-lived app state. Keychain
+unavailability falls back to the `0600` plaintext file rather than dropping the
+token. See decisions.md ("Auth token stored in OS keychain, not config.yaml").
+
+**Verification.** `cargo test --lib` 242 passed / 0 failed / 8 ignored (+5 new
+config tests for the presence flag + migration no-op paths); live
+`cargo test --lib secrets -- --ignored` round-trip passes against the real
+macOS Keychain; `cargo clippy --all-targets` clean for new code; `tsc --noEmit`
+clean; `npm run build` passes.
+
+Files changed: src-tauri/src/{config.rs, commands.rs, lib.rs, agents.rs,
+claude_session.rs, secrets.rs}, src/{types/index.ts, lib/tauri.ts,
+components/settings/Settings.tsx}, .env.example, .loopdeck/{loops.md, decisions.md}.
 
 ### 2026-07-05 — Phase 1: Stop the bleeding (security)
 

@@ -13,6 +13,7 @@ use crate::permission::Decision as PermissionDecision;
 use crate::permission::PermissionPolicy;
 use crate::project::{self, ProjectMeta};
 use crate::scanner::{self, DiscoveredRepo};
+use crate::secrets;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -589,25 +590,72 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
 
 /// Get the global agent configuration.
 ///
-/// Returns `None` if no agent config has been saved yet.
+/// Returns `None` if no agent config has been saved yet. The auth token is
+/// **never** returned to the renderer: `auth_token` is always `None` here, and
+/// `has_auth_token` reports whether one is stored in the OS keychain so the UI
+/// can show a masked "token stored" affordance without the secret crossing IPC.
 #[tauri::command]
 pub async fn get_agent_config(state: State<'_, AppState>) -> Result<Option<AgentConfig>, AppError> {
     let config = state.config.lock().map_err(|_| AppError::LockError)?;
-    Ok(config.agent.clone())
+    let Some(mut agent) = config.agent.clone() else {
+        return Ok(None);
+    };
+    agent.auth_token = None;
+    agent.has_auth_token = secrets::load_auth_token()?.is_some();
+    Ok(Some(agent))
 }
 
 /// Set (create or update) the global agent configuration.
 ///
-/// Persists to `~/.config/loopdeck/config.yaml` and returns the saved config.
+/// If a non-empty `auth_token` is supplied it is stored in the OS keychain
+/// (overwriting any existing value); the token is never written to
+/// `config.yaml`. An empty/`None` token means "leave the stored keychain token
+/// untouched" — because `get_agent_config` never returns the plaintext token,
+/// an unchanged Settings field shows up empty and must not be interpreted as a
+/// request to clear. Use [`clear_auth_token`] to remove a stored token.
 #[tauri::command]
 pub async fn set_agent_config(
     agent_config: AgentConfig,
     state: State<'_, AppState>,
 ) -> Result<AgentConfig, AppError> {
-    let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
-    config.agent = Some(agent_config.clone());
-    config.save()?;
-    Ok(agent_config)
+    // Store a newly-typed token in the keychain; otherwise keep whatever is
+    // already there.
+    let has_token = if let Some(token) = agent_config
+        .auth_token
+        .as_ref()
+        .filter(|t| !t.is_empty())
+    {
+        secrets::store_auth_token(token)?;
+        true
+    } else {
+        secrets::load_auth_token()?.is_some()
+    };
+
+    // Persist only the non-secret fields. The token and the presence flag are
+    // scrubbed so they never reach config.yaml.
+    let mut persisted = agent_config.clone();
+    persisted.auth_token = None;
+    persisted.has_auth_token = false;
+
+    {
+        let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+        config.agent = Some(persisted.clone());
+        config.save()?;
+    }
+
+    // Reflect actual keychain presence back to the caller (used by the UI to
+    // flip the field into its "stored" state).
+    persisted.has_auth_token = has_token;
+    Ok(persisted)
+}
+
+/// Remove the stored auth token from the OS keychain.
+///
+/// Idempotent: succeeding when no token is stored. The non-secret agent config
+/// (base_url / model / effort) in `config.yaml` is left untouched.
+#[tauri::command]
+pub async fn clear_auth_token() -> Result<(), AppError> {
+    secrets::delete_auth_token()
 }
 
 /// Get a single project by path.
@@ -1672,6 +1720,33 @@ pub async fn agent_interrupt(path: String, state: State<'_, AppState>) -> Result
 // Both uphold the per-project turn-lock invariant (one stdin, one process):
 // same-project turns never run concurrently, different projects run in parallel.
 
+/// Read the agent config from the registry and inject the auth token from the
+/// OS keychain.
+///
+/// The token is never stored in `config.yaml` (it lives in the keychain — see
+/// `secrets`), so it must be resolved here, at spawn time. The returned value
+/// is a local owned `AgentConfig` passed by reference to `ClaudeSession::spawn`,
+/// which sets it as a child env var (`ANTHROPIC_AUTH_TOKEN`) and then drops it —
+/// the plaintext token is never held on the long-lived `Mutex<GlobalConfig>`.
+///
+/// A missing keychain token resolves to `None`, preserving the prior behaviour
+/// where a user may rely on `ANTHROPIC_AUTH_TOKEN` inherited from their shell.
+fn resolve_agent_config(state: &AppState) -> Result<AgentConfig, AppError> {
+    let mut agent_config = state
+        .config
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .agent
+        .clone()
+        .ok_or_else(|| {
+            AppError::Agent(
+                "no agent config set; configure it in Settings before starting a loop".into(),
+            )
+        })?;
+    agent_config.auth_token = secrets::load_auth_token()?;
+    Ok(agent_config)
+}
+
 /// Get the live `ClaudeSession` for `path` as an owned `Arc`, spawning one if
 /// none exists (or resuming a prior conversation via `--resume`).
 ///
@@ -1703,17 +1778,7 @@ async fn with_session(
 
     // No live session — spawn one. Read agent config + resume id while we
     // still hold the map lock cheaply (still no .await in this scope).
-    let agent_config = state
-        .config
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .agent
-        .clone()
-        .ok_or_else(|| {
-            AppError::Agent(
-                "no agent config set; configure it in Settings before starting a loop".into(),
-            )
-        })?;
+    let agent_config = resolve_agent_config(state)?;
 
     let resume_id = conversation::last_session_id(path);
     let session = ClaudeSession::spawn(
@@ -1731,6 +1796,17 @@ async fn with_session(
 /// Build the prompt that kicks off the next development loop.
 ///
 /// Scans `.loopdeck/loops.md` raw text for the first unchecked `- [ ]` under
+/// Truncate a prompt for logging — shows the first 200 chars so the log line
+/// is useful (which step is being sent) without dumping the entire prompt.
+fn truncate_prompt(s: &str) -> String {
+    const MAX: usize = 200;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..MAX])
+    }
+}
+
 /// `## Next Steps` (the structured `memory::parse_loops` flattens checked and
 /// unchecked steps together, so we read the raw file here to preserve the
 /// distinction). Falls back to a "propose the next loop" prompt when every
@@ -2176,17 +2252,7 @@ async fn spawn_fresh(
     conversation::archive_conversation(path)?;
 
     // ── Phase 4: spawn fresh (no --resume) and insert. ──
-    let agent_config = state
-        .config
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .agent
-        .clone()
-        .ok_or_else(|| {
-            AppError::Agent(
-                "no agent config set; configure it in Settings before starting a loop".into(),
-            )
-        })?;
+    let agent_config = resolve_agent_config(state)?;
 
     let session = ClaudeSession::spawn(
         &path.to_path_buf(),
@@ -2226,6 +2292,12 @@ async fn start_fresh_and_record(
     if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
+
+    tracing::info!(
+        "sending loop prompt ({} chars) to claude: {:?}",
+        prompt.len(),
+        truncate_prompt(prompt),
+    );
 
     // 2. Send + receive.
     let response = session.send_message(prompt, &qslot, &pslot, &islot).await?;
@@ -2274,6 +2346,12 @@ async fn start_fresh_and_record_streaming(
     if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
+
+    tracing::info!(
+        "sending loop prompt ({} chars) to claude [streaming]: {:?}",
+        prompt.len(),
+        truncate_prompt(prompt),
+    );
 
     // 2. Send + stream.
     let response = session

@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import { useAppStore } from "../../store/appStore";
-import { getAgentConfig, setAgentConfig } from "../../lib/tauri";
+import { getAgentConfig, setAgentConfig, clearAuthToken } from "../../lib/tauri";
 import type { AgentConfig } from "../../types";
 
 const EFFORT_OPTIONS = [
@@ -43,6 +43,8 @@ export function Settings() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [hasToken, setHasToken] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   // Load current config on mount
   useEffect(() => {
@@ -52,11 +54,14 @@ export function Settings() {
         const existing = await getAgentConfig();
         if (!cancelled && existing) {
           setForm({
-            auth_token: existing.auth_token ?? "",
+            // Never pre-fill the plaintext token — it isn't returned over IPC.
+            // The field stays empty; `hasToken` drives the "stored" affordance.
+            auth_token: "",
             base_url: existing.base_url ?? "",
             model: existing.model ?? "",
             effort: existing.effort ?? "high",
           });
+          setHasToken(!!existing.has_auth_token);
         }
       } catch {
         // Config doesn't exist yet — that's fine, use defaults
@@ -81,14 +86,20 @@ export function Settings() {
     setSaving(true);
     setSaved(false);
     try {
-      // Strip empty strings to None on the Rust side
+      // Strip empty strings to None on the Rust side. An empty auth_token is
+      // omitted entirely so the backend preserves the existing keychain token
+      // rather than clearing it.
       const toSave: AgentConfig = {};
       if (form.auth_token) toSave.auth_token = form.auth_token;
       if (form.base_url) toSave.base_url = form.base_url;
       if (form.model) toSave.model = form.model;
       if (form.effort) toSave.effort = form.effort;
 
-      await setAgentConfig(toSave);
+      const saved = await setAgentConfig(toSave);
+      setHasToken(!!saved.has_auth_token);
+      // The token now lives in the keychain — clear the field so the masked
+      // "stored" affordance shows and the plaintext doesn't linger in state.
+      setForm((prev) => ({ ...prev, auth_token: "" }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (err) {
@@ -97,6 +108,21 @@ export function Settings() {
       setSaving(false);
     }
   }, [form, setError]);
+
+  const handleClearToken = useCallback(async () => {
+    setClearing(true);
+    try {
+      await clearAuthToken();
+      setHasToken(false);
+      setForm((prev) => ({ ...prev, auth_token: "" }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setClearing(false);
+    }
+  }, [setError]);
 
   if (!loaded) {
     return (
@@ -122,14 +148,16 @@ export function Settings() {
             {/* Auth Token */}
             <Field
               label="Auth Token"
-              hint="Your API key. Stored locally in ~/.config/loopdeck/config.yaml."
+              hint="Your API key, stored in your OS keychain — never written to disk. Leave blank to keep the stored token; type a new value to replace it."
             >
               <div className="relative">
                 <Input
                   type={showKey ? "text" : "password"}
                   value={form.auth_token ?? ""}
                   onChange={(e) => handleChange("auth_token", e.target.value)}
-                  placeholder="sk-abc123..."
+                  placeholder={
+                    hasToken ? "•••••••• (stored — type to replace)" : "sk-abc123..."
+                  }
                   className="pr-9 font-mono"
                 />
                 <button
@@ -141,6 +169,22 @@ export function Settings() {
                   {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
                 </button>
               </div>
+              {hasToken && !form.auth_token ? (
+                <div className="mt-2 flex items-center justify-between rounded-md border border-success/30 bg-success/5 px-2.5 py-1.5">
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-success">
+                    <Check className="size-3.5" /> Token stored in OS keychain
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleClearToken}
+                    disabled={clearing}
+                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
+                  >
+                    {clearing ? <Loader2 className="size-3 animate-spin" /> : null}
+                    Clear stored token
+                  </button>
+                </div>
+              ) : null}
             </Field>
 
             {/* Base URL */}

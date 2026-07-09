@@ -1,6 +1,5 @@
 use crate::config::AgentConfig;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 pub(crate) trait CommandEnv {
     fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
@@ -797,6 +796,10 @@ fn parse_response(ndjson: &str) -> Option<AgentResponse> {
 /// Extracted for testability — allows verifying env vars without spawning.
 /// Also reused by `ClaudeSession::spawn`, so both the single-shot
 /// (`call_agents`) and persistent (`ClaudeSession`) paths stay in sync.
+///
+/// If `model` is unset, a default is injected so the `claude` CLI doesn't
+/// silently fall back to an unknown model — the default is logged at spawn
+/// and can be overridden from Settings.
 pub(crate) fn apply_agent_config<C: CommandEnv>(cmd: &mut C, agent_config: &AgentConfig) {
     if let Some(auth_token) = &agent_config.auth_token {
         cmd.env("ANTHROPIC_AUTH_TOKEN", auth_token);
@@ -806,14 +809,20 @@ pub(crate) fn apply_agent_config<C: CommandEnv>(cmd: &mut C, agent_config: &Agen
         cmd.env("ANTHROPIC_BASE_URL", base_url);
     }
 
-    if let Some(model) = &agent_config.model {
-        cmd.env("ANTHROPIC_MODEL", model);
-    }
+    // Fall back to a default model so the CLI never uses an unknown one
+    // silently. The user can override in Settings or via ANTHROPIC_MODEL
+    // in their shell env (which the child inherits if we don't set it).
+    let model = agent_config.model.as_deref().unwrap_or(DEFAULT_MODEL);
+    cmd.env("ANTHROPIC_MODEL", model);
 
     if let Some(effort) = &agent_config.effort {
         cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
     }
 }
+
+/// Default model id used when `AgentConfig.model` is unset. Mirrors the
+/// documented default in `.env.example`.
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -1279,6 +1288,7 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             model: Some("claude-opus-4-8".into()),
             effort: Some("max".into()),
+            ..Default::default()
         };
 
         let mut cmd = Command::new("claude");
@@ -1295,19 +1305,20 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_agent_config_empty_fields_set_nothing() {
+    fn test_apply_agent_config_empty_fields_set_default_model() {
         let config = AgentConfig {
             auth_token: None,
             base_url: None,
             model: None,
             effort: None,
+            ..Default::default()
         };
 
         let mut cmd = Command::new("claude");
 
         // Record env vars that *already exist* after construction (inherited from
-        // the test process). Then apply config and verify no NEW agent-specific vars
-        // were added.
+        // the test process). Then apply config and verify only the default model
+        // was added — everything else stays unset.
         let before: Vec<String> = cmd
             .get_envs()
             .map(|(k, _)| k.to_string_lossy().into_owned())
@@ -1315,21 +1326,23 @@ mod tests {
 
         apply_agent_config(&mut cmd, &config);
 
-        let after: Vec<String> = cmd
+        let envs: Vec<(String, String)> = cmd
             .get_envs()
-            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .filter_map(|(k, v)| {
+                v.map(|val| (k.to_string_lossy().into_owned(), val.to_string_lossy().into_owned()))
+            })
             .collect();
 
-        let agent_vars = [
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_MODEL",
-            "CLAUDE_CODE_EFFORT_LEVEL",
-        ];
+        // The default model IS set (no silent CLI fallback).
+        assert!(
+            envs.contains(&("ANTHROPIC_MODEL".into(), DEFAULT_MODEL.into())),
+            "expected ANTHROPIC_MODEL={DEFAULT_MODEL}, got: {envs:?}"
+        );
 
-        for var in agent_vars {
+        // The other three were NOT added (they're still None in the config).
+        for var in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_EFFORT_LEVEL"] {
             let was_present_before = before.contains(&var.to_string());
-            let is_present_after = after.contains(&var.to_string());
+            let is_present_after = envs.iter().any(|(k, _)| k == var);
             assert_eq!(
                 was_present_before, is_present_after,
                 "{var} should not have been added"
@@ -1345,6 +1358,7 @@ mod tests {
             base_url: Some("https://api.deepseek.com/anthropic".into()),
             model: Some("deepseek-v4-pro[1m]".into()),
             effort: None,
+            ..Default::default()
         };
 
         let mut cmd = Command::new("claude");
