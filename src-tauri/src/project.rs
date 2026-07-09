@@ -47,7 +47,7 @@ pub fn bootstrap_project(
     // Check if already bootstrapped
     if !project_file.exists() {
         // Generate description
-        create_files_and_diretories(repo_path)?;
+        create_files_and_directories(repo_path)?;
         let description = generate_description(repo_path, repo_name, markers, has_readme)?;
         setup_skills(repo_path, markers)?;
         meta = ProjectMeta::new(repo_name, &description);
@@ -57,7 +57,7 @@ pub fn bootstrap_project(
         std::fs::write(&project_file, contents)?;
         tracing::info!("Bootstrapped project at {:?}", repo_path.display());
     } else {
-        create_files_and_diretories(repo_path)?;
+        create_files_and_directories(repo_path)?;
         meta = load_project(repo_path)?;
         setup_skills(repo_path, markers)?;
     }
@@ -65,9 +65,12 @@ pub fn bootstrap_project(
     Ok(meta)
 }
 
-fn create_files_and_diretories(loopdeck_dir: &Path) -> Result<(), AppError> {
-    // Create .loopdeck directory
-    std::fs::create_dir_all(loopdeck_dir)?;
+fn create_files_and_directories(repo_path: &Path) -> Result<(), AppError> {
+    // Runtime layer.
+    std::fs::create_dir_all(repo_path.join(".loopdeck"))?;
+    // Spec layer — empty by default; epics are authored by humans / the
+    // authoring skill, never seeded by the app.
+    std::fs::create_dir_all(repo_path.join("docs").join("epics"))?;
     Ok(())
 }
 

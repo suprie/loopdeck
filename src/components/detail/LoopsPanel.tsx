@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
-import { Repeat, Circle, History, ArrowRight } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Repeat, Circle, CheckCircle2, History, ArrowRight, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import type { LoopStatus, Loop } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
@@ -59,6 +60,7 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
   const [status, setStatus] = useState<LoopStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [toggling, setToggling] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +84,31 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
       cancelled = true;
     };
   }, [projectPath]);
+
+  const handleToggle = useCallback(
+    async (stepText: string) => {
+      setToggling(stepText);
+      try {
+        const nowChecked = await api.toggleLoopStep(projectPath, stepText);
+        // Optimistic local update so the check flips immediately.
+        setStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                next_steps: prev.next_steps.map((s) =>
+                  s.text === stepText ? { ...s, checked: nowChecked } : s,
+                ),
+              }
+            : prev,
+        );
+      } catch (err) {
+        toast.error("Failed to toggle step", { description: String(err) });
+      } finally {
+        setToggling(null);
+      }
+    },
+    [projectPath],
+  );
 
   if (loading) {
     return <LoadingSpinner label="Loading loops..." />;
@@ -129,17 +156,35 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
                 Next Steps
               </h4>
               <ul className="space-y-1.5">
-                {status.next_steps.map((step, i) => (
-                  <li
-                    key={i}
-                    className="flex items-start gap-2 text-sm text-foreground leading-relaxed"
-                  >
-                    <Circle size={8} className="text-muted-foreground shrink-0 mt-[7px]" />
-                    <div className="flex-1 min-w-0">
-                      <Markdown>{step}</Markdown>
-                    </div>
-                  </li>
-                ))}
+                {status.next_steps.map((step, i) => {
+                  const isToggling = toggling === step.text;
+                  return (
+                    <li
+                      key={i}
+                      className={`flex items-start gap-2 text-sm leading-relaxed ${
+                        step.checked ? "text-muted-foreground line-through" : "text-foreground"
+                      }`}
+                    >
+                      <button
+                        onClick={() => handleToggle(step.text)}
+                        disabled={isToggling}
+                        title={step.checked ? "Mark as not done" : "Mark as done"}
+                        className="shrink-0 mt-[3px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                      >
+                        {isToggling ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : step.checked ? (
+                          <CheckCircle2 size={14} className="text-[var(--success)]" />
+                        ) : (
+                          <Circle size={14} />
+                        )}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <Markdown>{step.text}</Markdown>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}

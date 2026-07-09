@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { RouterProvider, router } from "./router";
 import { useProjects } from "./hooks/useProjects";
 import { ThemeProvider } from "./lib/theme";
+import { Toaster } from "./components/ui/sonner";
 import "./styles.css";
 
 /**
@@ -9,7 +10,8 @@ import "./styles.css";
  *
  * View routing is handled by `@tanstack/react-router` (see `src/router.tsx`).
  * This component bootstraps project data on mount and renders the router
- * inside the theme provider.
+ * inside the theme provider. The Toaster is mounted once here so any view
+ * can fire `toast()` calls (e.g. promote-to-loop feedback).
  */
 export default function App() {
   const { loadProjects } = useProjects();
@@ -21,6 +23,7 @@ export default function App() {
   return (
     <ThemeProvider>
       <RouterProvider router={router} />
+      <Toaster />
     </ThemeProvider>
   );
 }

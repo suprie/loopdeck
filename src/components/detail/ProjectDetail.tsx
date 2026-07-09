@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   Lightbulb,
   Repeat,
+  Layers,
   Bot,
 } from "lucide-react";
 import { relativeTime } from "../../lib/time";
@@ -20,6 +21,7 @@ import { useProjects } from "../../hooks/useProjects";
 import { EditDescription } from "./EditDescription";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { LoopsPanel } from "./LoopsPanel";
+import { EpicsPanel } from "./EpicsPanel";
 import { AgentPanel } from "./AgentPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { StatusBadge } from "../shared/StatusBadge";
@@ -32,6 +34,7 @@ const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
   { id: "decisions", label: "Decisions", icon: <Lightbulb size={14} /> },
   { id: "loops", label: "Loops", icon: <Repeat size={14} /> },
+  { id: "epics", label: "Epics", icon: <Layers size={14} /> },
   { id: "agent", label: "Agent", icon: <Bot size={14} /> },
 ];
 
@@ -162,6 +165,8 @@ export function ProjectDetail() {
             )}
 
             {activeTab === "loops" && <LoopsPanel projectPath={project.path} />}
+
+            {activeTab === "epics" && <EpicsPanel projectPath={project.path} />}
           </div>
         )}
       </div>

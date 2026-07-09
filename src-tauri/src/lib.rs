@@ -3,6 +3,7 @@ mod claude_session;
 mod commands;
 mod config;
 mod conversation;
+mod epic;
 mod error;
 mod git;
 mod logging;
@@ -58,6 +59,13 @@ pub fn run() {
             commands::rescan_project,
             commands::get_decisions,
             commands::get_loops,
+            commands::get_epics,
+            commands::get_epics_by_milestone,
+            commands::promote_epic_loop,
+            commands::toggle_loop_step,
+            commands::toggle_prd_loop,
+            commands::read_spec_file,
+            commands::write_spec_file,
             commands::get_agent_config,
             commands::set_agent_config,
             commands::agent_start_loop,

@@ -6,6 +6,7 @@ import type {
   ProjectEntry,
   ProjectMeta,
   Decision,
+  Epic,
   LoopStatus,
   AgentResponse,
   ClaudeEvent,
@@ -114,6 +115,101 @@ export async function getDecisions(path: string): Promise<Decision[]> {
  */
 export async function getLoops(path: string): Promise<LoopStatus> {
   return invoke<LoopStatus>("get_loops", { path });
+}
+
+/**
+ * Get all epics from docs/epics/, each with its PRDs and phase checklists.
+ * Returns an empty list if docs/epics/ does not exist.
+ * Rust: get_epics(path: String) -> Result<Vec<Epic>, AppError>
+ */
+export async function getEpics(path: string): Promise<Epic[]> {
+  return invoke<Epic[]>("get_epics", { path });
+}
+
+/**
+ * Get epics grouped by milestone (ordered), for the cross-project /epics view.
+ * Epics with no milestone land in an "Unmilestoned" bucket.
+ * Rust: get_epics_by_milestone(path: String) -> Result<BTreeMap<String, Vec<Epic>>, AppError>
+ */
+export async function getEpicsByMilestone(
+  path: string,
+): Promise<Record<string, Epic[]>> {
+  return invoke<Record<string, Epic[]>>("get_epics_by_milestone", { path });
+}
+
+/**
+ * Promote a PRD checklist item into .loopdeck/loops.md ## Current.
+ * Refuses (AppError kind "conflict") if a loop is already in progress.
+ * Rust: promote_epic_loop(path, epic_slug, prd_filename, loop_title) -> Result<(), AppError>
+ */
+export async function promoteEpicLoop(
+  path: string,
+  epicSlug: string,
+  prdFilename: string,
+  loopTitle: string,
+): Promise<void> {
+  return invoke<void>("promote_epic_loop", {
+    path,
+    epicSlug,
+    prdFilename,
+    loopTitle,
+  });
+}
+
+/**
+ * Toggle a - [ ] / - [x] next-step checklist item in .loopdeck/loops.md.
+ * Returns the new checked state.
+ * Rust: toggle_loop_step(path, step_text) -> Result<bool, AppError>
+ */
+export async function toggleLoopStep(
+  path: string,
+  stepText: string,
+): Promise<boolean> {
+  return invoke<boolean>("toggle_loop_step", { path, stepText });
+}
+
+/**
+ * Toggle a - [ ] / - [x] checklist item in a PRD file under docs/epics/.
+ * Returns the new checked state.
+ * Rust: toggle_prd_loop(path, epic_slug, prd_filename, loop_title) -> Result<bool, AppError>
+ */
+export async function togglePrdLoop(
+  path: string,
+  epicSlug: string,
+  prdFilename: string,
+  loopTitle: string,
+): Promise<boolean> {
+  return invoke<boolean>("toggle_prd_loop", {
+    path,
+    epicSlug,
+    prdFilename,
+    loopTitle,
+  });
+}
+
+/**
+ * Read a spec file (epic README or PRD) under docs/epics/.
+ * relPath is relative to docs/epics/ (e.g. "<slug>/prd-x.md").
+ * Rust: read_spec_file(path, rel_path) -> Result<String, AppError>
+ */
+export async function readSpecFile(
+  path: string,
+  relPath: string,
+): Promise<string> {
+  return invoke<string>("read_spec_file", { path, relPath });
+}
+
+/**
+ * Write (create or overwrite) a spec file under docs/epics/.
+ * relPath is relative to docs/epics/. Raw write — does not validate frontmatter.
+ * Rust: write_spec_file(path, rel_path, content) -> Result<(), AppError>
+ */
+export async function writeSpecFile(
+  path: string,
+  relPath: string,
+  content: string,
+): Promise<void> {
+  return invoke<void>("write_spec_file", { path, relPath, content });
 }
 
 /**

@@ -364,12 +364,37 @@ Write loops as level-2 sections for Current/Next Steps/History, with level-3 ent
 - **Completed**: YYYY-MM-DD
 ```
 
+When a loop was promoted from an epic/PRD (via the LoopDeck UI), the
+`## Current` block carries back-reference bullets that trace it back to the
+spec layer:
+
+```markdown
+## Current
+- **Started**: YYYY-MM-DD
+- **Goal**: Define Epic and Prd structs in epic.rs
+- **Status**: in_progress
+- **Epic**: support-project-management
+- **PRD**: prd-spec-layer
+```
+
+Treat `**Epic**` and `**PRD**` as read-only context — they tell you *why* the
+loop exists. Never edit, remove, or reorder them. The `**Goal**` is the only
+field that drives your work.
+
 **Rules:**
 - `## Current` contains the active loop (or `_No active loop._` if none)
 - `## Next Steps` is a checklist of `- [ ]` items for the current loop
 - `## History` contains completed/abandoned loops as `### YYYY-MM-DD — Title` entries
 - At the end of every session, update the Current loop status and Next Steps
 - When a loop completes, move it to History and start a new Current loop
+- **When moving a loop to History, if its `## Current` block carried `**Epic**`
+  and `**PRD**` back-references, check the matching `- [ ]` box in the origin
+  PRD file.** The PRD lives at
+  `docs/epics/<Epic-slug>/<PRD>.md`, under a `## Phases` → `### Phase N`
+  checklist. Find the item whose text matches the loop's `**Goal**` and change
+  `- [ ]` to `- [x]`. This keeps the spec layer in sync with what's actually
+  been built. If the item isn't found (title drifted, or the file was
+  removed), skip silently — the human can check it manually in the UI.
 
 ## Phase Actions
 
@@ -381,6 +406,10 @@ At the end of the session (Phase 6 or equivalent):
 1. Update `.loopdeck/loops.md` Current status and Next Steps
 2. Append any unrecorded decisions to `.loopdeck/decisions.md`
 3. If a loop completed, move it to History and set the next Current loop
+4. **If the completed loop carried `**Epic**`/`**PRD**` back-references, check
+   the matching `- [ ]` box in the origin PRD** at
+   `docs/epics/<Epic>/<PRD>.md` (find the item matching the loop's `**Goal**`,
+   change `- [ ]` to `- [x]`). Skip silently if not found.
 
 ## Integration with Phase 6
 

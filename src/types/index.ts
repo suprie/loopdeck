@@ -116,6 +116,7 @@ export interface AppError {
     | "config"
     | "lockError"
     | "projectAlreadyExists"
+    | "conflict"
     | "agent";
 }
 
@@ -144,15 +145,73 @@ export interface Loop {
   completed?: string;
 }
 
+/** A single checklist item under `## Next Steps` in loops.md. Mirrors Rust `NextStep`. */
+export interface NextStep {
+  /** The step text (without the `- [ ]` / `- [x]` prefix). */
+  text: string;
+  /** Whether the box is checked (`- [x]`). */
+  checked: boolean;
+}
+
 /** Full loop status from .loopdeck/loops.md. */
 export interface LoopStatus {
   current: Loop | null;
-  next_steps: string[];
+  next_steps: NextStep[];
   history: Loop[];
 }
 
+/**
+ * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
+ * Mirrors Rust `Epic` in epic.rs.
+ */
+export interface Epic {
+  slug: string;
+  title: string;
+  milestone: string;
+  status: "proposed" | "in_progress" | "completed" | "abandoned";
+  description: string;
+  started?: string;
+  completed?: string;
+  owner?: string;
+  /** Path to the epic directory (back-reference for the promote action). */
+  dir: string;
+  prds: Prd[];
+}
+
+/** A parsed PRD, with its phase checklists attached. Mirrors Rust `Prd`. */
+export interface Prd {
+  /** PRD slug — the `prd:` frontmatter field (filename without `.md`). */
+  slug: string;
+  /** Parent epic slug. */
+  epic: string;
+  status: "proposed" | "accepted" | "completed";
+  description: string;
+  milestone?: string;
+  /** Filename of the PRD file (back-reference for the promote action). */
+  file: string;
+  phases: PrdPhase[];
+}
+
+/** A `### Phase N — Name` section within a PRD's `## Phases`. */
+export interface PrdPhase {
+  /** Full heading text, e.g. "Phase 1 — Core structs and parser". */
+  name: string;
+  loops: PrdLoop[];
+}
+
+/**
+ * A single checklist item inside a phase — the atomic unit the
+ * promote-to-loop action acts on.
+ */
+export interface PrdLoop {
+  title: string;
+  checked: boolean;
+  /** Read-only sync from loops.md History: true when a history goal matches. */
+  done_in_history: boolean;
+}
+
 /** Tab navigation within ProjectDetail. */
-export type DetailTab = "overview" | "decisions" | "loops" | "agent";
+export type DetailTab = "overview" | "decisions" | "loops" | "epics" | "agent";
 
 /** Token usage + cost for an assistant turn (mirrors Rust UsageInfo). */
 export interface UsageInfo {

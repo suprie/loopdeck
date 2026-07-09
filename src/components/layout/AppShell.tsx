@@ -7,6 +7,7 @@ import {
   GitBranch,
   RotateCw,
   FolderPlus,
+  Layers,
   Settings,
   Sun,
   Moon,
@@ -23,6 +24,7 @@ const nav = [
   { to: "/agent", label: "Agent Runner", icon: Bot },
   { to: "/decisions", label: "Decisions", icon: GitBranch },
   { to: "/loops", label: "Loops", icon: RotateCw },
+  { to: "/epics", label: "Epics", icon: Layers },
   { to: "/import", label: "Import Repo", icon: FolderPlus },
 ] as const;
 

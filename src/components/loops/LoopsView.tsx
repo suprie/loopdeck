@@ -234,9 +234,9 @@ export function LoopsView() {
                         {/* Next-steps count (collapsed) */}
                         {!isExpanded && ls.next_steps.length > 0 && (
                           <p className="mt-1 text-[11px] text-muted-foreground">
-                            {ls.next_steps.filter((s) => s.startsWith("- [x]")).length}/
+                            {ls.next_steps.filter((s) => s.checked).length}/
                             {ls.next_steps.length} done ·{" "}
-                            {ls.next_steps.filter((s) => !s.startsWith("- [x]")).length} pending
+                            {ls.next_steps.filter((s) => !s.checked).length} pending
                           </p>
                         )}
                       </div>
@@ -279,28 +279,27 @@ export function LoopsView() {
                             </span>
                             <ol className="mt-1.5 space-y-1.5">
                               {ls.next_steps.map((step, i) => {
-                                const isChecked = step.startsWith("- [x]");
                                 return (
                                   <li key={i} className="flex items-center gap-2 text-xs">
                                     <span
                                       className={cn(
                                         "flex size-4 items-center justify-center rounded border",
-                                        isChecked
+                                        step.checked
                                           ? "border-success bg-success/10 text-success"
                                           : "border-border bg-background",
                                       )}
                                     >
-                                      {isChecked && <Check className="size-2.5" />}
+                                      {step.checked && <Check className="size-2.5" />}
                                     </span>
                                     <span
                                       className={cn(
                                         "leading-relaxed",
-                                        isChecked
+                                        step.checked
                                           ? "text-muted-foreground line-through"
                                           : "text-foreground",
                                       )}
                                     >
-                                      {step.replace(/^- \[x\] /, "").replace(/^- \[ \] /, "")}
+                                      {step.text}
                                     </span>
                                   </li>
                                 );
