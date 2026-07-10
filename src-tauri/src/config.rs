@@ -810,7 +810,10 @@ agent:
         };
         // Empty string is treated as "no token" — must not call the keychain.
         assert!(!config.migrate_auth_token_to_keychain().unwrap());
-        assert_eq!(config.agent.as_ref().unwrap().auth_token.as_deref(), Some(""));
+        assert_eq!(
+            config.agent.as_ref().unwrap().auth_token.as_deref(),
+            Some("")
+        );
     }
 
     // ── RunState / UncommittedStats tests ──

@@ -90,11 +90,17 @@ mod tests {
         assert_eq!(load_auth_token().unwrap(), None);
 
         store_auth_token("sk-roundtrip-token").unwrap();
-        assert_eq!(load_auth_token().unwrap().as_deref(), Some("sk-roundtrip-token"));
+        assert_eq!(
+            load_auth_token().unwrap().as_deref(),
+            Some("sk-roundtrip-token")
+        );
 
         // Overwrite.
         store_auth_token("sk-replacement").unwrap();
-        assert_eq!(load_auth_token().unwrap().as_deref(), Some("sk-replacement"));
+        assert_eq!(
+            load_auth_token().unwrap().as_deref(),
+            Some("sk-replacement")
+        );
 
         // Idempotent delete.
         delete_auth_token().unwrap();

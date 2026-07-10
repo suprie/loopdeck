@@ -163,10 +163,7 @@ pub fn parse_epics(repo_path: &Path) -> Vec<Epic> {
     // `## History` entry's goal matches its title. Scanned once here so the
     // cost is one `parse_loops` per aggregate call, not per PRD.
     let history = memory::parse_loops(repo_path).history;
-    let done_titles: HashSet<&str> = history
-        .iter()
-        .map(|h| h.goal.as_str())
-        .collect();
+    let done_titles: HashSet<&str> = history.iter().map(|h| h.goal.as_str()).collect();
     if !done_titles.is_empty() {
         for epic in &mut epics {
             for prd in &mut epic.prds {
@@ -448,11 +445,7 @@ pub fn read_spec_file(repo_path: &Path, rel_path: &str) -> Result<String, AppErr
 /// Write (create or overwrite) a spec file under `docs/epics/`. The relative
 /// path is sandboxed. Does not re-parse the frontmatter — it's a raw write; a
 /// broken file will be logged and skipped by the next `parse_epics` call.
-pub fn write_spec_file(
-    repo_path: &Path,
-    rel_path: &str,
-    content: &str,
-) -> Result<(), AppError> {
+pub fn write_spec_file(repo_path: &Path, rel_path: &str, content: &str) -> Result<(), AppError> {
     let path = resolve_spec_path(repo_path, rel_path, false)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -566,10 +559,7 @@ fn parse_epic_readme(path: &Path) -> Result<Epic, AppError> {
 fn parse_prd(path: &Path) -> Result<Prd, AppError> {
     let content = std::fs::read_to_string(path)?;
     let (fm_str, body) = split_frontmatter(&content).ok_or_else(|| {
-        AppError::Config(format!(
-            "PRD missing YAML frontmatter: {}",
-            path.display()
-        ))
+        AppError::Config(format!("PRD missing YAML frontmatter: {}", path.display()))
     })?;
     let fm: PrdFrontmatter = serde_yaml::from_str(fm_str)?;
 
@@ -956,7 +946,10 @@ another: 123
         assert_eq!(prd.phases[0].loops.len(), 3);
         assert_eq!(prd.phases[0].loops[0].title, "Define Epic and Prd structs");
         assert!(!prd.phases[0].loops[0].checked);
-        assert_eq!(prd.phases[0].loops[1].title, "Implement frontmatter extractor");
+        assert_eq!(
+            prd.phases[0].loops[1].title,
+            "Implement frontmatter extractor"
+        );
         assert!(prd.phases[0].loops[1].checked);
 
         assert_eq!(prd.phases[1].name, "Phase 2 — Bootstrap and integration");
@@ -1036,7 +1029,12 @@ description: d
     fn test_parse_epics_nests_prds_under_epic() {
         let dir = create_temp_repo();
         write_epic(&dir, "support-project-management", VALID_EPIC_README);
-        write_prd(&dir, "support-project-management", "prd-spec-layer.md", VALID_PRD);
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-spec-layer.md",
+            VALID_PRD,
+        );
         write_prd(
             &dir,
             "support-project-management",
@@ -1227,7 +1225,10 @@ _No active loop._
         let prd = &epics[0].prds[0];
         let phase1 = &prd.phases[0];
         // "Implement frontmatter extractor" is the 2nd item in VALID_PRD Phase 1.
-        assert!(phase1.loops[1].done_in_history, "matching title should be done");
+        assert!(
+            phase1.loops[1].done_in_history,
+            "matching title should be done"
+        );
         assert!(
             !phase1.loops[0].done_in_history,
             "non-matching title should not be done"
@@ -1253,7 +1254,10 @@ _No active loop._
         // No .loopdeck/loops.md at all.
         let epics = parse_epics(&dir);
         let prd = &epics[0].prds[0];
-        assert!(prd.phases.iter().all(|p| p.loops.iter().all(|l| !l.done_in_history)));
+        assert!(prd
+            .phases
+            .iter()
+            .all(|p| p.loops.iter().all(|l| !l.done_in_history)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1284,9 +1288,15 @@ _No active loop._
         assert!(!written.contains("prd-spec-layer.md"));
         // Rest of the file preserved.
         assert!(written.contains("## Next Steps"), "Next Steps preserved");
-        assert!(written.contains("- [ ] Keep this"), "Next Steps content preserved");
+        assert!(
+            written.contains("- [ ] Keep this"),
+            "Next Steps content preserved"
+        );
         assert!(written.contains("## History"), "History preserved");
-        assert!(written.contains("### 2026-06-01 — Old"), "History entry preserved");
+        assert!(
+            written.contains("### 2026-06-01 — Old"),
+            "History entry preserved"
+        );
         // The old "No active loop" sentinel is gone.
         assert!(!written.contains("_No active loop._"));
 
@@ -1332,7 +1342,10 @@ _No active loop._
     #[test]
     fn test_promote_prd_ref_strips_md_suffix() {
         let dir = create_temp_repo();
-        write_loops_md(&dir, "# Loops\n\n## Current\n\n_No active loop._\n\n## History\n");
+        write_loops_md(
+            &dir,
+            "# Loops\n\n## Current\n\n_No active loop._\n\n## History\n",
+        );
 
         promote_epic_loop(&dir, "e", "prd-epics-view.md", "Build UI").unwrap();
 
@@ -1360,13 +1373,13 @@ _No active loop._
             &VALID_PRD.replace("prd-spec-layer", "prd-x"),
         );
 
-        let now_checked = toggle_prd_loop(&dir, "e", "prd-x.md", "Define Epic and Prd structs").unwrap();
+        let now_checked =
+            toggle_prd_loop(&dir, "e", "prd-x.md", "Define Epic and Prd structs").unwrap();
         assert!(now_checked);
 
-        let written = std::fs::read_to_string(
-            dir.join("docs").join("epics").join("e").join("prd-x.md"),
-        )
-        .unwrap();
+        let written =
+            std::fs::read_to_string(dir.join("docs").join("epics").join("e").join("prd-x.md"))
+                .unwrap();
         assert!(written.contains("- [x] Define Epic and Prd structs"));
         // Other items untouched.
         assert!(written.contains("- [ ] Write unit tests"));
@@ -1394,10 +1407,9 @@ _No active loop._
             toggle_prd_loop(&dir, "e", "prd-x.md", "Implement frontmatter extractor").unwrap();
         assert!(!now_checked);
 
-        let written = std::fs::read_to_string(
-            dir.join("docs").join("epics").join("e").join("prd-x.md"),
-        )
-        .unwrap();
+        let written =
+            std::fs::read_to_string(dir.join("docs").join("epics").join("e").join("prd-x.md"))
+                .unwrap();
         assert!(written.contains("- [ ] Implement frontmatter extractor"));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1443,8 +1455,7 @@ _No active loop._
             &VALID_EPIC_README.replace("support-project-management", "e"),
         );
 
-        let content =
-            read_spec_file(&dir, "e/README.md").unwrap();
+        let content = read_spec_file(&dir, "e/README.md").unwrap();
         assert!(content.starts_with("---"));
         assert!(content.contains("title: Support Project Management"));
     }

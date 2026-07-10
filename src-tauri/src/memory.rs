@@ -170,7 +170,8 @@ pub fn toggle_loop_step(repo_path: &Path, step_text: &str) -> Result<bool, std::
     let old_line = &lines[line_idx];
     let indent = old_line.len() - old_line.trim_start().len();
     let new_box = if currently_checked { "- [ ]" } else { "- [x]" };
-    let item_text = old_line.trim()[checklist_prefix_len(old_line.trim()).unwrap().0..].trim_start();
+    let item_text =
+        old_line.trim()[checklist_prefix_len(old_line.trim()).unwrap().0..].trim_start();
     lines[line_idx] = format!("{}{} {}", " ".repeat(indent), new_box, item_text);
 
     let new_content = lines.join("\n");
@@ -184,7 +185,10 @@ fn checklist_prefix_len(line: &str) -> Option<(usize, bool)> {
     if let Some(rest) = line.strip_prefix("- [ ] ") {
         let _ = rest;
         Some((6, false))
-    } else if let Some(rest) = line.strip_prefix("- [x] ").or_else(|| line.strip_prefix("- [X] ")) {
+    } else if let Some(rest) = line
+        .strip_prefix("- [x] ")
+        .or_else(|| line.strip_prefix("- [X] "))
+    {
         let _ = rest;
         Some((6, true))
     } else {
