@@ -35,6 +35,9 @@ pub enum AppError {
 
     #[error("Agent error: {0}")]
     Agent(String),
+
+    #[error("Background task failed: {0}")]
+    BlockingTask(String),
 }
 
 impl Serialize for AppError {
@@ -59,6 +62,7 @@ impl Serialize for AppError {
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
                 AppError::Conflict(_) => "conflict",
                 AppError::Agent(_) => "agent",
+                AppError::BlockingTask(_) => "blockingTask",
             },
         )?;
         state.end()

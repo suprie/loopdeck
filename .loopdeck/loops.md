@@ -9,13 +9,13 @@
   docs/policy, and UX polish. Audit was a three-pronged review (Rust backend,
   React frontend, ops/tooling) that produced the action items below.
 - **Status**: in_progress
-- **Last completed**: 2026-07-10 — auth token moved to OS keychain (P2 secret hygiene); `config.yaml` tightened to `0600`.
+- **Last completed**: 2026-07-10 — blocking I/O in `scan_directory`, `import_project`, `list_projects`, `rescan_project` offloaded to `tokio::task::spawn_blocking` so the async worker thread (and the `Mutex<GlobalConfig>` lock) is no longer held across walkdir + git subprocess work.
 
 ## Next Steps
 
 ### P2 — Hardening (correctness, robustness, secret hygiene)
 - [x] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
-- [ ] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they currently run sync walkdir + git subprocess spawning inside `async` Tauri commands
+- [x] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they previously ran sync walkdir + git subprocess spawning inside `async` Tauri commands; now offloaded to the blocking pool
 - [ ] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — move to `spawn_blocking` or kill+detach with tokio `wait`
 - [ ] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs:202`, `git.rs:68,91,114,144,162`) to defeat PATH hijack
 - [ ] Add a top-level React error boundary above `<App>` in `main.tsx` — pre-router crashes currently blank-screen with no recovery
@@ -71,6 +71,56 @@
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
 ## History
+
+### 2026-07-10 — Blocking I/O offloaded to `spawn_blocking` (P2 robustness)
+
+- **Status**: completed
+- **Completed**: 2026-07-10
+
+Four `async` Tauri commands were doing real blocking work on the tokio worker
+thread — recursive `walkdir`, per-repo `git` subprocess spawns, and file reads.
+A scan of a large directory tree or a `list_projects` over many repos parked the
+worker for seconds, stalling every other IPC command sharing that thread (the UI
+froze for the duration). The `Mutex<GlobalConfig>` lock was held *across* that
+work too, so concurrent config access blocked as well.
+
+**Changes (`commands.rs`).**
+- New private `blocking_task_failed(JoinError) -> AppError` helper + new
+  `AppError::BlockingTask(String)` variant (with serialize `kind` arm) so a join
+  failure (task panic/cancel) crosses the IPC boundary instead of leaking a raw
+  `tokio::task::JoinError`.
+- `scan_directory`: `scanner::scan_directory` (walkdir + per-repo git) moved
+  inside `spawn_blocking`. The config lock is acquired only briefly — once before
+  (to read `scan_depth`) and once after (to cross-reference `has_loopdeck`).
+- `import_project`: the early "already registered" return stays under a brief
+  lock; the heavy bootstrapping — `quick_scan_directory` + `bootstrap_project` +
+  `git::check_git_info` + `read_current_loop` — runs in `spawn_blocking`,
+  returning `(ProjectMeta, GitInfo, Option<String>)`. Registry add + `save()`
+  happen under a brief lock after.
+- `list_projects`: snapshots project paths under a brief lock, refreshes git
+  info + current loop per project on the blocking pool keyed by path, then
+  applies + saves under a brief lock. Keying by path keeps the apply aligned
+  even if the registry changed between snapshot and apply. `derive_run_states`
+  now runs outside the config lock.
+- `rescan_project`: resolves the target (registered + path-exists) under a
+  brief lock, runs `git::check_git_info` in `spawn_blocking`, applies + saves
+  under a brief lock. Preserved the prior quirk of not refreshing
+  `last_commit_message` (out of scope to change).
+
+**Design decisions.** The multi-second walkdir/git work was the problem;
+`config.save()` (a brief atomic file write) is intentionally kept on the worker
+under the lock. Command signatures and return types are unchanged, so no
+frontend edits were needed (the frontend only switches on `kind === "conflict"`,
+unaffected by the new variant). See decisions.md ("Offload blocking I/O in Tauri
+commands to `spawn_blocking`").
+
+**Verification.** `cargo check --lib` clean (1 pre-existing dead-code warning);
+`cargo fmt --check` clean for the changed files (pre-existing `secrets.rs`
+diffs untouched); `cargo clippy --all-targets` introduces 0 new warnings (all
+warnings pre-existing); `cargo test --lib` 242 passed / 0 failed / 8 ignored.
+
+Files changed: src-tauri/src/{commands.rs, error.rs},
+.loopdeck/{loops.md, decisions.md}.
 
 ### 2026-07-10 — Auth token moved to OS keychain (P2 secret hygiene)
 

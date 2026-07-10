@@ -429,6 +429,17 @@ pub async fn list_skills(path: String) -> Result<Vec<SkillEntry>, AppError> {
     Ok(entries)
 }
 
+/// Map a `spawn_blocking` join failure (the task panicked or was cancelled) to
+/// an `AppError`.
+///
+/// The blocking tasks we offload (recursive `walkdir`, per-repo `git`
+/// subprocesses, file reads) don't panic on their own, but the join error
+/// surface must still be converted to `AppError` so it can cross the Tauri IPC
+/// boundary instead of leaking a raw `tokio::task::JoinError`.
+fn blocking_task_failed(e: tokio::task::JoinError) -> AppError {
+    AppError::BlockingTask(format!("background task failed: {e}"))
+}
+
 /// Scan a directory for project repositories.
 ///
 /// Recursively walks the directory tree looking for marker files
@@ -451,8 +462,15 @@ pub async fn scan_directory(
         config.settings.scan_depth
     };
 
-    // Heavy I/O — scanner does recursive directory walking
-    let mut repos = scanner::scan_directory(&scan_root, max_depth)?;
+    // The scanner does a recursive `walkdir` AND spawns a `git` subprocess per
+    // discovered repo (freshness) — seconds of blocking I/O that must NOT run on
+    // a tokio worker thread, where it would stall every other async command for
+    // the duration. `spawn_blocking` moves it onto the dedicated blocking pool
+    // and frees the worker while it runs.
+    let mut repos =
+        tokio::task::spawn_blocking(move || scanner::scan_directory(&scan_root, max_depth))
+            .await
+            .map_err(blocking_task_failed)??;
 
     // Cross-reference with global config: override `has_loopdeck` so it
     // reflects actual registration status, not just filesystem state.
@@ -487,7 +505,10 @@ pub async fn import_project(
         .canonicalize()
         .map_err(|e| AppError::Scan(format!("Failed to resolve path: {e}")))?;
 
-    // Check if already registered (use canonical path for lookup)
+    // Check if already registered (use canonical path for lookup). Done under a
+    // brief lock so we don't hold the config mutex across the heavy bootstrapping
+    // below — and so the early "already imported" return short-circuits before
+    // any filesystem work.
     {
         let config = state.config.lock().map_err(|_| AppError::LockError)?;
         if let Some(existing) = config.find_by_path(&canonical) {
@@ -495,15 +516,24 @@ pub async fn import_project(
         }
     }
 
-    // Quick-scan the directory for markers and README
-    let (name, markers, has_readme) = scanner::quick_scan_directory(&canonical);
-
-    // Bootstrap .loopdeck/project.yaml
-    let project_meta = project::bootstrap_project(&canonical, &name, &markers, has_readme)?;
-
-    // Gather git info
-    let git_info = git::check_git_info(&canonical);
-    let current_loop = project::read_current_loop(canonical.as_path());
+    // Quick-scan for markers/README, bootstrap `.loopdeck/project.yaml`, gather
+    // git info, and read the current loop. All blocking I/O — `quick_scan` +
+    // `bootstrap_project` touch the filesystem and `check_git_info` spawns git
+    // subprocesses — so it runs on the blocking pool, off the tokio worker.
+    // `canonical` is cloned into the task; the outer value is retained to build
+    // the registry entry after it completes.
+    let (project_meta, git_info, current_loop) = tokio::task::spawn_blocking({
+        let canonical = canonical.clone();
+        move || -> Result<(project::ProjectMeta, git::GitInfo, Option<String>), AppError> {
+            let (name, markers, has_readme) = scanner::quick_scan_directory(&canonical);
+            let project_meta = project::bootstrap_project(&canonical, &name, &markers, has_readme)?;
+            let git_info = git::check_git_info(&canonical);
+            let current_loop = project::read_current_loop(canonical.as_path());
+            Ok((project_meta, git_info, current_loop))
+        }
+    })
+    .await
+    .map_err(blocking_task_failed)??;
 
     // Build project entry and add to config
     let entry = ProjectEntry {
@@ -523,6 +553,13 @@ pub async fn import_project(
 
     {
         let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+        // Idempotent under a race: if a concurrent import registered this path
+        // between our early check above and now, return its entry instead of
+        // letting `add_project` error with `ProjectAlreadyExists`. Honors the
+        // documented "already registered → return existing entry" contract.
+        if let Some(existing) = config.find_by_path(&entry.path) {
+            return Ok(existing.clone());
+        }
         config.add_project(entry.clone())?;
         config.save()?;
     }
@@ -535,54 +572,91 @@ pub async fn import_project(
 #[tauri::command]
 pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntry>, AppError> {
     debug!("list_projects called");
-    let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
-    let mut changed = false;
 
-    // Refresh git info for each project whose path still exists
-    for entry in &mut config.projects {
-        // Skip projects whose path no longer exists
-        if !entry.path.exists() {
-            continue;
+    // Snapshot the project paths under a brief lock. We deliberately do NOT hold
+    // the config mutex across the per-project git probing below — that probing
+    // spawns subprocesses and walks each tree, which would block every other
+    // command (and the whole tokio worker) for as long as it takes across every
+    // registered project.
+    let paths: Vec<PathBuf> = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        config.projects.iter().map(|e| e.path.clone()).collect()
+    };
+
+    // Refresh git info + current loop per project on the blocking pool. Results
+    // are keyed by path so the apply pass stays aligned even if the registry
+    // changed between snapshot and apply — a project added/removed by a
+    // concurrent command simply won't match and is left untouched. Projects
+    // whose path no longer exists are skipped (mirrors the prior inline guard).
+    let refreshed: HashMap<PathBuf, (git::GitInfo, Option<String>)> =
+        tokio::task::spawn_blocking(move || {
+            let mut map = HashMap::with_capacity(paths.len());
+            for path in paths {
+                if !path.exists() {
+                    continue;
+                }
+                let git_info = git::check_git_info(&path);
+                let current_loop = project::read_current_loop(&path);
+                map.insert(path, (git_info, current_loop));
+            }
+            map
+        })
+        .await
+        .map_err(blocking_task_failed)?;
+
+    // Apply the fresh data under a brief lock, persisting only if something
+    // moved. The lock is held just for the mutation + save — not the git work.
+    let mut out = {
+        let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+        let mut changed = false;
+
+        for entry in &mut config.projects {
+            let Some((git_info, current_loop)) = refreshed.get(&entry.path) else {
+                continue;
+            };
+
+            if entry.last_commit_date != git_info.last_commit_date {
+                entry.last_commit_date = git_info.last_commit_date.clone();
+                changed = true;
+            }
+            if entry.last_modified != git_info.last_modified {
+                entry.last_modified = git_info.last_modified.clone();
+                changed = true;
+            }
+            if entry.last_commit_message != git_info.last_commit_message {
+                entry.last_commit_message = git_info.last_commit_message.clone();
+                changed = true;
+            }
+            let fresh_uncommitted: config::UncommittedStats = git_info.uncommitted.into();
+            if entry.uncommitted != fresh_uncommitted {
+                entry.uncommitted = fresh_uncommitted;
+                changed = true;
+            }
+
+            // Always re-read the current loop text. It isn't part of the
+            // change/save decision — this matches the prior inline behaviour,
+            // which set it unconditionally per project.
+            entry.current_loop = current_loop.clone();
+
+            // Recompute status from the (possibly refreshed) git dates so the
+            // Dashboard reflects current freshness without a manual rescan.
+            let before = entry.status;
+            config::update_project_status(entry);
+            if entry.status != before {
+                changed = true;
+            }
         }
 
-        let git_info = git::check_git_info(&entry.path);
-
-        if entry.last_commit_date != git_info.last_commit_date {
-            entry.last_commit_date = git_info.last_commit_date;
-            changed = true;
-        }
-        if entry.last_modified != git_info.last_modified {
-            entry.last_modified = git_info.last_modified;
-            changed = true;
-        }
-        if entry.last_commit_message != git_info.last_commit_message {
-            entry.last_commit_message = git_info.last_commit_message;
-            changed = true;
-        }
-        let fresh_uncommitted: config::UncommittedStats = git_info.uncommitted.into();
-        if entry.uncommitted != fresh_uncommitted {
-            entry.uncommitted = fresh_uncommitted;
-            changed = true;
+        if changed {
+            config.save()?;
         }
 
-        entry.current_loop = project::read_current_loop(entry.path.as_path());
-
-        // Recompute status from the (possibly refreshed) git dates so the
-        // Dashboard reflects current freshness without a manual rescan.
-        let before = entry.status;
-        config::update_project_status(entry);
-        if entry.status != before {
-            changed = true;
-        }
-    }
-
-    if changed {
-        config.save()?;
-    }
+        config.projects.clone()
+    };
 
     // Derive ephemeral run_state per project from live session + pending slots.
-    // Done after the save so transient state never reaches disk.
-    let mut out = config.projects.clone();
+    // Done after the save (and outside the config lock — it only touches the
+    // session/pending-slot maps) so transient state never reaches disk.
     derive_run_states(&state, &mut out);
 
     Ok(out)
@@ -620,10 +694,7 @@ pub async fn set_agent_config(
 ) -> Result<AgentConfig, AppError> {
     // Store a newly-typed token in the keychain; otherwise keep whatever is
     // already there.
-    let has_token = if let Some(token) = agent_config
-        .auth_token
-        .as_ref()
-        .filter(|t| !t.is_empty())
+    let has_token = if let Some(token) = agent_config.auth_token.as_ref().filter(|t| !t.is_empty())
     {
         secrets::store_auth_token(token)?;
         true
@@ -898,30 +969,47 @@ pub async fn rescan_project(
     debug!("rescan_project called for path: {path}");
 
     let repo_path = PathBuf::from(&path);
-    let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
 
-    let entry = config
-        .find_by_path_mut(&repo_path)
-        .ok_or(AppError::ProjectNotFound(path.clone()))?;
+    // Resolve the target under a brief lock: confirm it's registered and its
+    // path still exists. We capture the on-disk path to probe and release the
+    // lock before the git subprocess runs — same rationale as `list_projects`.
+    let target = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        let entry = config
+            .find_by_path(&repo_path)
+            .ok_or(AppError::ProjectNotFound(path.clone()))?;
+        if !entry.path.exists() {
+            return Err(AppError::ProjectNotFound(format!(
+                "Project path no longer exists: {}",
+                entry.path.display()
+            )));
+        }
+        entry.path.clone()
+    };
 
-    // Check if the path still exists
-    if !entry.path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Project path no longer exists: {}",
-            entry.path.display()
-        )));
-    }
+    // Refresh git info on the blocking pool — spawns git subprocesses and walks
+    // the tree for last-modified, so it must not run on the tokio worker.
+    let git_info = tokio::task::spawn_blocking(move || git::check_git_info(&target))
+        .await
+        .map_err(blocking_task_failed)?;
 
-    // Refresh git info
-    let git_info = git::check_git_info(&entry.path);
-    entry.last_commit_date = git_info.last_commit_date.clone();
-    entry.last_modified = git_info.last_modified.clone();
-    entry.uncommitted = git_info.uncommitted.into();
+    // Apply + persist under a brief lock. Note: `last_commit_message` is
+    // intentionally not refreshed here — preserved from the prior behaviour.
+    let mut result = {
+        let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+        let entry = config
+            .find_by_path_mut(&repo_path)
+            .ok_or(AppError::ProjectNotFound(path.clone()))?;
+        entry.last_commit_date = git_info.last_commit_date.clone();
+        entry.last_modified = git_info.last_modified.clone();
+        entry.uncommitted = git_info.uncommitted.into();
 
-    config::update_project_status(entry);
+        config::update_project_status(entry);
 
-    let mut result = entry.clone();
-    config.save()?;
+        let result = entry.clone();
+        config.save()?;
+        result
+    };
 
     // Stamp the ephemeral run_state before returning so callers see the truth.
     let mut single = vec![result];
@@ -1046,9 +1134,7 @@ pub async fn promote_epic_loop(
     loop_title: String,
     _state: State<'_, AppState>,
 ) -> Result<(), AppError> {
-    debug!(
-        "promote_epic_loop called for path: {path}, epic: {epic_slug}, prd: {prd_filename}"
-    );
+    debug!("promote_epic_loop called for path: {path}, epic: {epic_slug}, prd: {prd_filename}");
 
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
@@ -1608,10 +1694,7 @@ pub async fn agent_answer_permission(
 /// Idempotent: re-adding an existing rule is a no-op (the dedup preserves the
 /// original write order). Creates `.claude/` and the file if absent.
 #[tauri::command]
-pub async fn agent_add_allow_rule(
-    path: String,
-    rule: String,
-) -> Result<(), AppError> {
+pub async fn agent_add_allow_rule(path: String, rule: String) -> Result<(), AppError> {
     debug!("agent_add_allow_rule called for path: {path}, rule: {rule}");
     let repo_path = PathBuf::from(&path);
     let claude_dir = repo_path.join(".claude");
@@ -1645,14 +1728,12 @@ pub async fn agent_add_allow_rule(
     root["permissions"]["allow"] = serde_json::Value::Array(existing);
 
     // Write back, pretty-printed for readability / low-diff manual edits.
-    std::fs::create_dir_all(&claude_dir).map_err(|e| {
-        AppError::Config(format!("failed to create .claude dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| AppError::Config(format!("failed to create .claude dir: {e}")))?;
     let formatted = serde_json::to_string_pretty(&root)
         .map_err(|e| AppError::Config(format!("JSON serialization error: {e}")))?;
-    std::fs::write(&settings_path, formatted).map_err(|e| {
-        AppError::Config(format!("failed to write settings.local.json: {e}"))
-    })?;
+    std::fs::write(&settings_path, formatted)
+        .map_err(|e| AppError::Config(format!("failed to write settings.local.json: {e}")))?;
 
     if already_present {
         info!("agent_add_allow_rule rule already present in {settings_path:?} — no-op");
@@ -2482,7 +2563,10 @@ mod tests {
              # Orchestrator";
         let (name, description, argument_hint) = parse_skill_frontmatter(content);
         assert_eq!(name, "loopdeck:orchestrator");
-        assert_eq!(description, "Orchestrate feature implementation from a PRD.");
+        assert_eq!(
+            description,
+            "Orchestrate feature implementation from a PRD."
+        );
         assert_eq!(argument_hint, "<prd-file-path>");
     }
 
@@ -2533,9 +2617,7 @@ mod tests {
         let skills_dir = dir.join(".claude").join("skills");
         std::fs::create_dir_all(skills_dir.join("loopdeck-rust-expert")).unwrap();
         std::fs::write(
-            skills_dir
-                .join("loopdeck-rust-expert")
-                .join("SKILL.md"),
+            skills_dir.join("loopdeck-rust-expert").join("SKILL.md"),
             "---\nname: loopdeck:rust-expert\ndescription: Rust expert skill.\n---\nbody",
         )
         .unwrap();
@@ -2549,7 +2631,9 @@ mod tests {
         )
         .unwrap();
 
-        let result = list_skills(dir.to_string_lossy().to_string()).await.unwrap();
+        let result = list_skills(dir.to_string_lossy().to_string())
+            .await
+            .unwrap();
 
         // Sorted by name → orchestrator before rust-expert.
         assert_eq!(result.len(), 2);
@@ -2573,7 +2657,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let result = list_skills(dir.to_string_lossy().to_string()).await.unwrap();
+        let result = list_skills(dir.to_string_lossy().to_string())
+            .await
+            .unwrap();
         assert!(result.is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -2601,7 +2687,9 @@ mod tests {
         // A loose file directly under skills/ — ignored (only dirs are skills).
         std::fs::write(skills_dir.join("loose-file.md"), "whatever").unwrap();
 
-        let result = list_skills(dir.to_string_lossy().to_string()).await.unwrap();
+        let result = list_skills(dir.to_string_lossy().to_string())
+            .await
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "valid");
 
