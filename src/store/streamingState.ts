@@ -151,7 +151,15 @@ export const useStreamingState = create<StreamingStateMap>((set, get) => ({
       if (task.status === "deleted") {
         delete next[task.id];
       } else {
-        next[task.id] = task;
+        // A `TaskUpdate` status change arrives with an EMPTY subject (only the
+        // status changed), so merge onto the prior record — otherwise the panel
+        // would blank the task title the moment its status flips to in_progress.
+        const prev = next[task.id];
+        next[task.id] = {
+          id: task.id,
+          subject: task.subject || prev?.subject || "",
+          status: task.status,
+        };
       }
       return {
         byPath: { ...s.byPath, [path]: { ...cur, tasks: next } },

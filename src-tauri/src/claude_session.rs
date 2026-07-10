@@ -1102,6 +1102,25 @@ impl ClaudeSession {
                                 if name == "AskUserQuestion" {
                                     continue;
                                 }
+
+                                // `TaskUpdate` carries its state change in the
+                                // call input, not the result. Emit a live
+                                // `task_update` from here (the dedicated
+                                // TaskPanel is the surface for it) and skip the
+                                // generic activity row — a `› TaskUpdate ·
+                                // {json}` line would be pure noise above the
+                                // panel, same reasoning as AskUserQuestion.
+                                // (Persisted copies land in the accumulator's
+                                // `tasks` via the same helper.)
+                                if name == "TaskUpdate" {
+                                    if let Some(task) =
+                                        crate::agents::extract_task_from_tool_use(name, input)
+                                    {
+                                        let _ = channel.send(ClaudeEvent::TaskUpdate { task });
+                                    }
+                                    continue;
+                                }
+
                                 let _ = channel.send(ClaudeEvent::ToolUse {
                                     name: name.clone(),
                                     input: input.to_string(),

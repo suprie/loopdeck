@@ -447,7 +447,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     // IPC, but defensive coding is cheap).
     let resultHandled = false;
 
-    channel.onmessage = (event: ClaudeEvent) => {
+    channel.onmessage = (event: ClaudeEvent ) => {
       // NOTE: we deliberately do NOT bail on `!mountedRef.current` here.
       // Streaming state lives in the navigation-stable store, so we keep
       // accumulating blocks / busy / result even when no panel is mounted —
@@ -497,6 +497,11 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // pinned AskUserQuestionCard) is the user-facing surface for this
           // interaction, so the raw tool-call row is dropped everywhere.
           if (event.name === "AskUserQuestion") break;
+          // Task lifecycle tools are surfaced via the dedicated `task_update`
+          // channel event (→ TaskPanel), not as transcript activity rows. The
+          // backend suppresses `TaskUpdate` tool_use blocks at the source too;
+          // this guard is belt-and-suspenders against drift between the two.
+          if (event.name === "TaskCreate" || event.name === "TaskUpdate") break;
           setStreamingBlocks((prev) => [
             ...(prev ?? []),
             { type: "tool_use", name: event.name, input: event.input },

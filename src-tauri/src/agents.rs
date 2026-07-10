@@ -565,6 +565,53 @@ pub(crate) fn extract_task_from_tool_result(
     })
 }
 
+/// Extract a `TaskRecord` from an assistant `tool_use` block, if it is a
+/// `TaskUpdate` call.
+///
+/// This is the *second* task signal — the first is `extract_task_from_tool_result`
+/// above, which fires on a `TaskCreate` **result** (`tool_use_result.task`). But
+/// Claude's `TaskUpdate` tool carries its state change in the **call input**
+/// (`{taskId, status}`), not in the result payload: when the agent marks a task
+/// in_progress / completed / deleted, the result echoes nothing we can parse as a
+/// task, so without this helper every update was dropped (the TaskPanel froze at
+/// "created" forever).
+///
+/// Reads `taskId` + `status` + optional `subject` straight off the structured
+/// input. `subject` is usually absent on an update (only the status changes), so
+/// the frontend merges it onto the prior record rather than blanking it — see
+/// `streamingState.applyTask`. Returns `None` for any other tool name
+/// (including `TaskCreate`, whose input has no id).
+pub(crate) fn extract_task_from_tool_use(
+    name: &str,
+    input: &serde_json::Value,
+) -> Option<crate::conversation::TaskRecord> {
+    if name != "TaskUpdate" {
+        return None;
+    }
+    let id = input.get("taskId").and_then(|v| v.as_str())?.to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let subject = input
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // `status` is required-by-convention on TaskUpdate but the schema only
+    // mandates `taskId`; fall back to "updated" so the panel always has a label
+    // even for a malformed/best-effort call.
+    let status = input
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("updated")
+        .to_string();
+    Some(crate::conversation::TaskRecord {
+        id,
+        subject,
+        status,
+    })
+}
+
 /// Default for `ContentBlock::ToolUse::input` when the block omits it.
 /// An empty object (not `null`) so downstream `input["field"]` lookups are safe.
 fn default_tool_input() -> serde_json::Value {
@@ -674,9 +721,16 @@ impl ResponseAccumulator {
                                 input: input_str.clone(),
                             });
                             self.blocks.push(ContentBlockRecord::ToolUse {
-                                name,
+                                name: name.clone(),
                                 input: input_str,
                             });
+                            // TaskUpdate carries its state change in the *call*
+                            // input, so capture it here (mirrors the live
+                            // emission in send_message_streaming). TaskCreate's
+                            // id+subject arrive via the tool *result* path below.
+                            if let Some(task) = extract_task_from_tool_use(&name, &input) {
+                                self.tasks.push(task);
+                            }
                         }
                     }
                 }
@@ -1218,6 +1272,79 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_task_from_tool_use_status_transitions() {
+        // `TaskUpdate` carries its state change in the call input, not the
+        // result. The helper must parse `taskId` + `status` (+ optional subject)
+        // off the structured input. This is the path that was previously dropped
+        // entirely — the regression this test guards.
+        let inp = serde_json::json!({"taskId": "1", "status": "in_progress"});
+        let task = extract_task_from_tool_use("TaskUpdate", &inp)
+            .expect("TaskUpdate input must extract a task");
+        assert_eq!(task.id, "1");
+        assert_eq!(task.status, "in_progress");
+        // subject is absent on a status-only update — empty here, merged in the UI
+        assert_eq!(task.subject, "");
+
+        // Completed transition.
+        let inp = serde_json::json!({"taskId": "2", "status": "completed"});
+        let task = extract_task_from_tool_use("TaskUpdate", &inp).unwrap();
+        assert_eq!(task.status, "completed");
+
+        // A subject-bearing update (rename) passes through.
+        let inp =
+            serde_json::json!({"taskId": "3", "status": "in_progress", "subject": "New title"});
+        let task = extract_task_from_tool_use("TaskUpdate", &inp).unwrap();
+        assert_eq!(task.subject, "New title");
+
+        // Non-TaskUpdate tools (incl. TaskCreate, whose input has no id) → None.
+        assert!(extract_task_from_tool_use("TaskCreate", &serde_json::json!({})).is_none());
+        assert!(
+            extract_task_from_tool_use("Read", &serde_json::json!({"file_path": "/a"})).is_none()
+        );
+        // Missing taskId → None.
+        assert!(extract_task_from_tool_use(
+            "TaskUpdate",
+            &serde_json::json!({"status": "completed"})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_accumulator_collects_task_update_from_tool_use_input() {
+        // The realistic wire shape: a `TaskCreate` lands via a tool RESULT
+        // (carrying id+subject), then a `TaskUpdate` lands via a tool_use INPUT
+        // (carrying the new status). Before the fix, the update was silently
+        // dropped because its result carried no task payload — so both must now
+        // land on `AgentResponse.tasks` in arrival order.
+        let mut acc = ResponseAccumulator::new();
+        // Create: tool_use_result.task (id + subject), status mined as "created".
+        let create = parse_stream_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Task #1 created: A"}]},"tool_use_result":{"task":{"id":"1","subject":"A"}}}"#,
+        ).unwrap();
+        // Update: an assistant tool_use block named TaskUpdate with the new status.
+        let update = parse_stream_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]},"session_id":"s"}"#,
+        ).unwrap();
+        acc.ingest_event(create);
+        acc.ingest_event(update);
+        acc.ingest_event(StreamEvent::Result {
+            result: "done".into(),
+            is_error: false,
+            duration_ms: 1,
+            total_cost_usd: None,
+            usage: None,
+        });
+        let resp = acc.finish().expect("finish must produce a response");
+        assert_eq!(resp.tasks.len(), 2);
+        assert_eq!(resp.tasks[0].id, "1");
+        assert_eq!(resp.tasks[0].status, "created");
+        // The update landed — status from the call input, subject empty (merged in UI).
+        assert_eq!(resp.tasks[1].id, "1");
+        assert_eq!(resp.tasks[1].status, "completed");
+        assert_eq!(resp.tasks[1].subject, "");
+    }
+
+    #[test]
     fn test_parse_response_blocks_preserve_arrival_order() {
         // The headline reason `blocks` exists: a turn that interleaves
         // thinking → text → tool_use → thinking → text must keep that exact
@@ -1329,7 +1456,12 @@ mod tests {
         let envs: Vec<(String, String)> = cmd
             .get_envs()
             .filter_map(|(k, v)| {
-                v.map(|val| (k.to_string_lossy().into_owned(), val.to_string_lossy().into_owned()))
+                v.map(|val| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        val.to_string_lossy().into_owned(),
+                    )
+                })
             })
             .collect();
 
@@ -1340,7 +1472,11 @@ mod tests {
         );
 
         // The other three were NOT added (they're still None in the config).
-        for var in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_EFFORT_LEVEL"] {
+        for var in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_EFFORT_LEVEL",
+        ] {
             let was_present_before = before.contains(&var.to_string());
             let is_present_after = envs.iter().any(|(k, _)| k == var);
             assert_eq!(
