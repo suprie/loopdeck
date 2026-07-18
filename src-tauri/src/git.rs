@@ -3,6 +3,22 @@ use std::path::Path;
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
+/// Build a `git` command pinned to the vetted, resolved binary and aimed at
+/// `repo_path` via `-C`. Returns `None` when the `git` binary can't be resolved
+/// (see `binary::git`) — callers treat that as "no git info", matching the
+/// prior behavior of a failed spawn.
+///
+/// Resolving here (instead of `Command::new("git")`) defeats the cwd-hijack
+/// vector: a bare name would let a `.`/empty `$PATH` entry resolve against
+/// `repo_path` (a scanned, untrusted directory), running a planted `git`
+/// script. The resolved path is also pinned for the process lifetime.
+fn git_command(repo_path: &Path) -> Option<Command> {
+    let git = crate::binary::git().ok()?;
+    let mut cmd = Command::new(git);
+    cmd.args(["-C"]).arg(repo_path);
+    Some(cmd)
+}
+
 /// Git and filesystem freshness info for a project directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitInfo {
@@ -60,12 +76,8 @@ pub fn check_git_info(path: &Path) -> GitInfo {
 }
 /// Get the commit message from last git commit.
 fn last_commit_message(repo_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["log", "-1", "--format=%s"])
-        .output()
-        .ok()?;
+    let mut cmd = git_command(repo_path)?;
+    let output = cmd.args(["log", "-1", "--format=%s"]).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -83,12 +95,8 @@ fn last_commit_message(repo_path: &Path) -> Option<String> {
 
 /// Get the ISO 8601 date of the last git commit.
 fn last_commit_date(repo_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["log", "-1", "--format=%cI"])
-        .output()
-        .ok()?;
+    let mut cmd = git_command(repo_path)?;
+    let output = cmd.args(["log", "-1", "--format=%cI"]).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -106,11 +114,10 @@ fn last_commit_date(repo_path: &Path) -> Option<String> {
 
 /// Check if the working tree has uncommitted changes.
 fn has_uncommitted_changes(repo_path: &Path) -> bool {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["status", "--porcelain"])
-        .output();
+    let Some(mut cmd) = git_command(repo_path) else {
+        return false;
+    };
+    let output = cmd.args(["status", "--porcelain"]).output();
 
     match output {
         Ok(out) => !out.stdout.is_empty(),
@@ -136,11 +143,10 @@ fn uncommitted_stats(repo_path: &Path) -> UncommittedStats {
 
 /// Count entries in `git status --porcelain` (one per changed file).
 fn count_changed_files(repo_path: &Path) -> u32 {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["status", "--porcelain"])
-        .output();
+    let Some(mut cmd) = git_command(repo_path) else {
+        return 0;
+    };
+    let output = cmd.args(["status", "--porcelain"]).output();
     match output {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -154,11 +160,10 @@ fn count_changed_files(repo_path: &Path) -> u32 {
 /// Output looks like ` 5 files changed, 120 insertions(+), 30 deletions(-)\n`
 /// (any segment may be absent when its count is zero).
 fn diff_shortstat(repo_path: &Path) -> (u32, u32) {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["diff", "--shortstat"])
-        .output();
+    let Some(mut cmd) = git_command(repo_path) else {
+        return (0, 0);
+    };
+    let output = cmd.args(["diff", "--shortstat"]).output();
     let Ok(out) = output else {
         return (0, 0);
     };

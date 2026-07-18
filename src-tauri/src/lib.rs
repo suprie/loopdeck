@@ -1,4 +1,5 @@
 mod agents;
+mod binary;
 mod claude_session;
 mod commands;
 mod config;
@@ -52,7 +53,7 @@ pub fn run() {
         tracing::warn!("failed to persist config after auth-token migration: {e}");
     }
 
-    tauri::Builder::default()
+    if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
@@ -106,5 +107,15 @@ pub fn run() {
             commands::agent_pending_question,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    {
+        // `run()` only errors on an unrecoverable startup failure (WebView
+        // init, context generation, plugin init) — there is no recovery path,
+        // so terminating is correct either way. But under `panic = "abort"` the
+        // `.expect()` that lived here aborted the process with a raw panic
+        // message; logging via tracing (initialized above) and exiting cleanly
+        // removes that panic source and lands a structured log line a user can
+        // actually find when the app won't start.
+        tracing::error!("error while running tauri application: {e}");
+        std::process::exit(1);
+    }
 }

@@ -170,7 +170,10 @@ pub type InterruptSlot = Arc<StdMutex<Option<oneshot::Sender<()>>>>;
 /// Conversation context lives inside the process itself, so follow-up turns
 /// are just another line written to stdin — no `--resume`, no respawn.
 pub struct ClaudeSession {
-    child: Child,
+    // `Option` so `Drop` can `take()` the child and hand ownership to a
+    // fire-and-forget `spawn_blocking` reap task — it must not touch `self`
+    // (which is being torn down) or block the dropping thread.
+    child: Option<Child>,
     // `Option` so `Drop` can close stdin explicitly before reaping the child;
     // also doubles as a "still usable" flag.
     stdin: Option<ChildStdin>,
@@ -199,7 +202,14 @@ impl ClaudeSession {
         resume_session_id: Option<&str>,
         policy: PermissionPolicy,
     ) -> Result<Self, AppError> {
-        let mut cmd = Command::new("claude");
+        // Resolve `claude` to an absolute, vetted path ourselves rather than
+        // handing a bare name to the OS PATH search — defeats the cwd-hijack
+        // vector (a `.`/empty PATH entry resolving against `project_path`, which
+        // is a user-selected, untrusted directory) and pins the binary for the
+        // process lifetime. See `binary`.
+        let claude_path = crate::binary::claude()
+            .map_err(|e| AppError::Agent(format!("failed to resolve claude binary: {e}")))?;
+        let mut cmd = Command::new(claude_path);
         cmd.args([
             "--input-format",
             "stream-json",
@@ -222,6 +232,7 @@ impl ClaudeSession {
         // edits and left every Bash call stalling — see
         // docs/PRD-agent-permission-stall.md for the evidence.)
         cmd.args(["--permission-mode", "acceptEdits"]);
+
         if let Some(model) = agent_config.model.clone() {
             cmd.args(["--model", &model]);
         }
@@ -245,10 +256,13 @@ impl ClaudeSession {
         // Log the resolved spawn config at INFO so a gateway error (e.g. 529
         // overloaded, 401 bad token, wrong base URL) is diagnosable without
         // guessing what model/endpoint the CLI actually used. The
-        // AgentConfig Debug impl redacts the auth token.
+        // AgentConfig Debug impl redacts the auth token. The binary path is the
+        // vetted, absolute resolution from `binary::claude` — logging it makes a
+        // hostile `$PATH` (a different claude than the user expects) visible.
         tracing::info!(
-            "spawning claude in {} | model={} | base_url={} | auth_token={} | effort={} | resume={}",
+            "spawning claude in {} | binary={} | model={} | base_url={} | auth_token={} | effort={} | resume={}",
             project_path.display(),
+            claude_path.display(),
             agent_config.model.as_deref().unwrap_or("<cli default>"),
             agent_config.base_url.as_deref().unwrap_or("<cli default>"),
             if agent_config.auth_token.is_some() { "set" } else { "<none>" },
@@ -299,7 +313,7 @@ impl ClaudeSession {
         });
 
         Ok(Self {
-            child,
+            child: Some(child),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
@@ -1189,30 +1203,70 @@ impl Drop for ClaudeSession {
     fn drop(&mut self) {
         // Close stdin FIRST so claude sees EOF and exits on its own. We are
         // inside drop(), so struct fields have NOT dropped yet — without this
-        // explicit close, the reap loop below would wait on a process that's
-        // itself blocked reading more stdin.
+        // explicit close, the reap below would wait on a process that's itself
+        // blocked reading more stdin.
         self.stdin.take();
 
-        // Phase 1 — graceful: give claude a bounded window to exit on EOF.
-        let reaped = poll_reap(&mut self.child, Duration::from_secs(5));
+        // Move the child + stderr-drain handle out so the reap task can own
+        // them without touching `self` (being torn down). Both are `Option`
+        // precisely so Drop can take them here.
+        let child = self.child.take();
+        let stderr_drain = self.stderr_drain.take();
 
-        // Phase 2 — forceful: if still alive, SIGKILL and reap again. Must use
-        // `start_kill()` (synchronous — sends the signal now) rather than
-        // `kill()`, whose returned future can't be awaited from Drop. Using
-        // `let _ = kill()` here would silently leak the child instead of
-        // killing it (the bug this restructure fixes).
-        if !reaped {
-            tracing::debug!("claude session didn't exit on EOF; force-killing");
-            let _ = self.child.start_kill();
-            poll_reap(&mut self.child, Duration::from_secs(2));
-        }
+        let Some(child) = child else {
+            return; // already taken — nothing to reap
+        };
 
-        // Abort the stderr drain task. It usually ends on its own once the
-        // child above is reaped/killed (stderr EOFs), but abort defensively
-        // in case it's stuck on a read.
-        if let Some(handle) = self.stderr_drain.take() {
-            handle.abort();
+        // Reap the child OFF the tokio worker thread. `poll_reap` sleeps up to
+        // 7s (5s graceful EOF window + 2s after SIGKILL) using `thread::sleep`;
+        // running that on an async worker stalls every other task sharing it
+        // (and `ClaudeSession` is dropped from inside async Tauri commands). We
+        // fire-and-forget a `spawn_blocking` task that owns the child + drain,
+        // reaps the child, then aborts the drain. `tokio::spawn` + `child
+        // .wait().await` would also avoid blocking, but `spawn_blocking` lets
+        // us keep the bounded graceful-then-forceful reap (claude gets a chance
+        // to flush its `--resume` session state before SIGKILL).
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // Detach: `spawn_blocking` has already queued the closure on the
+                // blocking pool, so dropping the JoinHandle does NOT cancel it —
+                // it runs to completion and reaps the child. (Distinct from
+                // `Child::kill()`, whose future must be *awaited* to send the
+                // signal — dropping that one unawaited was the checkpoint-4 bug.)
+                drop(handle.spawn_blocking(move || reap_child(child, stderr_drain)));
+            }
+            Err(_) => {
+                // No runtime context (e.g. process teardown, or dropped from a
+                // non-runtime thread). Block here — there's no async worker to
+                // stall — so we still reap instead of leaking a zombie.
+                reap_child(child, stderr_drain);
+            }
         }
+    }
+}
+
+/// Graceful-then-forceful reap of a claude child, then abort the stderr drain.
+///
+/// Phase 1 gives the child a bounded window to exit on EOF (stdin was closed
+/// before this is called). Phase 2 SIGKILLs and reaps again. The stderr-drain
+/// task is kept alive *throughout* the reap so a verbose child can't fill its
+/// stderr pipe buffer and block on exit; it's aborted only after the child is
+/// gone (its stderr then EOFs and the drain would end on its own anyway — the
+/// abort is a defensive backstop for a stuck read). `start_kill()` is
+/// synchronous — the correct tokio API from a sync context; its `kill()`
+/// counterpart returns a future that can't be awaited here, and `let _ =
+/// kill()` would silently leak the child instead of killing it.
+fn reap_child(mut child: Child, stderr_drain: Option<JoinHandle<()>>) {
+    let reaped = poll_reap(&mut child, Duration::from_secs(5));
+
+    if !reaped {
+        tracing::debug!("claude session didn't exit on EOF; force-killing");
+        let _ = child.start_kill();
+        poll_reap(&mut child, Duration::from_secs(2));
+    }
+
+    if let Some(handle) = stderr_drain {
+        handle.abort();
     }
 }
 

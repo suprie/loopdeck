@@ -357,9 +357,19 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
 ///
 /// An empty matcher string `""` denotes the default (no-matcher) group.
 fn find_or_create_matcher_group(event_array: &mut serde_json::Value, matcher: &str) -> usize {
+    // A pre-existing user `.claude/settings.json` may hold a hook event keyed to
+    // a non-array value (a string, number, object — hand-edited or written by a
+    // different tool). Coerce it to an empty array rather than panicking: under
+    // `panic = "abort"` a panic here aborts the whole process on import, and
+    // `setup_hooks` is on the import path. This mirrors the lenient parse
+    // fallback above (line ~213: malformed JSON → `{}`): treat malformed user
+    // config as "no existing hooks" and proceed.
+    if !event_array.is_array() {
+        *event_array = serde_json::Value::Array(Vec::new());
+    }
     let arr = event_array
         .as_array_mut()
-        .expect("hook event must be an array");
+        .expect("coerced to an array immediately above");
 
     // Look for an existing group with the same matcher
     for (i, entry) in arr.iter().enumerate() {
@@ -663,6 +673,48 @@ mod tests {
 
         // Hooks should also be present
         assert!(root["hooks"]["Stop"].as_array().unwrap().len() > 0);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_setup_hooks_survives_malformed_hook_events() {
+        // Regression: a pre-existing `.claude/settings.json` whose hook events
+        // are non-arrays (hand-edited, or written by a different tool) must not
+        // abort the process. Under `panic = "abort"` the old `.expect()` in
+        // `find_or_create_matcher_group` crashed the whole app on import — and
+        // `setup_hooks` is on the import path.
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({
+                "hooks": {
+                    "Stop": "not-an-array",
+                    "PreToolUse": 42
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        setup_hooks(&dir).expect("setup_hooks must tolerate malformed hook events");
+
+        let raw = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // Both malformed values were coerced to arrays and populated.
+        let stop_groups = root["hooks"]["Stop"]
+            .as_array()
+            .expect("malformed Stop coerced to an array");
+        assert!(stop_groups[0]["hooks"].as_array().unwrap().iter().any(|h| {
+            h["command"].as_str() == Some("python3 .loopdeck/hooks/loopdeck-stop-hook.py")
+        }));
+
+        let ptuse_groups = root["hooks"]["PreToolUse"]
+            .as_array()
+            .expect("malformed PreToolUse coerced to an array");
+        assert_eq!(ptuse_groups[0]["matcher"].as_str(), Some("Skill"));
 
         fs::remove_dir_all(&dir).unwrap();
     }

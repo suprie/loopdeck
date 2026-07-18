@@ -3,23 +3,61 @@
 ## Current
 
 - **Started**: 2026-07-05
-- **Goal**: Make LoopDeck production-ready. Phase 1 (security stop-the-bleeding)
-  is done; Phase 2 (hardening) is underway — the agent auth token now lives in
-  the OS keychain, not plaintext config.yaml. Phases 3-6 remain — quality gates,
-  docs/policy, and UX polish. Audit was a three-pronged review (Rust backend,
-  React frontend, ops/tooling) that produced the action items below.
+- **Goal**: Ship a hardened private alpha on one explicitly supported OS. The
+  release gate is intentionally narrow: honest agent permissions, crash-safe
+  critical state, bounded project/agent input, deterministic interruption
+  recovery, basic CI, and a documented install/upgrade path. Public V0.1 adds
+  signed artifacts and a small cross-boundary regression suite. Broader product
+  maturity work remains tracked but does not block the alpha.
 - **Status**: in_progress
-- **Last completed**: 2026-07-10 — blocking I/O in `scan_directory`, `import_project`, `list_projects`, `rescan_project` offloaded to `tokio::task::spawn_blocking` so the async worker thread (and the `Mutex<GlobalConfig>` lock) is no longer held across walkdir + git subprocess work.
+- **Last completed**: 2026-07-12 — Converted the hardening review into
+  `docs/PRD-trust-boundary-hardening.md` and recalibrated production readiness:
+  the private-alpha gate is separated from public-release and post-release
+  maturity work so LoopDeck can harden the real trust boundaries without
+  building mature-product infrastructure prematurely.
 
 ## Next Steps
+
+### Release Gate A — Hardened private alpha
+
+Source: [`docs/PRD-trust-boundary-hardening.md`](../docs/PRD-trust-boundary-hardening.md)
+
+- [ ] **Honest permission default:** ship `ConfirmChanges` first; remove generated `Edit(*)`, `Write(*)`, and broad build-runner rules; align Claude spawn settings, LoopDeck policy, approval UI, and regression tests
+- [x] **Defer autonomous mode:** do not add per-project `AutonomousProject` configuration until the confirm-first path is proven usable; this is not an alpha blocker
+- [ ] **Crash-safe critical state:** add one shared atomic-write helper and use it for the registry, `project.yaml`, `loops.md`, PRDs, and generated Claude settings
+- [ ] **Recoverable registry:** keep one last-known-good backup and never overwrite a malformed primary registry with a fresh default
+- [ ] **Central project boundary:** resolve every project-scoped IPC request through shared registered-root and contained-relative-path helpers; reject traversal and symlink escape
+- [ ] **Bound untrusted work:** cap recursive scan depth/entries/time, file and NDJSON line sizes, `ResponseAccumulator` bytes/blocks, and parked approval/question duration
+- [ ] **Minimal interruption recovery:** after restart or child failure, classify incomplete work as `interrupted`, clear stale busy/waiting state, and allow a new turn; persist a separate run record only if transcript-based recovery proves insufficient
+- [ ] **Basic CI:** require `cargo fmt --check`, Clippy, `cargo test`, `npm ci`, and `npm run build`; start with the alpha's supported OS rather than a three-OS matrix
+- [ ] **Clear current lint debt:** resolve existing Clippy failures before enabling `-D warnings`
+- [ ] **Alpha distribution contract:** name the one supported OS and document installation, upgrade/reinstall, rollback, prerequisites, and diagnostic-log location
+- [ ] **Alpha smoke test:** manually verify import → start turn → approve/deny → interrupt → restart/recover on a packaged build
+
+### Release Gate B — Public V0.1
+
+- [ ] Sign/notarize artifacts for every OS claimed as supported; do not publish unsigned builds as production releases
+- [ ] Define the release artifact pipeline and smoke-test installation plus upgrade/reinstall behavior
+- [ ] Add focused frontend tests for streaming, approval, and interruption state transitions
+- [ ] Add one automated cross-boundary smoke test covering import → agent approval → interrupt/recovery
+- [ ] Add `LICENSE` and `SECURITY.md` with the agent/subprocess threat model and vulnerability-reporting path
+- [ ] Provide user-accessible diagnostics and bounded log retention
+- [ ] Persist only navigation identifiers/preferences in Zustand; reload project and run state from Rust
+
+### Supporting backlog — not an alpha release gate
+
+The detailed P2/P3/P5/P6 items below remain useful implementation notes. They
+only block the private alpha when they directly satisfy a Gate A item above.
+Do not expand the release definition by treating every unchecked item as a
+prerequisite.
 
 ### P2 — Hardening (correctness, robustness, secret hygiene)
 - [x] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
 - [x] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they previously ran sync walkdir + git subprocess spawning inside `async` Tauri commands; now offloaded to the blocking pool
-- [ ] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — move to `spawn_blocking` or kill+detach with tokio `wait`
-- [ ] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs:202`, `git.rs:68,91,114,144,162`) to defeat PATH hijack
-- [ ] Add a top-level React error boundary above `<App>` in `main.tsx` — pre-router crashes currently blank-screen with no recovery
-- [ ] Audit `expect()`/`unwrap()` under `panic = "abort"`; in particular `skills.rs:362` (a malformed user `settings.json` aborts the process on import) and `lib.rs:77`
+- [x] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — now reaped on the tokio blocking pool via a detached `spawn_blocking` task (preserving the graceful-EOF-then-SIGKILL sequence); `child` became `Option<Child>` so `Drop` can hand ownership to the reap task, with a synchronous no-runtime fallback so no zombie leaks
+- [x] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs`, `git.rs`) to defeat PATH hijack — new `binary` module skips non-absolute `$PATH` entries (closes the cwd-hijack vector), vets the executable bit, and pins the path via `OnceLock` for the process lifetime
+- [x] Add a top-level React error boundary above `<App>` in `main.tsx` — pre-router crashes currently blank-screen with no recovery; new `RootErrorBoundary` class component wraps `<App>` (inside `React.StrictMode`) and renders a self-contained, LoopDeck-styled fallback with "Reload app" (guaranteed) + "Try again" (remounts the subtree via a keyed Fragment) and a collapsible error-details panel
+- [x] Audit `expect()`/`unwrap()` under `panic = "abort"`; in particular `skills.rs:362` (a malformed user `settings.json` aborts the process on import) and `lib.rs:77`
 - [ ] Add an absolute per-turn deadline or parked-slot expiry (`claude_session.rs`) — parked turns currently hold the per-project lock indefinitely
 - [ ] Cap unbounded accumulation in `ResponseAccumulator` (`agents.rs:603-625`) — abort past a block/byte limit
 - [ ] Cap log retention in `logging.rs` (daily rolling appender grows forever); confirm no `auth_token` is ever logged
@@ -71,6 +109,271 @@
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
 ## History
+
+### 2026-07-10 — Panic/abort audit + hardening (P2 robustness)
+
+- **Status**: completed
+- **Completed**: 2026-07-10
+
+Under `[profile.release] panic = "abort"`, any panic is a process abort — so
+any `expect()`/`unwrap()` reachable from user or untrusted input during
+normal operation is a robustness defect (one malformed file kills the whole
+desktop app). The audit item named two spots; the work swept the whole crate.
+
+**Audit method.** Grep'd every `unwrap()`/`expect()`/`panic!`/`unreachable!`
+in `src-tauri/src`, mapped each file's `#[cfg(test)]` boundary, and
+classified every *production* (pre-test) hit as either user-input-reachable
+(defect) or a provable programmer invariant (acceptable). All `#[cfg(test)]`
+panics and all `.unwrap_or_else(...)` sites with graceful fallbacks were
+already safe.
+
+**Production panic surface, classified.**
+- `skills.rs` `find_or_create_matcher_group` —
+  `.expect("hook event must be an array")`. **User-input-reachable → FIXED.**
+- `lib.rs` `.run(...).expect("error while running tauri application")` —
+  startup-only, no recovery path → **hardened to logged exit.**
+- `permission.rs` `split_stages` (×4) — `.expect("stages non-empty")`;
+  `stages` is seeded `vec![String::new()]` and only ever `.push()`ed →
+  provably never empty. **Safe invariant — left as-is.**
+- `commands.rs:1018` `single.into_iter().next().unwrap()` — `single` is a
+  1-element vec and `derive_run_states` only mutates entries in place →
+  provably non-empty. **Safe invariant — left as-is.**
+- `memory.rs:174` `checklist_prefix_len(...).unwrap()` — re-derives a prefix
+  whose `.is_some()` was already checked in the preceding search loop.
+  **Safe invariant — left as-is.**
+
+**Changes.**
+- `skills.rs`: `find_or_create_matcher_group` now coerces a non-array hook
+  event to an empty array instead of panicking. Reachable from `setup_hooks`
+  (on the import path) when a user's `.claude/settings.json` holds a hook
+  event keyed to a non-array value (string/number/object — hand-edited or
+  from a different tool). The prior guard only created the array when the key
+  was *missing*; a present-but-non-array value flowed straight into the
+  `.expect()`. The coercion mirrors the lenient JSON-parse fallback already
+  at the top of `setup_hooks` (malformed JSON → `{}`): treat malformed user
+  config as "no existing hooks" and proceed. The surviving `.expect()` is now
+  provably unreachable (coerced immediately above) — an invariant, not a
+  user-input abort. New test `test_setup_hooks_survives_malformed_hook_events`
+  feeds `Stop: "not-an-array"` + `PreToolUse: 42` and asserts both get coerced
+  to populated arrays.
+- `lib.rs`: `.run(tauri::generate_context!()).expect(...)` → `if let Err(e) =
+  ...run(...) { tracing::error!(...); std::process::exit(1); }`. `run()` only
+  errors on an unrecoverable startup failure (WebView init, context
+  generation, plugin init) — terminating is correct either way — but the
+  explicit form removes the panic/abort source under `panic = "abort"` and
+  lands a structured log line (tracing is initialized at the top of `run()`)
+  instead of a raw panic message, so a user can find *why* the app won't
+  start. `std::process::exit` doesn't run destructors, but neither does an
+  abort, and there's nothing meaningful to drop at that point.
+
+**Design decisions.** The three "safe invariant" sites were left as-is rather
+than rewritten: under abort the audit's concern is panics *reachable from bad
+input*, not every `.unwrap()` in the codebase, and converting provable
+invariants to defensive `match`/`if let` would be churn with no robustness
+gain. The `skills.rs` fix is lenient (coerce + proceed) rather than returning
+an `AppError`, because `setup_hooks` already degrades leniently on a
+malformed `settings.json` elsewhere and erroring the whole import on one odd
+hook field would be worse than overwriting it. See decisions.md ("Lenient
+coercion for malformed user hook events; logged exit for unrecoverable Tauri
+startup").
+
+**Verification.** `cargo check --lib` clean (1 pre-existing `parse_response`
+dead-code warning in `agents.rs`); `cargo clippy --lib` 0 new warnings (all
+5 pre-existing); `cargo fmt` applied to the two changed files; `cargo test
+--lib` 257 passed / 0 failed / 8 ignored (was 256; +1
+`test_setup_hooks_survives_malformed_hook_events`). The 8 ignored are the
+live `claude`/keychain integration tests (need network +
+`LOOPDECK_TEST_AUTH_TOKEN`).
+
+Files changed: src-tauri/src/{skills.rs, lib.rs},
+.loopdeck/{loops.md, decisions.md}.
+
+### 2026-07-10 — Top-level React error boundary (P2 robustness)
+
+- **Status**: completed
+- **Completed**: 2026-07-10
+
+A render-time crash anywhere in the app tree blanked the window with no
+recovery path. The router's `errorComponent` (`router.tsx` `ErrorComponent`)
+only catches errors thrown *inside* a route component — anything that blows up
+before or around the router (`ThemeProvider`, `RouterProvider`, `Toaster`, the
+root `App`'s own render) fell through to React's default uncaught-error
+behavior: a blank white screen.
+
+**Changes.**
+- `RootErrorBoundary.tsx` (NEW — `src/components/shared/RootErrorBoundary.tsx`):
+  a class component implementing the canonical React error-boundary contract
+  (`static getDerivedStateFromError` + `componentDidCatch` + a render-time
+  fallback). Mounted above `<App>` so it spans the whole tree the router can't.
+  State is `{ error, resetKey }`.
+- `main.tsx`: wraps `<App />` in `<RootErrorBoundary>` inside `React.StrictMode`.
+  The boundary sits closest to the failing tree (StrictMode doesn't catch
+  errors, so its position relative to the boundary doesn't matter).
+
+**Recovery model (two buttons).**
+- **Reload app** — `window.location.reload()`. Guaranteed recovery. LoopDeck is
+  offline-first, so on-disk data (`.loopdeck/`, `config.yaml`, the keychain
+  auth token) survives a full reload untouched; the copy explains this.
+- **Try again** — `setState({ error: null, resetKey: prev + 1 })`. The bumped
+  `resetKey` is applied as a `Fragment` `key` around the children, forcing React
+  to unmount + remount the whole app subtree (dropping transient React state;
+  Zustand persists to storage so it rehydrates). A *deterministic* crash will
+  re-trip the boundary immediately — leaving the user no worse off and pointed
+  at Reload. Best-effort, not a guarantee.
+
+**Design decisions.** The fallback is deliberately self-contained — no Tauri,
+router, theme, or store imports — so it renders even when the provider it
+normally wraps is the thing that crashed. It relies only on the base OKLCH
+tokens declared in `:root` (`styles.css`), which are present without
+`ThemeProvider` (ThemeProvider only toggles the `.dark` class; base tokens
+exist unconditionally). Styling matches the nearest sibling UI — the router's
+`ErrorComponent` / `NotFoundComponent` (centered max-w-md card, same primary +
+secondary button classes). `cn()` was dropped for the single unconditional
+className, matching `ErrorComponent`'s plain-string style. A collapsible
+error-details panel shows `error.message` + `stack` for dev diagnostics
+(future source-map / `__APP_VERSION__` reporting is a P6 item). React error
+boundaries catch render / lifecycle / constructor errors only — async,
+event-handler, and `useEffect`-callback errors are out of scope and already
+surface through `appStore.error` banner + toasts. See decisions.md ("Top-level
+React error boundary above `<App>`").
+
+**Verification.** `npx tsc --noEmit` clean; `npm run build` passes (only the
+pre-existing >500kB chunk-size warning, unrelated). No frontend test harness
+exists yet (the P3 vitest task), so the React error-boundary contract was
+verified by construction — the change is a passthrough when healthy (renders
+children unchanged), so it cannot regress existing behavior.
+
+Files changed: src/{main.tsx, components/shared/RootErrorBoundary.tsx (new)},
+.loopdeck/{loops.md, decisions.md}.
+
+### 2026-07-10 — Absolute, vetted binary resolution for `claude` + `git` (P2 security)
+
+- **Status**: completed
+- **Completed**: 2026-07-10
+
+Both subprocess spawns handed a bare name to the OS PATH search at spawn time
+(`Command::new("claude")` / `Command::new("git")`). The production-readiness
+audit flagged this as "over-broad capabilities + PATH-resolved binaries": with a
+`.` or empty `$PATH` entry present, the bare-name search resolves against the
+process cwd — which is a user-selected project for `claude` (where the agent
+auth token is also injected into the child env) and a scanned repo for `git`.
+A project shipping a `claude`/`git` script could otherwise run that script under
+LoopDeck's privileges.
+
+**Changes.**
+- `binary.rs` (NEW): `resolve_command(name)` walks `$PATH` via
+  `std::env::split_paths` and returns the first absolute, executable match.
+  Three defenses: (1) **skips every non-absolute component** — an empty string
+  or `.`/relative dir means "the cwd", which is the hijack vector this closes;
+  (2) **vets executability** — `metadata` follows symlinks, requires a regular
+  file, and (Unix) a set execute bit (`mode & 0o111`); (3) **pins the result in
+  a `OnceLock`** so a later `$PATH` mutation by a sibling/child process cannot
+  redirect subsequent spawns. `git()` / `claude()` are the two cached accessors;
+  a failed resolution leaves the cell empty and re-resolves next call (so a
+  mid-session install is picked up). Windows probes `exe`/`bat`/`cmd`/`com`
+  (PATHEXT mirroring); non-`NotFound` stat errors are logged at debug and
+  treated as "not a match" so one unreadable PATH entry can't abort the search.
+  7 unit tests cover the hijack defense, executability gating, and the
+  mixed-relative/absolute PATH case deterministically (temp dirs + `chmod`).
+- `claude_session.rs`: `spawn` resolves `claude` via `crate::binary::claude()`
+  before `Command::new`; resolution failure is a hard `AppError::Agent` (no
+  claude ⇒ no agent). The resolved path is logged at INFO so a hostile `$PATH`
+  (a different claude than the user expects) is visible.
+- `git.rs`: new `git_command(repo_path)` resolves `git` via `crate::binary::git()`
+  and pins the repo with `git -C <repo_path>` instead of `current_dir(repo_path)`
+  + bare name. All six production git helpers route through it. Resolution
+  failure returns `None`, so callers see "no git info" — matching the prior
+  behavior of a failed spawn (rather than erroring the whole `check_git_info`).
+- `lib.rs`: `mod binary;`.
+
+**Deliberately left bare.** The `Command::new("git")` calls inside `git.rs`
+`#[cfg(test)]` (test repo setup) and the `Command::new("claude")` calls in
+`agents.rs` `apply_agent_config` tests — the former spawn in temp dirs the test
+owns, the latter never spawn at all (they build a `Command` only to inspect the
+env vars via `get_envs()`). Neither touches a user-selected/untrusted directory.
+`call_agents` survives only as a stale doc reference; the single-shot spawn path
+no longer exists, so there's no second production `claude` spawn to fix.
+
+**Design decisions.** Failure semantics split by consumer: claude must exist to
+function (hard error), git is advisory metadata (soft `None`). `OnceLock` over
+re-resolving-every-time trades freshness for pinning — a once-good binary stays
+good, and a once-missing one is retried until found. What this *cannot* prevent
+is documented in the module: a compromised `$PATH` where a legitimate earlier
+entry wins by design, and the GUI-launch minimal-PATH blind spot (no Homebrew /
+npm global dirs) — discovering common install dirs is a separate follow-up, out
+of scope for the hijack fix. See decisions.md ("Resolve `claude`/`git` to
+absolute, vetted paths at spawn").
+
+**Verification.** `cargo check --lib` clean (1 pre-existing dead-code warning in
+`agents.rs`); `cargo fmt --check` clean for the changed files (only `commands.rs`
+— the unrelated retry work — shows diffs); `cargo clippy --lib` 0 new warnings
+(all 5 pre-existing, none in `binary.rs`/`git.rs`/`claude_session.rs`); `cargo
+test --lib` 256 passed / 0 failed / 8 ignored (was 244; +7 from `binary::tests`,
+rest from concurrent work). The 8 ignored are the live `claude` integration
+tests (need `LOOPDECK_TEST_AUTH_TOKEN` + network); the spawn mechanics they
+exercise are unchanged.
+
+Files changed: src-tauri/src/{binary.rs (new), git.rs, claude_session.rs, lib.rs},
+.loopdeck/{loops.md, decisions.md}.
+
+### 2026-07-10 — `ClaudeSession::drop` reap moved off the tokio worker (P2 robustness)
+
+- **Status**: completed
+- **Completed**: 2026-07-10
+
+`ClaudeSession::drop` reaped the child with a synchronous `poll_reap` loop
+(`try_wait()` paced by `thread::sleep`, up to 7s: 5s graceful EOF window + 2s
+after `start_kill`). Because `Drop` can't `.await`, the sleep was the
+recommended sync-reap pattern — but `ClaudeSession` lives behind
+`Arc<tokio::sync::Mutex<…>>` and is dropped from inside async Tauri commands,
+so that 7s of `thread::sleep` ran on a tokio worker thread, stalling every
+other async task on the runtime (the UI, plus concurrent IPC). The
+`Drop`-flavour twin of the blocking-on-worker anti-pattern the
+`spawn_blocking` command fix had just closed.
+
+**Changes (`claude_session.rs`).**
+- `child: Child` → `child: Option<Child>` so `Drop` can `take()` ownership and
+  hand it to a reap task without touching `self` (being torn down). The field
+  is only touched in `spawn` and `Drop`, so the change is contained.
+- New free fn `reap_child(child: Child, stderr_drain: Option<JoinHandle<()>>)`
+  holding the graceful-then-forceful sequence: `poll_reap(5s)` → if not reaped,
+  `start_kill()` + `poll_reap(2s)` → then abort the stderr-drain task.
+  Extracted from the old inline `Drop` body; `poll_reap` itself is unchanged.
+- `Drop` now closes stdin, takes `child` + `stderr_drain`, and dispatches:
+  - Runtime present (`Handle::try_current()` → `Ok`): fire-and-forget
+    `handle.spawn_blocking(move || reap_child(...))`, detached via `drop(...)`
+    (dropping a `spawn_blocking` `JoinHandle` does NOT cancel the task — it runs
+    to completion; distinct from `Child::kill()`, whose future must be awaited
+    to send the signal — the checkpoint-4 bug).
+  - No runtime (teardown / drop from a non-runtime thread): call `reap_child`
+    synchronously. Blocking is fine there (no async worker to stall) and it
+    prevents a zombie.
+
+**Design decisions.** `spawn_blocking` was chosen over `tokio::spawn` +
+`child.wait().await` to keep the bounded graceful-then-forceful reap (claude
+gets a chance to flush its `--resume` session state before SIGKILL) rather
+than immediate-kill-and-detach. The stderr-drain task is kept alive
+*throughout* the reap and aborted only after the child is gone, preserving the
+original ordering so a verbose child can't fill its stderr pipe buffer and
+block on exit during the graceful window. The `try_current()` guard means the
+common case (drop inside an async command) never blocks a worker, while the
+edge case (drop with no runtime) still reaps instead of leaking. No
+caller-observable behavior change; the live integration tests assert session
+semantics, not which thread reaps. See decisions.md ("Reap claude child off
+the tokio worker in `Drop` via `spawn_blocking`").
+
+**Verification.** `cargo check --lib` clean (1 pre-existing dead-code warning
+in `agents.rs`); `cargo fmt --check` clean; `cargo clippy --all-targets`
+introduces 0 new warnings (the `let_underscore_future` lint on the detached
+`spawn_blocking` handle was resolved with `drop(...)` — clippy's recommended
+fix for an intentional detach, and not the real unawaited-`kill()`-future bug
+it flagged in checkpoint 4); `cargo test --lib` 244 passed / 0 failed / 8
+ignored. The 8 ignored are the live `claude` integration tests (need
+`LOOPDECK_TEST_AUTH_TOKEN` + network); not re-run here, but the reap behavior
+is unchanged so they should still pass.
+
+Files changed: src-tauri/src/claude_session.rs,
+.loopdeck/{loops.md, decisions.md}.
 
 ### 2026-07-10 — Blocking I/O offloaded to `spawn_blocking` (P2 robustness)
 
