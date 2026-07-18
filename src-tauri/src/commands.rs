@@ -12,6 +12,7 @@ use crate::memory::{self, Decision, LoopStatus};
 use crate::permission::Decision as PermissionDecision;
 use crate::permission::PermissionPolicy;
 use crate::project::{self, ProjectMeta};
+use crate::retry;
 use crate::scanner::{self, DiscoveredRepo};
 use crate::secrets;
 use chrono::Utc;
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::State;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Shared application state managed by Tauri.
 ///
@@ -2149,6 +2150,139 @@ pub async fn agent_pending_question(
     }))
 }
 
+// ── Transient-error retry wrappers ─────────────────────────────────────────
+//
+// The `claude` CLI surfaces a gateway `529 overloaded` (or similar transient
+// failure) as a normal `Ok(AgentResponse { is_error: true, result: "API Error:
+// 529 ..." })` — it doesn't crash. These wrappers re-send the same prompt with
+// exponential backoff until the turn succeeds, the error turns out to be
+// non-transient (auth, bad request), or `retry::MAX_ATTEMPTS` is exhausted.
+// Non-transient errors are returned immediately (retrying won't help) and left
+// for the caller's `is_error` check to convert into an `Err`.
+//
+// Transcript recording stays OUT of these wrappers: the pipeline helpers record
+// the user turn once before and the (final) assistant turn once after, so a
+// retried turn appears as a single exchange, not N.
+
+/// Send a prompt with retry on transient gateway overload.
+///
+/// Wraps [`ClaudeSession::send_message`]: loops until a non-retryable outcome
+/// (success, non-overload error, or exhausted retries) and returns the final
+/// `AgentResponse`. The response may still carry `is_error: true` if every
+/// attempt overloaded or the failure was non-transient — the caller decides
+/// whether to propagate that as an `Err`.
+async fn send_with_retry(
+    session: &mut ClaudeSession,
+    prompt: &str,
+    question_slot: &QuestionSlot,
+    permission_slot: &PermissionSlot,
+    interrupt_slot: &InterruptSlot,
+) -> Result<AgentResponse, AppError> {
+    // `attempt` is the 0-based index of the attempt that just ran. It doubles
+    // as the retry count via `retry::backoff_ms(attempt)`.
+    let mut attempt: u32 = 0;
+    loop {
+        let response = session
+            .send_message(prompt, question_slot, permission_slot, interrupt_slot)
+            .await?;
+
+        // Done unless this is a retryable transient overload.
+        if !(response.is_error && retry::is_overloaded(&response.result)) {
+            return Ok(response);
+        }
+
+        // Overloaded — back off and retry if attempts remain.
+        match retry::backoff_ms(attempt) {
+            Some(delay) => {
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = retry::MAX_ATTEMPTS,
+                    delay_ms = delay,
+                    "provider overloaded; retrying in {} ms: {}",
+                    delay,
+                    response.result.trim(),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                attempt += 1;
+            }
+            None => {
+                warn!(
+                    max_attempts = retry::MAX_ATTEMPTS,
+                    "provider overloaded; exhausted {} attempts, surfacing error: {}",
+                    retry::MAX_ATTEMPTS,
+                    response.result.trim(),
+                );
+                return Ok(response);
+            }
+        }
+    }
+}
+
+/// Streaming send with retry on transient gateway overload.
+///
+/// Wraps [`ClaudeSession::send_message_streaming`]. Between a failed attempt
+/// and its retry, emits a [`ClaudeEvent::Retrying`] so the UI can show
+/// "Retrying 2/4 in 4s…" — otherwise the frontend would see a terminal
+/// `Result{is_error:true}` followed, silently, by a second `Result`. The final
+/// `Result` event (success or terminal failure) remains authoritative.
+async fn send_streaming_with_retry(
+    session: &mut ClaudeSession,
+    prompt: &str,
+    channel: &Channel<ClaudeEvent>,
+    question_slot: &QuestionSlot,
+    permission_slot: &PermissionSlot,
+    interrupt_slot: &InterruptSlot,
+) -> Result<AgentResponse, AppError> {
+    let mut attempt: u32 = 0;
+    loop {
+        let response = session
+            .send_message_streaming(
+                prompt,
+                channel,
+                question_slot,
+                permission_slot,
+                interrupt_slot,
+            )
+            .await?;
+
+        if !(response.is_error && retry::is_overloaded(&response.result)) {
+            return Ok(response);
+        }
+
+        match retry::backoff_ms(attempt) {
+            Some(delay) => {
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = retry::MAX_ATTEMPTS,
+                    delay_ms = delay,
+                    "provider overloaded [streaming]; retrying in {} ms: {}",
+                    delay,
+                    response.result.trim(),
+                );
+                // `attempt` is the 0-based index of the attempt that just
+                // failed, so the upcoming retry is the 1-based `attempt + 2`.
+                let _ = channel.send(ClaudeEvent::Retrying {
+                    attempt: attempt + 2,
+                    max_attempts: retry::MAX_ATTEMPTS,
+                    backoff_ms: delay,
+                    error: response.result.clone(),
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                attempt += 1;
+            }
+            None => {
+                warn!(
+                    max_attempts = retry::MAX_ATTEMPTS,
+                    "provider overloaded [streaming]; exhausted {} attempts, surfacing error: {}",
+                    retry::MAX_ATTEMPTS,
+                    response.result.trim(),
+                );
+                return Ok(response);
+            }
+        }
+    }
+}
+
 /// Shared send pipeline used by `agent_start_loop` and `agent_send_message`.
 ///
 /// Records the user turn to the transcript *before* sending (so a crash
@@ -2172,8 +2306,8 @@ async fn send_and_record(
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
-    // 2. Send + receive.
-    let response = session.send_message(prompt, &qslot, &pslot, &islot).await?;
+    // 2. Send + receive (with retry on transient 529 overload).
+    let response = send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await?;
 
     // 3. Record the assistant turn (best-effort). Done BEFORE the error check
     //    below so a failed turn (e.g. "Not logged in") still lands in the
@@ -2233,10 +2367,9 @@ async fn send_and_record_streaming(
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
-    // 2. Send + stream.
-    let response = session
-        .send_message_streaming(prompt, channel, &qslot, &pslot, &islot)
-        .await?;
+    // 2. Send + stream (with retry on transient 529 overload).
+    let response =
+        send_streaming_with_retry(&mut session, prompt, channel, &qslot, &pslot, &islot).await?;
 
     // 3. Record the assistant turn (best-effort). Includes thinking + tool
     //    calls so the persisted transcript captures the full reasoning trail,
@@ -2380,8 +2513,8 @@ async fn start_fresh_and_record(
         truncate_prompt(prompt),
     );
 
-    // 2. Send + receive.
-    let response = session.send_message(prompt, &qslot, &pslot, &islot).await?;
+    // 2. Send + receive (with retry on transient 529 overload).
+    let response = send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await?;
 
     // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
     let assistant_turn = ConversationTurn::assistant(
@@ -2434,10 +2567,9 @@ async fn start_fresh_and_record_streaming(
         truncate_prompt(prompt),
     );
 
-    // 2. Send + stream.
-    let response = session
-        .send_message_streaming(prompt, channel, &qslot, &pslot, &islot)
-        .await?;
+    // 2. Send + stream (with retry on transient 529 overload).
+    let response =
+        send_streaming_with_retry(&mut session, prompt, channel, &qslot, &pslot, &islot).await?;
 
     // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
     let assistant_turn = ConversationTurn::assistant(

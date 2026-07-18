@@ -110,6 +110,79 @@ prerequisite.
 
 ## History
 
+### 2026-07-19 — Transient gateway-error retry for agent turns (reconciliation)
+
+- **Status**: completed
+- **Completed**: 2026-07-19 (documented after the fact; the module shipped in
+  the in-flight WIP between commits `7d4e860` and HEAD without a loops/decisions
+  record — this entry closes that gap)
+
+LoopDeck spawns the `claude` CLI as a subprocess and reads its turns as NDJSON.
+A transient gateway failure — `529` overloaded, retryable on the provider side —
+arrives as a normal `Ok(AgentResponse { is_error: true, result: "API Error: 529
+… overloaded …" })`, not as a transport error or a process crash. Before this
+work the caller's `is_error` check surfaced it as a hard turn failure, so a
+single transient blip ended the loop run and the user had to re-prompt by hand.
+
+**Changes.**
+- `retry.rs` (NEW — was untracked, documented here): the retry policy.
+  - `MAX_ATTEMPTS = 4` (1 initial + 3 retries), `BACKOFF_BASE_MS = 2_000`,
+    `BACKOFF_FACTOR = 2`, `BACKOFF_CAP_MS = 30_000` — yielding ~2s, 4s, 8s
+    backoffs before giving up.
+  - `is_overloaded(result: &str) -> bool` — substring match for `529` or
+    `overloaded`, case-insensitive. The `claude` CLI flattens gateway status
+    into human-readable text; there is no structured status code on this side
+    of the wire, so eligibility is a text match by necessity. Returns `false`
+    for non-transient failures (401 auth, 400 bad request, "not logged in") —
+    those won't fix themselves on retry and must surface immediately.
+  - `backoff_ms(attempt: u32) -> Option<u64>` — 0-based attempt index → wait
+    before the next try, exponential with the cap. `None` when `attempt + 1 >=
+    MAX_ATTEMPTS` (no retry slot left), which the callers use as the terminal
+    signal. `saturating_mul`/`saturating_pow` guard the 32-bit multiply long
+    before the cap binds; `.min(BACKOFF_CAP_MS)` is what actually enforces it.
+  - 5 unit tests covering the real captured 529 string, variants, non-transient
+    negatives, the backoff progression, and the cap.
+- `agents.rs`: new `ClaudeEvent::Retrying { attempt, max_attempts, backoff_ms,
+  error }` variant. Emitted on the streaming path *between* a failed attempt
+  and its retry so the UI can show "Retrying 2/4 in 4s…" instead of seeing a
+  terminal `Result{is_error:true}` silently followed by a second `Result`. The
+  final `Result` (success or terminal failure) stays authoritative.
+- `commands.rs`: two retry wrappers, `send_with_retry` and
+  `send_streaming_with_retry`, wrapping `ClaudeSession::send_message` and
+  `send_message_streaming`. Each loops until a non-retryable outcome (success,
+  non-overload error, or `MAX_ATTEMPTS` exhausted), then returns the final
+  `AgentResponse` — which may still carry `is_error: true`; the caller's
+  `is_error` check decides whether to propagate as `Err`. Both log at `warn!`
+  on every retry and on exhaustion. The streaming wrapper emits
+  `ClaudeEvent::Retrying` with the upcoming 1-based attempt number
+  (`attempt + 2`) between attempts.
+
+**Design decisions.** Transcript recording stays *out* of the retry wrappers:
+the pipeline helpers (`send_and_record` / `send_and_record_streaming`) record
+the user turn once before sending and the final assistant turn once after, so a
+retried turn appears as a single exchange in the transcript, not N — the user's
+intent and the eventual outcome are what's durable, not the transient blips.
+Backoff uses `tokio::time::sleep` (the `time` feature was already enabled).
+Non-transient errors return immediately rather than burning the retry budget —
+retrying a 401 or a 400 only delays the user's feedback. The substring match
+is deliberately loose on wording (`overloaded`) and tight on status (`529`) so
+it survives minor CLI/gateway phrasing changes without matching unrelated
+errors; the test suite pins representative positive and negative strings. See
+decisions.md ("Transient gateway-error retry for agent turns").
+
+**Verification.** `cargo fmt --check` clean; `cargo clippy --all-targets` exit
+0 — 0 new warnings introduced (all 5 lib + 6 test warnings pre-existing at
+HEAD, none in `retry.rs` or the `Retrying` variant); `cargo test --lib` 257
+passed / 0 failed / 8 ignored (+5 from `retry::tests`); `npm run build` passes
+(only the pre-existing >500kB chunk-size warning). The 8 ignored are the live
+`claude`/keychain integration tests; retry behavior against a real overloaded
+gateway is not unit-testable from this side of the CLI, so the contract is
+pinned by the 5 substring/backoff tests plus the captured real-world 529
+string in `matches_the_real_529_message`.
+
+Files changed: src-tauri/src/{retry.rs (new), agents.rs, commands.rs},
+.loopdeck/{loops.md, decisions.md}.
+
 ### 2026-07-10 — Panic/abort audit + hardening (P2 robustness)
 
 - **Status**: completed

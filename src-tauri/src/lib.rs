@@ -11,6 +11,7 @@ mod logging;
 mod memory;
 mod permission;
 mod project;
+pub mod retry;
 mod scanner;
 mod secrets;
 mod skills;

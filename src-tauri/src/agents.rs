@@ -184,6 +184,24 @@ pub enum ClaudeEvent {
         /// The session id (drives `--resume`). Present on all assistant turns.
         session_id: String,
     },
+    /// A transient provider error (e.g. `529 overloaded`) was hit and the turn
+    /// is being retried after a backoff. Emitted *between* attempts on the
+    /// streaming path, after the failed attempt's `Result` event but before the
+    /// retry sends. Lets the UI show "Retrying 2/4 in 4s…" instead of a silent
+    /// double-`Result`. The frontend treats the *final* `Result` (success or
+    /// terminal failure) as authoritative.
+    Retrying {
+        /// 1-based index of the attempt that's about to run (e.g. `2` for the
+        /// first retry after the initial attempt).
+        attempt: u32,
+        /// The configured maximum number of attempts.
+        max_attempts: u32,
+        /// The backoff duration in milliseconds that was slept before this event
+        /// was emitted.
+        backoff_ms: u64,
+        /// The error message from the failed attempt that triggered the retry.
+        error: String,
+    },
 }
 
 /// One selectable option in an `AskUserQuestion` question.
