@@ -16,6 +16,7 @@ import { usePendingInteractions } from "../../store/pendingInteractions";
 import { useStreamingState } from "../../store/streamingState";
 import { Chat, buildAllowRule } from "./Chat";
 import { TaskPanel } from "./TaskPanel";
+import { PermissionModeBadge } from "../shared/PermissionModeBadge";
 
 interface AgentPanelProps {
   projectPath: string;
@@ -890,6 +891,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       <div className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-1 flex-col">
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-2 pb-3 mb-3 border-b border-border shrink-0">
+        <PermissionModeBadge />
         <button
           onClick={runStartLoop}
           disabled={busy}
