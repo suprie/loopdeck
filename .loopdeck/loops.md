@@ -22,7 +22,7 @@
 
 Source: [`docs/PRD-trust-boundary-hardening.md`](../docs/PRD-trust-boundary-hardening.md)
 
-- [ ] **Honest permission default:** ship `ConfirmChanges` first; remove generated `Edit(*)`, `Write(*)`, and broad build-runner rules; align Claude spawn settings, LoopDeck policy, approval UI, and regression tests
+- [x] **Honest permission default:** ship `ConfirmChanges` first; remove generated `Edit(*)`, `Write(*)`, and broad build-runner rules; align Claude spawn settings, LoopDeck policy, approval UI, and regression tests
 - [x] **Defer autonomous mode:** do not add per-project `AutonomousProject` configuration until the confirm-first path is proven usable; this is not an alpha blocker
 - [ ] **Crash-safe critical state:** add one shared atomic-write helper and use it for the registry, `project.yaml`, `loops.md`, PRDs, and generated Claude settings
 - [ ] **Recoverable registry:** keep one last-known-good backup and never overwrite a malformed primary registry with a fresh default
@@ -109,6 +109,121 @@ prerequisite.
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
 ## History
+
+### 2026-07-19 — Phase 1 — Honest permission contract (ConfirmChanges default)
+
+- **Status**: completed
+- **Completed**: 2026-07-19
+
+Closes Gate A item 1 ("Honest permission default"). Phase 1 of the
+trust-boundary hardening PRD made the agent permission policy explicit,
+testable, and consistent across the four places it had previously been
+contradicting itself. The four-arm `answer_control_request` flow in
+`claude_session.rs` (AskUserQuestion → destructive floor →
+`MANUAL_APPROVAL_TOOLS` interception → fallback policy) was already
+confirm-first by construction; this phase fixed the three layers silently
+bypassing it and renamed the misleading types so the contract is visible at
+the type level.
+
+**The four contradictions, pre-Phase-1.**
+
+1. `claude_session.rs:227` ran `--permission-mode acceptEdits` while the
+   comment directly above it said "Run in `default` permission mode".
+   `acceptEdits` auto-approves Edit/Write/NotebookEdit inside Claude before
+   any `control_request` reaches LoopDeck, so the `MANUAL_APPROVAL_TOOLS`
+   entries for those three tools were dead code under that flag.
+2. `skills.rs::setup_hooks` seeded a curated `.claude/settings.json` allow
+   list that included `Edit(*)`, `Write(*)`, and broad build-runner rules
+   (`Bash(cargo:*)`, `Bash(npm:*)`, `Bash(npx:*)`, `Bash(go:*)`,
+   `Bash(pnpm:*)`, `Bash(yarn:*)`). These matched at the Claude layer
+   before any `control_request` reached LoopDeck, silently auto-approving
+   all file mutation and most build/test execution.
+3. `permission.rs` types — `PolicyDefault::Allow/Deny`,
+   `PermissionPolicy::allow_by_default()` — implied an
+   auto-approve-everything posture that contradicted the actual confirm-first
+   behavior (the manual-approval interception runs before the fallback
+   `decide` is consulted, so under `Allow` the fallback only ever
+   auto-allowed read-only tools).
+4. The approval card in `Chat.tsx` had no effective-mode indicator, so a
+   user couldn't tell what was gated vs. silent.
+
+**Net effect pre-Phase-1:** all file edits + cargo/npm/go/pnpm/yarn command
+execution were silently auto-approved. Only other Bash commands + WebFetch +
+MCP reached the approval card. The UI implied more gating than existed.
+
+**Changes (5 commits, task-by-task).**
+- `32ce7a3` — `claude_session.rs`: flipped `--permission-mode acceptEdits` →
+  `default` with an honest comment. One-line behavioral change, the
+  highest-leverage fix in the phase: routes every un-ruled tool call through
+  LoopDeck's policy instead of letting Claude auto-approve file edits.
+- `beb7930` — `skills.rs::setup_hooks`: removed `Edit(*)`, `Write(*)`, and
+  the six broad build-runner Bash rules from the curated `CURATED_ALLOW`
+  array. Kept the narrow read-only rules (`Bash(ls:*)`, `Bash(git status:*)`,
+  etc.). Comment block above the array now documents *what is deliberately
+  not there and why* — a hostile repo controls its own scripts and build
+  steps, so a broad allow rule is a privilege-escalation vector. The
+  approval-card "Always allow" button remains the escape hatch for users to
+  add narrow rules (e.g. `Bash(npm run test:*)`) to
+  `.claude/settings.local.json` once they trust a project.
+  `test_setup_hooks_writes_curated_allowlist` updated to assert the removed
+  rules are absent.
+- `fe9d175` — `permission.rs`: renamed `PolicyDefault` → `PermissionMode`
+  (`Allow` → `ConfirmChanges`, `Deny` stays), `PermissionPolicy::allow_by_default`
+  → `confirm_changes`, `with_default` → `with_mode`. Module-level doc
+  rewritten to describe the actual confirm-changes posture. 10 call sites
+  updated (commands.rs ×2, claude_session.rs test scaffolding ×8). The
+  `deny_mode_*` tests and the `Deny` variant were kept: the ignored
+  `test_session_deny_path_is_graceful` integration test uses them to verify
+  the CLI recovers from a hard deny without hanging.
+- `45e4bfc` — `permission.rs::tests`: new consolidated
+  `confirm_changes_decision_matrix_documented` regression test pinning the
+  full gating matrix in one readable place — read-only tools auto-allow,
+  mutating tools (Edit/Write/NotebookEdit/WebFetch/Bash) clear the floor but
+  gate on the UI card via `MANUAL_APPROVAL_TOOLS`, MCP tools always gate,
+  and the destructive floor hard-denies regardless of mode. Pairs the
+  `policy.decide` layer with the `requires_manual_approval` layer so a
+  change to either is visible in one spot.
+- `20909f6` — `src/components/shared/PermissionModeBadge.tsx` (NEW): a small
+  "Confirm changes" badge with `ShieldCheck` icon (same icon as the approval
+  card in Chat.tsx). Wired into `AgentPanel.tsx` toolbar (first child, left
+  of Start button) and `AgentRunner.tsx` `PageHeader` actions Fragment.
+  Designed as a single self-contained component so Phase 3's
+  `AutonomousProject` mode has one file to update.
+
+**Design decisions.** The four-arm `answer_control_request` flow was left
+untouched — it was already correct. `AutonomousProject` was *not* added as a
+type variant despite the plan initially suggesting it as future-proofing:
+both match arms would return `Allow` under `ConfirmChanges` today (the
+gating happens upstream in `MANUAL_APPROVAL_TOOLS` interception), so adding
+`AutonomousProject` now would be a dead match arm — the textbook YAGNI
+violation. It lands in Phase 3 alongside the path-containment helpers it
+needs. The `Deny` variant was kept against the plan's suggestion to delete
+it: reading the actual integration test showed `test_session_deny_path_is_graceful`
+uses `PolicyDefault::Deny` to verify the CLI recovers from a hard deny, a
+real safety property worth keeping verified. The curated allowlist keeps
+its read-only Bash rules (`ls`, `cat`, `git status`, etc.) — they genuinely
+reduce prompt fatigue without enabling mutation. See decisions.md
+("ConfirmChanges as the default permission mode").
+
+**Tradeoff accepted.** Flipping `acceptEdits` → `default` causes more
+approval prompts: file edits the agent used to do silently now park on an
+approval card. This is the intended behavior (PRD FR1) and the "Always
+allow" button is the documented escape hatch. The PRD explicitly accepts
+this tradeoff for the alpha.
+
+**Verification.** `cargo fmt --check` clean; `cargo clippy --all-targets`
+exit 0 (0 new warnings — all 5 lib + 11 test warnings pre-existing at Task 0
+baseline); `cargo test --lib` 258 passed / 0 failed / 8 ignored (+1 from the
+new decision-matrix test); `npx tsc --noEmit` clean; `npm run build` passes
+(only the pre-existing >500kB chunk-size warning). The 8 ignored Rust tests
+are the live `claude`/keychain integration tests; the spawn-flag change is
+observable there but the offline tests assert the policy layer, which is
+unaffected. Recommend running the ignored suite manually before tagging the
+alpha.
+
+**Files changed:** src-tauri/src/{claude_session.rs, skills.rs, permission.rs,
+commands.rs}, src/components/{shared/PermissionModeBadge.tsx (new),
+detail/AgentPanel.tsx, agent/AgentRunner.tsx}, .loopdeck/{loops.md, decisions.md}.
 
 ### 2026-07-19 — Transient gateway-error retry for agent turns (reconciliation)
 
