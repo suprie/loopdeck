@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::persist;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -200,21 +201,75 @@ pub struct GlobalConfig {
 
 impl GlobalConfig {
     /// Load global config from `~/.config/loopdeck/config.yaml`.
-    /// Returns a fresh default if the file does not exist.
+    ///
+    /// Recovery order (PRD FR2):
+    /// 1. Primary missing → fresh default (first launch).
+    /// 2. Primary parses → load it.
+    /// 3. Primary malformed → try the `.bak`. If it parses, load it and warn.
+    ///    The malformed primary is NOT overwritten.
+    /// 4. Both malformed/missing → `Err`. The caller MUST NOT silently
+    ///    overwrite the malformed primary with a fresh default — the file is
+    ///    preserved for manual recovery.
     pub fn load() -> Result<Self, AppError> {
         let config_path = Self::config_path()?;
+        Self::load_from_path(&config_path)
+    }
 
+    /// Test-friendly inner: same recovery logic as [`load`] but takes an
+    /// explicit primary path. The backup path is derived via [`backup_path`].
+    pub(crate) fn load_from_path(config_path: &Path) -> Result<Self, AppError> {
+        let backup = backup_path(config_path);
+
+        // Primary missing entirely → first launch.
         if !config_path.exists() {
             return Ok(Self::default());
         }
 
-        let contents = std::fs::read_to_string(&config_path)?;
-        let config: GlobalConfig = serde_yaml::from_str(&contents)?;
-        Ok(config)
+        // Primary exists — try to parse it.
+        let contents = std::fs::read_to_string(config_path)?;
+        match serde_yaml::from_str::<GlobalConfig>(&contents) {
+            Ok(config) => Ok(config),
+            Err(primary_err) => {
+                // Primary is malformed. Do NOT overwrite it. Try the backup.
+                tracing::warn!(
+                    "malformed registry at {}: {primary_err}",
+                    config_path.display()
+                );
+                if backup.exists() {
+                    let backup_contents = std::fs::read_to_string(&backup)?;
+                    match serde_yaml::from_str::<GlobalConfig>(&backup_contents) {
+                        Ok(config) => {
+                            tracing::warn!(
+                                "recovered registry from backup at {}",
+                                backup.display()
+                            );
+                            return Ok(config);
+                        }
+                        Err(backup_err) => {
+                            tracing::warn!(
+                                "backup at {} also malformed: {backup_err}",
+                                backup.display()
+                            );
+                        }
+                    }
+                }
+                // Both missing/malformed — surface the error, preserve the
+                // primary for manual recovery.
+                Err(AppError::Config(format!(
+                    "registry at {} is malformed and no valid backup was found; \
+                     the file has been preserved for manual recovery. Parse error: {primary_err}",
+                    config_path.display()
+                )))
+            }
+        }
     }
 
     /// Save global config to `~/.config/loopdeck/config.yaml`.
-    /// Creates parent directories if needed.
+    ///
+    /// Crash-safe via [`persist::atomic_write`] (temp + fsync + same-dir
+    /// rename). Before overwriting, copies the existing primary to
+    /// `config.yaml.bak` so a malformed future primary can be recovered from
+    /// the backup.
     ///
     /// Also applies an owner-only permission floor (0600 on Unix) as
     /// defense-in-depth: the auth token itself lives in the OS keychain now
@@ -222,14 +277,29 @@ impl GlobalConfig {
     /// rely on the process umask to keep it private.
     pub fn save(&self) -> Result<(), AppError> {
         let config_path = Self::config_path()?;
+        self.save_to_path(&config_path)
+    }
 
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Test-friendly inner: same atomic-write + backup logic as [`save`] but
+    /// takes an explicit primary path.
+    pub(crate) fn save_to_path(&self, config_path: &Path) -> Result<(), AppError> {
+        // Preserve the current primary as last-known-good before overwriting.
+        // Best-effort: a missing primary (first launch) or a backup failure
+        // is logged but doesn't abort the save — the primary is the source of
+        // truth, the backup is a recovery floor.
+        if config_path.exists() {
+            let backup = backup_path(config_path);
+            if let Err(e) = std::fs::copy(config_path, &backup) {
+                tracing::warn!(
+                    "failed to update registry backup at {}: {e}",
+                    backup.display()
+                );
+            }
         }
 
         let contents = serde_yaml::to_string(self)?;
-        std::fs::write(&config_path, contents)?;
-        restrict_file_perms(&config_path);
+        persist::atomic_write(config_path, &contents)?;
+        restrict_file_perms(config_path);
 
         Ok(())
     }
@@ -337,6 +407,17 @@ fn restrict_file_perms(path: &Path) {
 /// access control.
 #[cfg(not(unix))]
 fn restrict_file_perms(_path: &Path) {}
+
+/// Sibling `.bak` path for a registry primary: `config.yaml` → `config.yaml.bak`.
+/// Lives in the same directory so a cross-device rename can never be an issue.
+fn backup_path(primary: &Path) -> PathBuf {
+    let mut name = primary
+        .file_name()
+        .expect("registry path has a file name")
+        .to_os_string();
+    name.push(".bak");
+    primary.with_file_name(name)
+}
 
 /// Fallback to `~/.config/loopdeck` using the `dirs` crate (part of `directories`).
 fn dirs_fallback() -> Option<PathBuf> {
@@ -857,5 +938,164 @@ created_at: "2025-01-01T00:00:00Z"
         let entry: ProjectEntry = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(entry.uncommitted, UncommittedStats::default());
         assert_eq!(entry.run_state, RunState::Idle);
+    }
+
+    // ── Phase 2: atomic-write + backup recovery ──────────────────────────
+
+    /// Unique test dir keyed by name + PID + nanos so parallel tests can't
+    /// race on shared parents.
+    fn phase2_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "loopdeck-config-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_returns_default_when_primary_missing() {
+        // First-launch case: no primary, no backup → fresh default, no error.
+        let dir = phase2_dir("missing_primary");
+        let primary = dir.join("config.yaml");
+        let config = GlobalConfig::load_from_path(&primary).unwrap();
+        assert!(config.projects.is_empty());
+        assert!(config.agent.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_recovers_from_backup_when_primary_malformed() {
+        // PRD FR2: a malformed primary MUST NOT be silently overwritten. The
+        // backup is loaded instead, and the malformed primary is preserved
+        // on disk for manual inspection.
+        let dir = phase2_dir("recover_from_bak");
+        let primary = dir.join("config.yaml");
+        let backup = dir.join("config.yaml.bak");
+
+        // Seed a valid backup carrying an identifiable model value, then a
+        // genuinely malformed primary (an unclosed flow sequence —
+        // `:::not yaml:::` parses as an empty document under serde_yaml's
+        // lenient scalar rules, so use something it actually rejects).
+        std::fs::write(&backup, "agent:\n  model: backup-model\n").unwrap();
+        std::fs::write(&primary, "agent: [unclosed").unwrap();
+
+        let config = GlobalConfig::load_from_path(&primary).unwrap();
+        assert_eq!(
+            config.agent.and_then(|a| a.model),
+            Some("backup-model".into()),
+            "should recover the backup's contents"
+        );
+
+        // The malformed primary must still be on disk, unchanged — not
+        // overwritten by the recovery.
+        assert_eq!(
+            std::fs::read_to_string(&primary).unwrap(),
+            "agent: [unclosed",
+            "malformed primary must be preserved for manual recovery"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_errors_when_both_primary_and_backup_malformed() {
+        // If neither primary nor backup parses, surface an error rather than
+        // silently defaulting. lib.rs startup turns this into a visible exit.
+        let dir = phase2_dir("both_bad");
+        let primary = dir.join("config.yaml");
+        let backup = dir.join("config.yaml.bak");
+
+        std::fs::write(&primary, "agent: [unclosed").unwrap();
+        std::fs::write(&backup, "{ invalid: ").unwrap();
+
+        let result = GlobalConfig::load_from_path(&primary);
+        assert!(
+            result.is_err(),
+            "should error when neither primary nor backup parses"
+        );
+
+        // Both files must still be on disk, unchanged.
+        assert_eq!(
+            std::fs::read_to_string(&primary).unwrap(),
+            "agent: [unclosed"
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{ invalid: ");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_creates_backup_before_overwriting() {
+        // Every save must preserve the previous primary as .bak, so a future
+        // malformed primary can be recovered.
+        let dir = phase2_dir("save_makes_bak");
+        let primary = dir.join("config.yaml");
+        let backup = dir.join("config.yaml.bak");
+
+        // Initial state: a primary with an identifiable model, no backup.
+        std::fs::write(&primary, "agent:\n  model: old-model\n").unwrap();
+
+        let mut config = GlobalConfig::load_from_path(&primary).unwrap();
+        // Mutate + save.
+        config.agent = Some(AgentConfig {
+            base_url: None,
+            model: Some("new-model".into()),
+            auth_token: None,
+            effort: None,
+            has_auth_token: false,
+        });
+        config.save_to_path(&primary).unwrap();
+
+        // The backup should now hold the OLD primary contents.
+        assert!(backup.exists(), "save must create a .bak sibling");
+        let backup_contents = std::fs::read_to_string(&backup).unwrap();
+        assert!(
+            backup_contents.contains("old-model"),
+            "backup should hold the pre-save primary, got: {backup_contents}"
+        );
+
+        // The primary should hold the NEW contents.
+        let primary_contents = std::fs::read_to_string(&primary).unwrap();
+        assert!(
+            primary_contents.contains("new-model"),
+            "primary should hold the new save, got: {primary_contents}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_is_atomic_no_truncated_primary_on_temp_left_behind() {
+        // If a prior crashed write left a stale temp in the target's dir, a
+        // subsequent save must still produce a complete primary. (Reassoc
+        // check: the temp-suffix includes the PID, so a stale temp from a
+        // different PID never conflicts.)
+        let dir = phase2_dir("stale_temp");
+        let primary = dir.join("config.yaml");
+        let stale_temp = dir.join("config.yaml.999999.tmp");
+
+        std::fs::write(&primary, "agent:\n  model: original\n").unwrap();
+        std::fs::write(&stale_temp, "stale temp from a crashed prior run").unwrap();
+
+        let config = GlobalConfig::default();
+        config.save_to_path(&primary).unwrap();
+
+        // Primary must be valid YAML (the save succeeded atomically) — and
+        // the stale temp from the other PID must be untouched (not renamed
+        // over by mistake).
+        GlobalConfig::load_from_path(&primary)
+            .unwrap_or_else(|e| panic!("primary should parse after save despite stale temp: {e}"));
+        assert_eq!(
+            std::fs::read_to_string(&stale_temp).unwrap(),
+            "stale temp from a crashed prior run",
+            "stale temp from another PID must not be touched"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

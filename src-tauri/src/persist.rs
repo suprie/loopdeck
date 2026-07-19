@@ -51,7 +51,7 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
         path.extension()
             .map(|e| {
                 let mut s = e.to_os_string();
-                s.push(&temp_suffix());
+                s.push(temp_suffix());
                 s
             })
             .unwrap_or_else(|| temp_suffix().into()),
@@ -93,6 +93,11 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
 /// Read `path` to a string, returning `Ok(Some(contents))` if it exists,
 /// `Ok(None)` if it doesn't. Thin wrapper so callers don't pattern-match on
 /// `NotFound` everywhere.
+//
+// `allow(dead_code)`: not yet wired into a production call site. Task 5
+// (transcript partial-line tolerance) will use it; the tests below pin the
+// contract so it's ready.
+#[allow(dead_code)]
 pub fn read_if_exists(path: &Path) -> io::Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(Some(contents)),

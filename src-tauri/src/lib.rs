@@ -26,16 +26,23 @@ pub fn run() {
     // config load, Tauri, and the claude process are captured. Idempotent.
     logging::init_logging();
 
-    // Load config — if it fails, start with a clean default and persist it
-    let mut config = GlobalConfig::load().unwrap_or_else(|e| {
-        tracing::warn!("failed to load config, starting fresh: {e}");
-        let fresh = GlobalConfig::default();
-        // Try to save the fresh config so next restart succeeds
-        if let Err(save_err) = fresh.save() {
-            tracing::warn!("failed to save default config: {save_err}");
+    // Load the registry. Per PRD FR2, a malformed primary MUST NOT be silently
+    // overwritten with a fresh default — that would turn recoverable corruption
+    // into silent data loss. `GlobalConfig::load` tries the primary, then the
+    // `.bak`, then returns Err. Surface that as a structured error + exit so
+    // the user knows their project list is intact-but-needing-repair, not
+    // wiped. The malformed file stays on disk for manual recovery.
+    let mut config = match GlobalConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("registry load failed: {e}");
+            tracing::error!(
+                "the malformed registry has NOT been overwritten; repair it \
+                 manually or delete it to start fresh"
+            );
+            std::process::exit(1);
         }
-        fresh
-    });
+    };
 
     // One-time migration: move any plaintext auth token out of config.yaml into
     // the OS keychain. Best-effort — if the keychain is unavailable we keep the
