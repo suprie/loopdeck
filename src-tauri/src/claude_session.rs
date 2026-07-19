@@ -225,13 +225,15 @@ impl ClaudeSession {
         if let Some(id) = resume_session_id {
             cmd.args(["--resume", id]);
         }
-        // Run in `default` permission mode so EVERY tool call that doesn't
-        // match an allow rule emits a `control_request` — that's the whole
-        // point of this PRD: LoopDeck gets to observe and decide each one.
-        // (Previously this used `acceptEdits`, which only auto-approves file
-        // edits and left every Bash call stalling — see
-        // docs/PRD-agent-permission-stall.md for the evidence.)
-        cmd.args(["--permission-mode", "acceptEdits"]);
+        // `default` permission mode: every tool call that doesn't match an
+        // allow rule in `.claude/settings.json` emits a `control_request`
+        // that LoopDeck decides (floor → manual approval → auto-policy).
+        // This is the honest single-source-of-truth: nothing is silently
+        // auto-approved by Claude itself. Earlier iterations used
+        // `acceptEdits`, which auto-approves Edit/Write/NotebookEdit inside
+        // Claude and made the `MANUAL_APPROVAL_TOOLS` entries for those tools
+        // dead code. See docs/PRD-trust-boundary-hardening.md FR1.
+        cmd.args(["--permission-mode", "default"]);
 
         if let Some(model) = agent_config.model.clone() {
             cmd.args(["--model", &model]);
