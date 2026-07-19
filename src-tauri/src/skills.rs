@@ -285,11 +285,21 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
     //
     // Under `--permission-mode default`, a tool call only emits a
     // `control_request` if it doesn't match an allow rule. Seeding a curated
-    // list of known-safe read/build commands means the common dev-loop traffic
-    // (ls, git status, cargo/npm builds, file reads/edits) short-circuits the
-    // control protocol entirely — so it neither stalls nor clutters the
-    // permission log/UI. Anything not on this list still routes through the
-    // `permission::PermissionPolicy` (allow-by-default + destructive floor).
+    // list of known-safe read commands means the common dev-loop traffic
+    // (ls, git status, file reads) short-circuits the control protocol
+    // entirely — so it neither stalls nor clutters the permission log/UI.
+    // Anything not on this list routes through LoopDeck's policy
+    // (destructive floor -> MANUAL_APPROVAL_TOOLS interception -> auto-allow).
+    //
+    // **What is deliberately NOT here (Phase 1, PRD FR1):**
+    // - No `Edit(*)` / `Write(*)` / `NotebookEdit(*)` — file mutation must
+    //   route through the manual-approval card so the user sees it.
+    // - No broad build-runner rules (`Bash(cargo:*)`, `Bash(npm:*)`, etc.) —
+    //   a hostile repo controls its own scripts and build steps, so a broad
+    //   allow rule is a privilege escalation vector. Users who trust a
+    //   project can add narrow rules (e.g. `Bash(npm run test:*)`) via the
+    //   approval card's "Always allow" button, which writes to
+    //   `.claude/settings.local.json`.
     // Idempotent + dedup'd, mirroring the hook-insertion pattern above; any
     // pre-existing rules are preserved.
     {
@@ -298,9 +308,6 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
             "Read(*)",
             "Glob(*)",
             "Grep(*)",
-            // File edits/writes — bounded by the project's git history.
-            "Edit(*)",
-            "Write(*)",
             // Common safe read-only Bash commands.
             "Bash(ls:*)",
             "Bash(cat:*)",
@@ -319,13 +326,6 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
             "Bash(git show:*)",
             "Bash(git branch:*)",
             "Bash(git add:*)",
-            // Build / test runners for common stacks.
-            "Bash(cargo:*)",
-            "Bash(npm:*)",
-            "Bash(npx:*)",
-            "Bash(go:*)",
-            "Bash(pnpm:*)",
-            "Bash(yarn:*)",
         ];
 
         if root.get("permissions").is_none() {
@@ -722,8 +722,8 @@ mod tests {
     #[test]
     fn test_setup_hooks_writes_curated_allowlist() {
         // Under `default` permission mode, a curated allow list lets common
-        // safe commands short-circuit the control protocol. setup_hooks must
-        // seed it into every bootstrapped project's settings.json.
+        // safe read commands short-circuit the control protocol. setup_hooks
+        // must seed it into every bootstrapped project's settings.json.
         let dir = temp_dir();
         setup_hooks(&dir).unwrap();
 
@@ -733,13 +733,24 @@ mod tests {
             .as_array()
             .expect("permissions.allow must exist after setup_hooks");
 
-        // Spot-check a representative sample from each category.
+        // Spot-check a representative sample of what SHOULD be seeded.
         let has = |rule: &str| allow.iter().any(|v| v.as_str() == Some(rule));
         assert!(has("Read(*)"), "read tool missing");
         assert!(has("Bash(ls:*)"), "safe read command missing");
         assert!(has("Bash(git status:*)"), "vcs inspection missing");
-        assert!(has("Bash(cargo:*)"), "build runner missing");
-        assert!(has("Bash(npm:*)"), "npm runner missing");
+
+        // Phase 1 (PRD FR1): broad mutation + build-runner rules must NOT be
+        // seeded — they bypass LoopDeck's manual-approval card at the Claude
+        // layer. Users add narrow rules via the approval card's "Always allow"
+        // button instead.
+        assert!(!has("Edit(*)"), "broad Edit rule must NOT be seeded");
+        assert!(!has("Write(*)"), "broad Write rule must NOT be seeded");
+        assert!(!has("Bash(cargo:*)"), "broad build-runner rule must NOT be seeded");
+        assert!(!has("Bash(npm:*)"), "broad build-runner rule must NOT be seeded");
+        assert!(!has("Bash(npx:*)"), "broad build-runner rule must NOT be seeded");
+        assert!(!has("Bash(go:*)"), "broad build-runner rule must NOT be seeded");
+        assert!(!has("Bash(pnpm:*)"), "broad build-runner rule must NOT be seeded");
+        assert!(!has("Bash(yarn:*)"), "broad build-runner rule must NOT be seeded");
         assert!(
             !has("Bash(rm -rf:*)"),
             "destructive patterns must NOT be in the allow list"
