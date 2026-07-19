@@ -394,16 +394,14 @@ fn parse_checklist(section: &str) -> Vec<NextStep> {
                     text: rest.to_string(),
                     checked: false,
                 })
-            } else if let Some(rest) = trimmed
-                .strip_prefix("- [x] ")
-                .or_else(|| trimmed.strip_prefix("- [X] "))
-            {
-                Some(NextStep {
-                    text: rest.to_string(),
-                    checked: true,
-                })
             } else {
-                None
+                trimmed
+                    .strip_prefix("- [x] ")
+                    .or_else(|| trimmed.strip_prefix("- [X] "))
+                    .map(|rest| NextStep {
+                        text: rest.to_string(),
+                        checked: true,
+                    })
             }
         })
         .collect()

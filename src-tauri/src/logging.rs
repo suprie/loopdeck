@@ -163,7 +163,7 @@ fn resolve_log_dir() -> Result<PathBuf, String> {
     // always have *somewhere* to write, even on a headless box without HOME.
     let dir = std::env::var_os("LOOPDECK_LOG_DIR")
         .map(PathBuf::from)
-        .or_else(|| platform_log_dir())
+        .or_else(platform_log_dir)
         .unwrap_or_else(|| PathBuf::from("./logs"));
     std::fs::create_dir_all(&dir).map_err(|e| format!("create log dir {}: {e}", dir.display()))?;
     Ok(dir)

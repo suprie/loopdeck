@@ -1,0 +1,1313 @@
+//! Agent / Claude session commands — the 16 `agent_*` IPC handlers plus their
+//! private helpers (retry wrappers, transcript-recording pipelines, the
+//! fresh-start pipeline, and the loop-prompt builder).
+
+use super::state::{
+    interrupt_slot, permission_slot, project_busy, question_slot, resolve_agent_config,
+    resolve_root, with_session, AppState,
+};
+use crate::agents::{AgentResponse, ClaudeEvent};
+use crate::claude_session::{ClaudeSession, QuestionAnswers};
+use crate::conversation::{self, ConversationSummary, ConversationTurn};
+use crate::error::AppError;
+use crate::limits;
+use crate::permission::Decision as PermissionDecision;
+use crate::retry;
+use crate::retry::MAX_ATTEMPTS;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tauri::ipc::Channel;
+use tauri::State;
+use tracing::{debug, info, warn};
+
+// ── Agent commands ─────────────────────────────────────────────────────────
+
+/// Start the next development loop for a project.
+///
+/// Builds the next-loop prompt from `.loopdeck/loops.md` (first unchecked
+/// step under `## Next Steps`, or a "propose the next loop" fallback) and
+/// sends it through the **fresh-start** pipeline: any live session is dropped,
+/// the transcript is archived, and a brand-new claude process is spawned
+/// **without** `--resume` — Start always begins a new conversation.
+///
+/// Concurrency: uses `try_lock`. If a turn is already in flight on this
+/// project, Start is rejected immediately with "agent is busy" rather than
+/// queueing (only `agent_send_message` queues). The successful `try_lock` is
+/// the proof that the prior session is idle and safe to replace.
+#[tauri::command]
+pub async fn agent_start_loop(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<AgentResponse, AppError> {
+    debug!("agent_start_loop called for path: {path}");
+    // Resolve the canonical, registered root (PRD FR3): the agent process is
+    // spawned with this as its cwd, so it must be a registered project.
+    let root = resolve_root(&state, &path)?;
+
+    let prompt = build_next_loop_prompt(&root);
+    let response = start_fresh_and_record(&state, &root, &prompt).await?;
+    info!("agent_start_loop complete for: {path}");
+    Ok(response)
+}
+
+/// Send a free-form follow-up message to the project's agent session.
+///
+/// Continues the **existing** conversation: reuses the live process if present,
+/// or (after an app restart, when no live process exists) re-spawns claude with
+/// `--resume <last_session_id>` so the model's context is restored. Both turns
+/// are recorded. Contrast with `agent_start_loop`, which always begins a fresh
+/// conversation.
+///
+/// Concurrency: uses `lock().await`, so a follow-up sent while a turn is in
+/// flight on this project queues behind it (different projects run in parallel).
+#[tauri::command]
+pub async fn agent_send_message(
+    path: String,
+    prompt: String,
+    state: State<'_, AppState>,
+) -> Result<AgentResponse, AppError> {
+    debug!("agent_send_message called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+
+    let response = send_and_record(&state, &root, &prompt).await?;
+    info!("agent_send_message complete for: {path}");
+    Ok(response)
+}
+
+/// Start the next development loop with streaming events via Tauri Channel.
+///
+/// Like `agent_start_loop`, but emits each assistant content block as a
+/// `ClaudeEvent` on the `on_event` channel as it arrives. The transcript is
+/// still recorded atomically after the turn completes.
+///
+/// Fresh-start semantics, identical to `agent_start_loop`: drops any live
+/// session, archives the transcript, spawns without `--resume`, rejects with
+/// "agent is busy" if a turn is in flight (`try_lock`).
+///
+/// Returns `()` rather than `AgentResponse` — the terminal result event
+/// (`ClaudeEvent::Result`) carries the full aggregated response.
+#[tauri::command]
+pub async fn agent_start_loop_streaming(
+    path: String,
+    on_event: Channel<ClaudeEvent>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("agent_start_loop_streaming called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+
+    let prompt = build_next_loop_prompt(&root);
+    start_fresh_and_record_streaming(&state, &root, &prompt, &on_event).await?;
+    info!("agent_start_loop_streaming complete for: {path}");
+    Ok(())
+}
+
+/// Send a free-form follow-up message with streaming events via Tauri Channel.
+///
+/// Like `agent_send_message`, but each assistant content block is emitted as
+/// a `ClaudeEvent` on the `on_event` channel as it arrives, so the frontend
+/// can render tokens immediately. The transcript is still recorded atomically
+/// after the turn completes.
+///
+/// Returns `()` rather than `AgentResponse` — the terminal result event
+/// (`ClaudeEvent::Result`) carries the full aggregated response, so the
+/// frontend doesn't need to await the return value.
+#[tauri::command]
+pub async fn agent_send_message_streaming(
+    path: String,
+    prompt: String,
+    on_event: Channel<ClaudeEvent>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("agent_send_message_streaming called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+
+    send_and_record_streaming(&state, &root, &prompt, &on_event).await?;
+    info!("agent_send_message_streaming complete for: {path}");
+    Ok(())
+}
+
+/// Load the persisted conversation transcript for the Agent tab.
+///
+/// Returns an empty vec when no conversation has been recorded yet. Lenient
+/// about malformed lines (a corrupt append doesn't hide earlier turns).
+#[tauri::command]
+pub async fn agent_get_conversation(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ConversationTurn>, AppError> {
+    debug!("agent_get_conversation called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+    Ok(conversation::load_conversation(&root))
+}
+
+/// List all conversations (active + archived) for the history UI.
+///
+/// Returns one `ConversationSummary` per transcript file in the sessions dir,
+/// sorted newest-first by last-turn timestamp. Each row carries an id
+/// (`"active"` or an archive stem) the frontend passes back to
+/// `agent_get_conversation_by_id` to load the turns.
+#[tauri::command]
+pub async fn agent_list_conversations(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ConversationSummary>, AppError> {
+    debug!("agent_list_conversations called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+    Ok(conversation::list_conversations(&root))
+}
+
+/// Load a specific conversation by id (`"active"` or an archive stem).
+///
+/// Used by the history viewer to open a past conversation read-only. Returns
+/// an empty vec for an unknown id (e.g. an archive deleted out of band) — the
+/// UI shows an empty state rather than erroring.
+#[tauri::command]
+pub async fn agent_get_conversation_by_id(
+    path: String,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ConversationTurn>, AppError> {
+    debug!("agent_get_conversation_by_id called for path: {path}, id: {id}");
+    let root = resolve_root(&state, &path)?;
+    Ok(conversation::load_conversation_by_id(&root, &id))
+}
+
+/// Promote an archived conversation to active, returning its `session_id`.
+///
+/// Called by the frontend when the user sends a follow-up while viewing an
+/// archived conversation. The backend:
+/// 1. `promote_to_active` — rotates the current `active.jsonl` aside (so it
+///    survives in history) and seeds a fresh active transcript with the chosen
+///    archive's turns.
+/// 2. Extracts the most recent assistant `session_id` from that conversation
+///    so the agent pipeline can `--resume` it, restoring the model's context.
+///
+/// Returns `None` when the source has no `session_id` (empty, or only user
+/// turns) — in that case the frontend proceeds with a non-resume start. The
+/// live session is also dropped (its context is now stale relative to the
+/// promoted transcript); the next send re-spawns with the returned resume id.
+#[tauri::command]
+pub async fn agent_promote_to_active(
+    path: String,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
+    debug!("agent_promote_to_active called for path: {path}, id: {id}");
+    let root = resolve_root(&state, &path)?;
+
+    // Extract the resume id BEFORE promoting (after promotion the turns live
+    // in active.jsonl, but reading from the source id is unambiguous).
+    let resume_id = conversation::session_id_for_conversation(&root, &id);
+
+    // Promote: archive current active, seed new active from the source. No-op
+    // for `id == "active"` or an unknown/empty source — both safe here.
+    conversation::promote_to_active(&root, &id)?;
+
+    // Drop any live session — its in-process context is now stale relative to
+    // the promoted transcript. The next send re-spawns with `--resume <id>`
+    // via `with_session` (which reads `last_session_id` off the new active).
+    // The session map is keyed by the canonical root (installed by the agent
+    // pipeline), so removing by `root` matches.
+    let removed = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(&root)
+        .is_some();
+    if removed {
+        debug!("dropped live session for promote of {id} in: {path}");
+    }
+
+    info!("agent_promote_to_active complete for: {path}, id: {id}");
+    Ok(resume_id)
+}
+
+/// Reset the project's agent session: drop the live process and archive the
+/// transcript.
+///
+/// The next `agent_start_loop` starts a fresh conversation (no `--resume`).
+/// The archived transcript is preserved as `archive-<ts>.jsonl` for history.
+#[tauri::command]
+pub async fn agent_reset_session(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    debug!("agent_reset_session called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+
+    // Remove the live session from the map. The Arc's last reference drops
+    // here → `ClaudeSession::Drop` closes stdin and reaps the child. The map
+    // is keyed by the canonical root (installed by the agent pipeline).
+    let removed = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(&root)
+        .is_some();
+    if removed {
+        debug!("dropped live claude session for: {path}");
+    }
+
+    // Archive the transcript regardless of whether a live session existed —
+    // a reset should always mean "next Start is fresh".
+    conversation::archive_conversation(&root)?;
+
+    info!("agent_reset_session complete for: {path}");
+    Ok(())
+}
+
+/// Wire shape of a single answer as sent by the frontend
+/// (`agent_answer_question`'s `answers` map value).
+///
+/// `labels` carries the selected option label(s); `other_text` carries the
+/// free-text "Other…" value when the user typed one instead of (or alongside)
+/// picking a canned option. Both optional so the frontend can send whichever
+/// applies.
+#[derive(Debug, Deserialize)]
+pub struct AnswerWire {
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub other_text: Option<String>,
+}
+
+/// Answer a pending `AskUserQuestion` for the given project.
+///
+/// Called by the frontend when the user submits the question card. Pops the
+/// oneshot sender from the per-project `pending_answers` slot and sends the
+/// answers — this wakes the read loop (parked in
+/// `ClaudeSession::answer_ask_user_question`), which writes the
+/// `control_response` with `updatedInput.answers` and the turn resumes.
+///
+/// Returns an error if no question is pending for this project (the user
+/// submitted without a prompt, or the turn already ended/timed out).
+#[tauri::command]
+pub async fn agent_answer_question(
+    path: String,
+    request_id: String,
+    answers: HashMap<String, AnswerWire>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!(
+        "agent_answer_question called for path: {path}, request_id: {request_id}, {} answers",
+        answers.len()
+    );
+    let repo_path = PathBuf::from(&path);
+
+    // Pop the sender for this project. There's at most one pending question at
+    // a time (Claude blocks on each), so this is a single take of the sender
+    // field — the slot entry is cleared entirely so `agent_pending_question`
+    // stops reporting it as pending.
+    let sender = {
+        let guard = state
+            .pending_answers
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        guard
+            .get(&repo_path)
+            .and_then(|slot| {
+                slot.lock()
+                    .ok()
+                    .and_then(|mut g| g.take())
+            })
+            .and_then(|pending| pending.sender)
+            .ok_or_else(|| {
+                AppError::Agent(
+                    "no pending question for this project (it may have timed out or already been answered)".into(),
+                )
+            })?
+    };
+
+    // Convert the wire answers into the backend type and send. The sender
+    // drops on send, so the slot is now empty for the next question.
+    let mapped: QuestionAnswers = answers
+        .into_iter()
+        .map(|(q, a)| {
+            (
+                q,
+                crate::claude_session::QuestionAnswer {
+                    labels: a.labels,
+                    other_text: a.other_text.filter(|t| !t.trim().is_empty()),
+                },
+            )
+        })
+        .collect();
+
+    sender.send(mapped).map_err(|_| {
+        AppError::Agent(
+            "the pending question is no longer waiting for an answer (turn ended)".into(),
+        )
+    })?;
+
+    info!("agent_answer_question delivered for: {path}");
+    Ok(())
+}
+
+/// Wire shape of the user's manual-approval verdict, as sent by the frontend
+/// (`agent_answer_permission`'s `decision` arg).
+///
+/// `allow: true` → run the tool; `allow: false` → deny it. `reason` is
+/// optional and only meaningful on a deny (it's surfaced to the model as the
+/// deny message). Mirrors `AnswerWire`'s role for `agent_answer_question`.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalWire {
+    pub allow: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Resolve a pending manual-approval request for the given project.
+///
+/// Called by the frontend when the user clicks Allow or Deny on the approval
+/// card. Pops the oneshot sender from the per-project `pending_permissions`
+/// slot and sends the `Decision` — this wakes the read loop (parked in
+/// `ClaudeSession::answer_manual_permission`), which writes the matching
+/// `control_response` and the turn resumes (or, on deny, recovers).
+///
+/// Returns an error if no approval is pending for this project (the user
+/// clicked after the turn ended/timed out, or there was never a prompt).
+#[tauri::command]
+pub async fn agent_answer_permission(
+    path: String,
+    request_id: String,
+    decision: ApprovalWire,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!(
+        "agent_answer_permission called for path: {path}, request_id: {request_id}, allow: {}",
+        decision.allow
+    );
+    let repo_path = PathBuf::from(&path);
+
+    // Pop the sender for this project. At most one pending approval at a time
+    // (Claude blocks on each control_request), so this is a single take of the
+    // sender field — the slot entry is cleared entirely so
+    // `agent_pending_permission` stops reporting it as pending.
+    let sender = {
+        let guard = state
+            .pending_permissions
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        guard
+            .get(&repo_path)
+            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+            .and_then(|pending| pending.sender)
+            .ok_or_else(|| {
+                AppError::Agent(
+                    "no pending permission approval for this project (it may have timed out or already been answered)".into(),
+                )
+            })?
+    };
+
+    // Convert the wire verdict into the policy's `Decision` vocabulary — the
+    // single source of truth the read loop writes back. A deny with no reason
+    // gets a generic message so the model always sees *something*.
+    let verdict = if decision.allow {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Deny(
+            decision
+                .reason
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| String::from("denied by user")),
+        )
+    };
+
+    sender.send(verdict).map_err(|_| {
+        AppError::Agent(
+            "the pending approval is no longer waiting for an answer (turn ended)".into(),
+        )
+    })?;
+
+    info!("agent_answer_permission delivered for: {path}");
+    Ok(())
+}
+
+/// Persist a permission allow-rule into the project's `.claude/settings.local.json`.
+///
+/// "Always allow" affordance for the manual-approval card: alongside the
+/// per-call Allow/Deny verdict, the user can ask LoopDeck to remember the
+/// decision for future calls of the same tool/command. This writes the rule
+/// into `permissions.allow[]` of the **local** settings file (gitignored by
+/// Claude Code convention — machine-specific, never shared), deduped against
+/// any rules already present.
+///
+/// The rule string is built by the frontend (it has the parsed tool input and
+/// mirrors the `describeTool` field extraction) in the canonical Claude Code
+/// format, e.g. `Bash(docker:*)`, `Read(*)`, `mcp__server__tool`. The format is
+/// the same one `skills::setup_hooks` seeds into `settings.json` (project
+/// scope) at `CURATED_ALLOW` — local + project are merged by Claude Code's own
+/// settings loader.
+///
+/// **Effect timing:** settings are loaded at `ClaudeSession::spawn`, so the
+/// rule takes effect on the *next* spawned session (after a reset/restart, or
+/// once the live process exits). It does NOT auto-allow the currently-parked
+/// approval — that's resolved separately by `agent_answer_permission` writing
+/// the `control_response`. The rule just prevents the prompt from reappearing
+/// for future calls. Both calls are made by the frontend on "Always allow".
+///
+/// Idempotent: re-adding an existing rule is a no-op (the dedup preserves the
+/// original write order). Creates `.claude/` and the file if absent.
+#[tauri::command]
+pub async fn agent_add_allow_rule(
+    path: String,
+    rule: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("agent_add_allow_rule called for path: {path}, rule: {rule}");
+    // Resolve the canonical, registered root (PRD FR3) before writing the
+    // project's `.claude/settings.local.json`. (Local var is `proj_root` to
+    // avoid clashing with the JSON `root` value below.)
+    let proj_root = resolve_root(&state, &path)?;
+    let claude_dir = proj_root.join(".claude");
+    let settings_path = claude_dir.join("settings.local.json");
+
+    // Load existing settings (or start fresh). A missing file or unparseable
+    // body is fine — we treat it as `{}` and (re)write a clean file. This
+    // recovers gracefully from a hand-corrupted local settings file.
+    let mut root: serde_json::Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Ensure `permissions` is an object and `permissions.allow` is an array,
+    // mirroring the structure `skills::setup_hooks` writes into settings.json.
+    if root.get("permissions").is_none() {
+        root["permissions"] = serde_json::json!({});
+    }
+    let allow_arr = root["permissions"]["allow"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    // Dedup: only push if the rule isn't already present. Preserves existing
+    // order (curated entries stay first, user-added rules append).
+    let mut existing: Vec<serde_json::Value> = allow_arr;
+    let already_present = existing.iter().any(|v| v.as_str() == Some(rule.as_str()));
+    if !already_present {
+        existing.push(serde_json::Value::from(rule));
+    }
+    root["permissions"]["allow"] = serde_json::Value::Array(existing);
+
+    // Write back, pretty-printed for readability / low-diff manual edits.
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| AppError::Config(format!("failed to create .claude dir: {e}")))?;
+    let formatted = serde_json::to_string_pretty(&root)
+        .map_err(|e| AppError::Config(format!("JSON serialization error: {e}")))?;
+    std::fs::write(&settings_path, formatted)
+        .map_err(|e| AppError::Config(format!("failed to write settings.local.json: {e}")))?;
+
+    if already_present {
+        info!("agent_add_allow_rule rule already present in {settings_path:?} — no-op");
+    } else {
+        info!("agent_add_allow_rule wrote rule to {settings_path:?}");
+    }
+    Ok(())
+}
+
+/// Gracefully interrupt the in-flight turn for a project.
+///
+/// Called by the frontend's Stop button. Pops the oneshot sender from the
+/// per-project `interrupt_slots` and fires it; the streaming read loop (which
+/// `select!`s on the receiver) wakes, writes the graceful `interrupt`
+/// control_request to the live process, and ends the turn. The live process
+/// and its conversation context survive (unlike `agent_reset_session`, which
+/// kills both) — the next send resumes the same conversation.
+///
+/// Returns `Ok(())` whether or not a turn was in flight: no-op when idle is
+/// the friendlier contract for a UI button (the user just sees "stopped").
+/// Returns an error only on state corruption (lock poisoned).
+///
+/// **Limitation:** if the turn is currently parked on an AskUserQuestion or
+/// manual-approval card (off `read_line`), the interrupt isn't observed this
+/// turn — the user should dismiss the card instead. The next turn picks up
+/// the interrupt slot fresh.
+#[tauri::command]
+pub async fn agent_interrupt(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    debug!("agent_interrupt called for path: {path}");
+    let repo_path = PathBuf::from(&path);
+
+    // Pop + fire the sender. There's at most one per project (cleared at turn
+    // end), so this is a single take. `send` failing means the receiver was
+    // already dropped (turn ended between the UI click and here) — treat as a
+    // no-op success so the button feels responsive either way.
+    let fired = {
+        let guard = state
+            .interrupt_slots
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        guard
+            .get(&repo_path)
+            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+            .map(|sender| sender.send(()).is_ok())
+    };
+
+    if !fired.unwrap_or(false) {
+        debug!("agent_interrupt: no in-flight turn for {path} (no-op)");
+    } else {
+        info!("agent_interrupt fired for: {path}");
+    }
+    Ok(())
+}
+
+/// Report whether an agent turn is currently in flight for a project.
+///
+/// Used by the frontend to reconcile `busy` state after navigating away and
+/// back to the Agent page mid-turn. Without it, the unmounted AgentPanel loses
+/// the streaming thread entirely; this command lets a freshly-mounted panel
+/// honestly report "still working" and poll the transcript until it lands.
+#[tauri::command]
+pub async fn agent_is_busy(path: String, state: State<'_, AppState>) -> Result<bool, AppError> {
+    Ok(project_busy(&state, &PathBuf::from(&path)))
+}
+
+// ── Pending-interaction payloads (reconciliation after navigation) ───────────
+//
+// When an AskUserQuestion or manual-approval request parks the turn, the
+// request payload now lives in `AppState.pending_*` alongside the oneshot
+// sender (see `PendingQuestion` / `PendingPermission`). These commands expose
+// the payload without consuming the sender, so a freshly-mounted AgentPanel —
+// whose predecessor's Tauri Channel (and thus the original parking event) was
+// lost on unmount — can re-materialize the card.
+
+/// Serializable payload for a pending manual-approval request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPermissionInfo {
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: String,
+}
+
+/// Serializable payload for a pending AskUserQuestion request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingQuestionInfo {
+    pub request_id: String,
+    pub questions: Vec<crate::agents::AskUserQuestionSpec>,
+}
+
+/// Read the pending manual-approval payload for a project, if any.
+///
+/// Does NOT consume the sender — only the payload. The frontend uses this to
+/// re-render the Allow/Deny card after navigating away and back. Returns `None`
+/// when no approval is pending.
+#[tauri::command]
+pub async fn agent_pending_permission(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PendingPermissionInfo>, AppError> {
+    let repo_path = PathBuf::from(&path);
+    let guard = state
+        .pending_permissions
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard.get(&repo_path).and_then(|slot| {
+        slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingPermissionInfo {
+                request_id: p.request_id.clone(),
+                tool_name: p.tool_name.clone(),
+                input: p.input.clone(),
+            })
+        })
+    }))
+}
+
+/// Read the pending AskUserQuestion payload for a project, if any.
+///
+/// Does NOT consume the sender — only the payload. The frontend uses this to
+/// re-render the question card after navigating away and back. Returns `None`
+/// when no question is pending.
+#[tauri::command]
+pub async fn agent_pending_question(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PendingQuestionInfo>, AppError> {
+    let repo_path = PathBuf::from(&path);
+    let guard = state
+        .pending_answers
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard.get(&repo_path).and_then(|slot| {
+        slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingQuestionInfo {
+                request_id: p.request_id.clone(),
+                questions: p.questions.clone(),
+            })
+        })
+    }))
+}
+
+// ── Loop-prompt builder ─────────────────────────────────────────────────────
+
+/// Truncate a prompt for logging — shows the first 200 chars so the log line
+/// is useful (which step is being sent) without dumping the entire prompt.
+fn truncate_prompt(s: &str) -> String {
+    const MAX: usize = 200;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..MAX])
+    }
+}
+
+/// Build the prompt that kicks off the next development loop.
+///
+/// Scans `.loopdeck/loops.md` raw text for the first unchecked `- [ ]` under
+/// `## Next Steps` (the structured `memory::parse_loops` flattens checked and
+/// unchecked steps together, so we read the raw file here to preserve the
+/// distinction). Falls back to a "propose the next loop" prompt when every
+/// step is done or there is no `loops.md` yet.
+fn build_next_loop_prompt(path: &Path) -> String {
+    let next_step = next_unchecked_loop_step(path);
+
+    match next_step {
+        Some(step) => format!(
+            "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
+             skill conventions. Read `.loopdeck/loops.md` for full context. The next \
+             unchecked step is: \"{step}\". Implement it. When done, update \
+             `.loopdeck/loops.md` (mark the step `[x]`, refresh `## Current`) and \
+             append any architectural decisions to `.loopdeck/decisions.md` per the \
+             memory convention."
+        ),
+        None => String::from(
+            "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
+             skill conventions. Review `.loopdeck/loops.md`, then propose and start \
+             the next loop. When done, update `.loopdeck/loops.md` (refresh \
+             `## Current`, add new steps under `## Next Steps`) and append any \
+             architectural decisions to `.loopdeck/decisions.md` per the memory \
+             convention.",
+        ),
+    }
+}
+
+/// Scan `.loopdeck/loops.md` for the first unchecked `- [ ]` step under
+/// `## Next Steps`. Returns `None` if the file is missing, the section is
+/// absent, or every step is already checked.
+fn next_unchecked_loop_step(path: &Path) -> Option<String> {
+    let content = limits::read_bounded_to_string(
+        path.join(".loopdeck").join("loops.md"),
+        limits::SPEC_MAX_BYTES,
+    )
+    .ok()?;
+
+    // Walk to the `## Next Steps` section, then read lines until the next
+    // `## ` heading. Return the first `- [ ]` item in that window.
+    let mut in_next_steps = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_next_steps = trimmed.eq_ignore_ascii_case("## Next Steps");
+            continue;
+        }
+        if in_next_steps {
+            if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+                return Some(rest.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+// ── Transient-error retry wrappers ─────────────────────────────────────────
+//
+// The `claude` CLI surfaces a gateway `529 overloaded` (or similar transient
+// failure) as a normal `Ok(AgentResponse { is_error: true, result: "API Error:
+// 529 ..." })` — it doesn't crash. These wrappers re-send the same prompt with
+// exponential backoff until the turn succeeds, the error turns out to be
+// non-transient (auth, bad request), or `retry::MAX_ATTEMPTS` is exhausted.
+// Non-transient errors are returned immediately (retrying won't help) and left
+// for the caller's `is_error` check to convert into an `Err`.
+//
+// Transcript recording stays OUT of these wrappers: the pipeline helpers record
+// the user turn once before and the (final) assistant turn once after, so a
+// retried turn appears as a single exchange, not N.
+
+/// Send a prompt with retry on transient gateway overload.
+///
+/// Wraps [`ClaudeSession::send_message`]: loops until a non-retryable outcome
+/// (success, non-overload error, or exhausted retries) and returns the final
+/// `AgentResponse`. The response may still carry `is_error: true` if every
+/// attempt overloaded or the failure was non-transient — the caller decides
+/// whether to propagate that as an `Err`.
+async fn send_with_retry(
+    session: &mut ClaudeSession,
+    prompt: &str,
+    question_slot: &crate::claude_session::QuestionSlot,
+    permission_slot: &crate::claude_session::PermissionSlot,
+    interrupt_slot: &crate::claude_session::InterruptSlot,
+) -> Result<AgentResponse, AppError> {
+    // `attempt` is the 0-based index of the attempt that just ran. It doubles
+    // as the retry count via `retry::backoff_ms(attempt)`.
+    let mut attempt: u32 = 0;
+    loop {
+        let response = session
+            .send_message(prompt, question_slot, permission_slot, interrupt_slot)
+            .await?;
+
+        // Done unless this is a retryable transient overload.
+        if !(response.is_error && retry::is_overloaded(&response.result)) {
+            return Ok(response);
+        }
+
+        // Overloaded — back off and retry if attempts remain.
+        match retry::backoff_ms(attempt) {
+            Some(delay) => {
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    delay_ms = delay,
+                    "provider overloaded; retrying in {} ms: {}",
+                    delay,
+                    response.result.trim(),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                attempt += 1;
+            }
+            None => {
+                warn!(
+                    max_attempts = MAX_ATTEMPTS,
+                    "provider overloaded; exhausted {} attempts, surfacing error: {}",
+                    MAX_ATTEMPTS,
+                    response.result.trim(),
+                );
+                return Ok(response);
+            }
+        }
+    }
+}
+
+/// Streaming send with retry on transient gateway overload.
+///
+/// Wraps [`ClaudeSession::send_message_streaming`]. Between a failed attempt
+/// and its retry, emits a [`ClaudeEvent::Retrying`] so the UI can show
+/// "Retrying 2/4 in 4s…" — otherwise the frontend would see a terminal
+/// `Result{is_error:true}` followed, silently, by a second `Result`. The final
+/// `Result` event (success or terminal failure) remains authoritative.
+async fn send_streaming_with_retry(
+    session: &mut ClaudeSession,
+    prompt: &str,
+    channel: &Channel<ClaudeEvent>,
+    question_slot: &crate::claude_session::QuestionSlot,
+    permission_slot: &crate::claude_session::PermissionSlot,
+    interrupt_slot: &crate::claude_session::InterruptSlot,
+) -> Result<AgentResponse, AppError> {
+    let mut attempt: u32 = 0;
+    loop {
+        let response = session
+            .send_message_streaming(
+                prompt,
+                channel,
+                question_slot,
+                permission_slot,
+                interrupt_slot,
+            )
+            .await?;
+
+        if !(response.is_error && retry::is_overloaded(&response.result)) {
+            return Ok(response);
+        }
+
+        match retry::backoff_ms(attempt) {
+            Some(delay) => {
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    delay_ms = delay,
+                    "provider overloaded [streaming]; retrying in {} ms: {}",
+                    delay,
+                    response.result.trim(),
+                );
+                // `attempt` is the 0-based index of the attempt that just
+                // failed, so the upcoming retry is the 1-based `attempt + 2`.
+                let _ = channel.send(ClaudeEvent::Retrying {
+                    attempt: attempt + 2,
+                    max_attempts: MAX_ATTEMPTS,
+                    backoff_ms: delay,
+                    error: response.result.clone(),
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                attempt += 1;
+            }
+            None => {
+                warn!(
+                    max_attempts = MAX_ATTEMPTS,
+                    "provider overloaded [streaming]; exhausted {} attempts, surfacing error: {}",
+                    MAX_ATTEMPTS,
+                    response.result.trim(),
+                );
+                return Ok(response);
+            }
+        }
+    }
+}
+
+// ── Interruption recovery ──────────────────────────────────────────────────
+//
+// Each send pipeline records the user turn *before* sending (crash-safety),
+// then the assistant turn *after*. A send that returns `Err` — a transport
+// failure, child exit, or spawn failure before any `result` event — skips the
+// assistant-turn recording, orphaning the user turn. (An `Ok(response)` with
+// `is_error: true`, e.g. auth failure or exhausted 529 retries, is NOT an
+// orphan: the assistant turn is recorded from it before the error propagates.)
+// Reconciling the orphan to a persisted `interrupted` marker keeps the
+// transcript truthful instead of leaving a hanging unanswered prompt.
+
+/// On a mid-turn send failure, mark the just-orphaned user turn `interrupted`.
+///
+/// Best-effort wrapper over [`conversation::reconcile_interrupted`]: a write
+/// failure here is only logged, and the caller's original send error still
+/// propagates unchanged. Safe to call from the send-failure path because the
+/// failed send still holds the per-project lock — no concurrent send can be
+/// appending, so the trailing user turn is a genuine orphan, not an in-flight
+/// turn mid-window.
+fn mark_turn_interrupted(path: &Path) {
+    match conversation::reconcile_interrupted(path) {
+        Ok(true) => info!("marked interrupted turn in transcript: {}", path.display()),
+        Ok(false) => {}
+        Err(e) => warn!(
+            "failed to reconcile interrupted turn for {}: {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Shared send pipeline used by `agent_start_loop` and `agent_send_message`.
+///
+/// Records the user turn to the transcript *before* sending (so a crash
+/// mid-turn still captures intent), sends it, records the assistant turn, and
+/// returns the structured response. The transcript append is best-effort: a
+/// write failure is logged but doesn't fail the turn — the live result still
+/// reaches the UI.
+async fn send_and_record(
+    state: &AppState,
+    path: &Path,
+    prompt: &str,
+) -> Result<AgentResponse, AppError> {
+    let session_arc = with_session(state, path).await?;
+    let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
+
+    // 1. Record the user turn first (crash-safety: intent survives).
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
+        tracing::warn!("failed to append user turn to transcript: {e}");
+    }
+
+    // 2. Send + receive (with retry on transient 529 overload). The `Err` arm
+    //    here is a transport/child/spawn failure *before* any result event —
+    //    distinct from an `Ok(is_error)` outcome (auth failure, exhausted 529
+    //    retries), which records a real assistant turn at step 3 and so is not
+    //    an orphan. The `Err` path skips that recording, leaving the user turn
+    //    from step 1 dangling; reconcile it to a truthful `interrupted` state
+    //    before re-propagating so the transcript never hangs unanswered.
+    let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
+        Ok(r) => r,
+        Err(e) => {
+            mark_turn_interrupted(path);
+            return Err(e);
+        }
+    };
+
+    // 3. Record the assistant turn (best-effort). Done BEFORE the error check
+    //    below so a failed turn (e.g. "Not logged in") still lands in the
+    //    transcript — the user sees the error bubble AND its session_id is
+    //    captured for a potential resume after they fix auth. Includes the
+    //    model's thinking chain and tool calls so the transcript records how
+    //    the answer was reached, not just the final summary.
+    let assistant_turn = ConversationTurn::assistant(
+        response.result.clone(),
+        response.session_id.clone(),
+        response.is_error,
+        response.usage.clone(),
+        response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
+    );
+    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+        tracing::warn!("failed to append assistant turn to transcript: {e}");
+    }
+
+    // 4. Propagate claude-level errors as a real Err. claude doesn't crash on
+    //    auth/config failures — it completes the stream with `is_error: true`
+    //    and a human-readable `result` (e.g. "Not logged in · Please run
+    //    /login"). Converting that to an AppError here makes the failure
+    //    un-ignorable at the IPC boundary: every caller surfaces it instead of
+    //    silently treating the turn as a success.
+    if response.is_error {
+        return Err(AppError::Agent(response.result.clone().trim().to_string()));
+    }
+
+    Ok(response)
+}
+
+/// Streaming variant of `send_and_record`.
+///
+/// Records the user turn, sends via `send_message_streaming` (which emits
+/// per-block `ClaudeEvent`s on the channel as they arrive), then records the
+/// assistant turn from the returned `AgentResponse`. The channel carries the
+/// terminal `ClaudeEvent::Result` so the frontend gets the full aggregated
+/// response inline — the return value here is just for transcript recording.
+async fn send_and_record_streaming(
+    state: &AppState,
+    path: &Path,
+    prompt: &str,
+    channel: &Channel<ClaudeEvent>,
+) -> Result<(), AppError> {
+    let session_arc = with_session(state, path).await?;
+    let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
+
+    // 1. Record the user turn first (crash-safety: intent survives).
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
+        tracing::warn!("failed to append user turn to transcript: {e}");
+    }
+
+    // 2. Send + stream (with retry on transient 529 overload). See the
+    //    non-streaming pipelines for the interruption-recovery rationale: a
+    //    transport/child failure (`Err`) orphans the user turn from step 1, so
+    //    we reconcile it to `interrupted` before re-propagating the error.
+    let response = match send_streaming_with_retry(
+        &mut session,
+        prompt,
+        channel,
+        &qslot,
+        &pslot,
+        &islot,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            mark_turn_interrupted(path);
+            return Err(e);
+        }
+    };
+
+    // 3. Record the assistant turn (best-effort). Includes thinking + tool
+    //    calls so the persisted transcript captures the full reasoning trail,
+    //    not just the final summary text.
+    let assistant_turn = ConversationTurn::assistant(
+        response.result.clone(),
+        response.session_id.clone(),
+        response.is_error,
+        response.usage.clone(),
+        response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
+    );
+    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+        tracing::warn!("failed to append assistant turn to transcript: {e}");
+    }
+
+    Ok(())
+}
+
+// ── Fresh-start pipeline (agent_start_loop[_streaming]) ────────────────────
+//
+// Start always begins a NEW conversation: drop any live session, archive the
+// transcript, spawn a fresh claude process WITHOUT `--resume`. This is the
+// deliberate contrast with `with_session` (used by `agent_send_message`),
+// which reuses the live process or `--resume`s after a restart.
+//
+// Concurrency: Start uses `try_lock` — if a turn is already in flight on this
+// project, the start is rejected immediately ("agent is busy") instead of
+// queueing. The successful `try_lock` is also the proof that the prior session
+// is idle and therefore safe to drop and replace mid-map. Send, by contrast,
+// uses `lock().await` and queues.
+
+/// Force-spawn a fresh `ClaudeSession` for `path`, replacing any live one.
+///
+/// 1. `try_lock` the existing arc (if any). `Err` ⇒ a turn is in flight on the
+///    current session → reject with "agent is busy" (Start must not interrupt a
+///    running turn). `Ok` ⇒ the old session is provably idle.
+/// 2. Drop the old arc from the map (last reference drops → `Drop` closes stdin
+///    → claude exits → child reaped).
+/// 3. `archive_conversation` — rotate `active.jsonl` aside so the new
+///    conversation begins fresh.
+/// 4. Spawn a NEW `ClaudeSession` with `resume_session_id = None` (never resume
+///    on Start), insert its arc into the map, and return the arc.
+///
+/// Returns an owned `Arc` (mirroring `with_session`'s contract) so the caller
+/// `.lock().await`s it. The busy-check `try_lock` in phase 1 only proves the
+/// *old* session was idle; between then and the caller taking the new arc's
+/// lock, a concurrent producer could in principle race — but the only producers
+/// are Start/Send, and the frontend disables both while a turn is in flight, so
+/// the race window is closed in practice for this single-user app.
+async fn spawn_fresh(
+    state: &AppState,
+    path: &Path,
+) -> Result<Arc<tokio::sync::Mutex<ClaudeSession>>, AppError> {
+    // ── Phase 1: try_lock the existing arc to prove it's idle. ──
+    // Scoped so the map's std Mutex guard is dropped before we await anything.
+    {
+        let map_guard = state
+            .claude_sessions
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        if let Some(arc) = map_guard.get(path) {
+            // Try to acquire the per-project turn lock non-blockingly. Holding
+            // the std Mutex here is fine — try_lock is synchronous, no .await.
+            if arc.try_lock().is_err() {
+                return Err(AppError::Agent(
+                    "agent is busy — wait for the current turn to finish before starting a new conversation".into(),
+                ));
+            }
+            // try_lock succeeded ⇒ idle. The guard drops here; we proceed to
+            // replace the session below.
+        }
+    }
+
+    // ── Phase 2: drop the old arc from the map (reaps the child via Drop). ──
+    let dropped = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(path);
+    if dropped.is_some() {
+        debug!(
+            "dropped live claude session for fresh start: {}",
+            path.display()
+        );
+    }
+
+    // ── Phase 3: archive the transcript (rotate active.jsonl aside). ──
+    // Surfaced as a real error: the user asked for a fresh conversation and
+    // didn't get one.
+    conversation::archive_conversation(path)?;
+
+    // ── Phase 4: spawn fresh (no --resume) and insert. ──
+    let agent_config = resolve_agent_config(state)?;
+
+    let session = ClaudeSession::spawn(
+        &path.to_path_buf(),
+        &agent_config,
+        None,
+        crate::permission::PermissionPolicy::confirm_changes(),
+    )?;
+    let arc = Arc::new(tokio::sync::Mutex::new(session));
+    state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .insert(path.to_path_buf(), Arc::clone(&arc));
+
+    Ok(arc)
+}
+
+/// Fresh-start send pipeline used by `agent_start_loop`. Mirrors
+/// `send_and_record` but spawns a brand-new session (no `--resume`) and rejects
+/// when busy instead of queueing. See `spawn_fresh` for the lifecycle.
+async fn start_fresh_and_record(
+    state: &AppState,
+    path: &Path,
+    prompt: &str,
+) -> Result<AgentResponse, AppError> {
+    let session_arc = spawn_fresh(state, path).await?;
+    let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
+
+    // 1. Record the user turn first (crash-safety: intent survives).
+    //    Marked `user_loop` — this prompt was auto-built from
+    //    `.loopdeck/loops.md` by `build_next_loop_prompt`, not typed by the
+    //    human. The UI renders these as compact system rows instead of
+    //    user chat bubbles so they don't drown out real messages.
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
+        tracing::warn!("failed to append user turn to transcript: {e}");
+    }
+
+    tracing::info!(
+        "sending loop prompt ({} chars) to claude: {:?}",
+        prompt.len(),
+        truncate_prompt(prompt),
+    );
+
+    // 2. Send + receive (with retry on transient 529 overload). The `Err` arm
+    //    here is a transport/child/spawn failure *before* any result event —
+    //    distinct from an `Ok(is_error)` outcome (auth failure, exhausted 529
+    //    retries), which records a real assistant turn at step 3 and so is not
+    //    an orphan. The `Err` path skips that recording, leaving the user turn
+    //    from step 1 dangling; reconcile it to a truthful `interrupted` state
+    //    before re-propagating so the transcript never hangs unanswered.
+    let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
+        Ok(r) => r,
+        Err(e) => {
+            mark_turn_interrupted(path);
+            return Err(e);
+        }
+    };
+
+    // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
+    let assistant_turn = ConversationTurn::assistant(
+        response.result.clone(),
+        response.session_id.clone(),
+        response.is_error,
+        response.usage.clone(),
+        response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
+    );
+    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+        tracing::warn!("failed to append assistant turn to transcript: {e}");
+    }
+
+    // 4. Propagate claude-level errors (is_error: true) as a real Err so every
+    //    caller surfaces them instead of silently treating the turn as success.
+    if response.is_error {
+        return Err(AppError::Agent(response.result.clone().trim().to_string()));
+    }
+
+    Ok(response)
+}
+
+/// Streaming variant of `start_fresh_and_record`, used by
+/// `agent_start_loop_streaming`. Same fresh-start + reject-when-busy semantics.
+async fn start_fresh_and_record_streaming(
+    state: &AppState,
+    path: &Path,
+    prompt: &str,
+    channel: &Channel<ClaudeEvent>,
+) -> Result<(), AppError> {
+    let session_arc = spawn_fresh(state, path).await?;
+    let mut session = session_arc.lock().await;
+    let qslot = question_slot(state, path)?;
+    let pslot = permission_slot(state, path)?;
+    let islot = interrupt_slot(state, path)?;
+
+    // 1. Record the user turn first (crash-safety: intent survives).
+    //    Marked `user_loop` (see `start_fresh_and_record` for rationale).
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
+        tracing::warn!("failed to append user turn to transcript: {e}");
+    }
+
+    tracing::info!(
+        "sending loop prompt ({} chars) to claude [streaming]: {:?}",
+        prompt.len(),
+        truncate_prompt(prompt),
+    );
+
+    // 2. Send + stream (with retry on transient 529 overload). See the
+    //    non-streaming pipelines for the interruption-recovery rationale: a
+    //    transport/child failure (`Err`) orphans the user turn from step 1, so
+    //    we reconcile it to `interrupted` before re-propagating the error.
+    let response = match send_streaming_with_retry(
+        &mut session,
+        prompt,
+        channel,
+        &qslot,
+        &pslot,
+        &islot,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            mark_turn_interrupted(path);
+            return Err(e);
+        }
+    };
+
+    // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
+    let assistant_turn = ConversationTurn::assistant(
+        response.result.clone(),
+        response.session_id.clone(),
+        response.is_error,
+        response.usage.clone(),
+        response.duration_ms,
+        response.thinking.clone(),
+        response.tool_calls.clone(),
+        response.blocks.clone(),
+        response.tasks.clone(),
+    );
+    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+        tracing::warn!("failed to append assistant turn to transcript: {e}");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_unchecked_step_finds_first_unchecked() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
+        std::fs::write(
+            dir.join(".loopdeck").join("loops.md"),
+            "# Loops\n\n## Current\n\n_No active loop._\n\n## Next Steps\n\
+             - [x] Done thing\n\
+             - [ ] First open step\n\
+             - [ ] Second open step\n\n## History\n",
+        )
+        .unwrap();
+
+        let step = next_unchecked_loop_step(&dir);
+        assert_eq!(step.as_deref(), Some("First open step"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn next_unchecked_step_none_when_all_done() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
+        std::fs::write(
+            dir.join(".loopdeck").join("loops.md"),
+            "# Loops\n\n## Next Steps\n- [x] one\n- [x] two\n",
+        )
+        .unwrap();
+
+        assert!(next_unchecked_loop_step(&dir).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn next_unchecked_step_none_when_no_file() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(next_unchecked_loop_step(&dir).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn build_prompt_uses_step_when_present() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
+        std::fs::write(
+            dir.join(".loopdeck").join("loops.md"),
+            "## Next Steps\n- [ ] Wire up the thing\n",
+        )
+        .unwrap();
+
+        let prompt = build_next_loop_prompt(&dir);
+        assert!(prompt.contains("Wire up the thing"));
+        assert!(prompt.contains("loopdeck-orchestrator"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn build_prompt_falls_back_when_no_step() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let prompt = build_next_loop_prompt(&dir);
+        assert!(prompt.contains("propose and start"));
+        assert!(!prompt.contains("next unchecked step is"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

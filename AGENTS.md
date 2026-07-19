@@ -44,6 +44,18 @@ loopdeck/
 - **Frontend state**: Zustand with selector subscriptions, typed IPC wrappers (never raw `invoke()`)
 - **Error handling**: `thiserror` + manual `serde::Serialize` for structured IPC errors
 
+## Context Discipline (token cost)
+
+Several backend files are large (`commands.rs` ~30K tok, `claude_session.rs` ~24K,
+`conversation.rs` / `agents.rs` / `epic.rs` / `config.rs` each >12K). Re-reading
+them across iterations is the dominant token cost in long sessions.
+
+- **Do not re-read a file already read this session** — the contents are in
+  context; use `Grep` or offset-`Read` to locate a specific symbol.
+- **Prefer `Grep` over full `Read`** when you need one function or constant.
+- **Cite `file:line`** so the next turn doesn't re-read to verify.
+- Files past ~1500 lines should be flagged in `loops.md` for splitting.
+
 ## Development Commands
 
 ```bash

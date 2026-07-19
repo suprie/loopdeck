@@ -206,6 +206,16 @@ impl ConversationTurn {
     /// Build an assistant turn from an `AgentResponse`-shaped result, including
     /// the model's thinking chain, the tool calls it made during the turn, and
     /// any task lifecycle events observed.
+    //
+    // Each parameter maps 1:1 to a `ConversationTurn` field, so the constructor
+    // is just a field-wise projection with the empty-string filters applied —
+    // there is no natural grouping that would shrink the list without inventing
+    // a throwaway params struct. The ~30 call sites (mostly tests passing
+    // positional literals) would read worse as a struct literal, and the
+    // production sites in `commands/agent.rs` can't take `AgentResponse` by
+    // value because `response` is still read after the call. `too_many_arguments`
+    // is intentionally suppressible for constructors like this.
+    #[allow(clippy::too_many_arguments)]
     pub fn assistant(
         text: impl Into<String>,
         session_id: String,
@@ -233,6 +243,41 @@ impl ConversationTurn {
             tool_calls,
             blocks,
             tasks,
+        }
+    }
+
+    /// Build a synthetic assistant turn marking the preceding user turn as
+    /// **interrupted** — the turn never reached a terminal result because the
+    /// agent process exited mid-turn (app restart/crash, force-quit, or a
+    /// child/transport failure before any `result` event arrived).
+    ///
+    /// This is the terminal state [`reconcile_interrupted`] appends so the
+    /// transcript truthfully records incomplete work instead of leaving a
+    /// hanging unanswered prompt. `is_error: true` so the UI renders it with
+    /// the error styling (an interruption *is* a failure to produce a reply);
+    /// the body text makes clear it was an interruption, not a model error. No
+    /// `session_id` — no `result` event arrived to carry one, so a follow-up
+    /// turn re-spawns without `--resume` (matching `last_session_id`, which
+    /// skips turns with no id).
+    pub fn interrupted() -> Self {
+        Self {
+            ts: Utc::now().to_rfc3339(),
+            role: String::from("assistant"),
+            // Assistant turns carry no origin marker.
+            source: String::new(),
+            text: String::from(
+                "⏹ Interrupted — this turn did not complete. The agent process \
+                 exited before responding (app restart/crash or a child \
+                 failure). Send a new message to continue.",
+            ),
+            session_id: None,
+            is_error: true,
+            usage: None,
+            duration_ms: 0,
+            thinking: None,
+            tool_calls: Vec::new(),
+            blocks: Vec::new(),
+            tasks: Vec::new(),
         }
     }
 }
@@ -269,13 +314,17 @@ fn file_for_id(repo_path: &Path, id: &str) -> std::path::PathBuf {
 /// Lenient: a missing file returns an empty vec; lines that fail to parse
 /// are skipped (a truncated/corrupt append shouldn't hide the turns before it).
 ///
-/// **Orphan filtering:** because the user turn is appended *before* sending
-/// (crash-safety), a turn killed mid-flight (app crash, dev rebuild, force-quit)
-/// leaves a `user` turn with no following `assistant` reply. Such orphaned user
-/// turns are dropped here so the transcript only shows completed exchanges —
-/// the raw file keeps them for forensic purposes, but the UI never sees an
-/// unanswered prompt. A `user` turn is kept only if some `assistant` turn
-/// follows it anywhere later in the file.
+/// **Orphan filtering (defense-in-depth):** because the user turn is appended
+/// *before* sending (crash-safety), a turn killed mid-flight (app crash, dev
+/// rebuild, force-quit) leaves a `user` turn with no following `assistant`
+/// reply. [`reconcile_interrupted`] is the primary recovery: it runs at startup
+/// and on send failure to append a persisted `interrupted` marker, so the
+/// transcript normally ends in a terminal assistant turn by the time anything
+/// loads. This filter is the fallback for any orphan that still exists at load
+/// time (e.g. an orphan in an archive, or one not yet reconciled): it drops
+/// trailing unanswered `user` turns so the UI never shows a hanging prompt. A
+/// `user` turn is kept only if some `assistant` turn follows it anywhere later
+/// in the file.
 pub fn load_conversation(repo_path: &Path) -> Vec<ConversationTurn> {
     load_conversation_by_id(repo_path, "active")
 }
@@ -510,6 +559,82 @@ pub fn archive_conversation(repo_path: &Path) -> Result<(), std::io::Error> {
 
     std::fs::rename(&active, &target)?;
     Ok(())
+}
+
+// ── Interruption recovery ───────────────────────────────────────────────────
+//
+// The user turn is appended *before* the send (crash-safety), so a turn killed
+// mid-flight — app restart/crash, force-quit, or a child/transport failure that
+// aborts the send before any `result` event — leaves a trailing `user` turn in
+// `active.jsonl` with no following `assistant` reply. That orphan IS the signal
+// of incomplete work, so recovery is transcript-based: no separate run record
+// is persisted (PRD FR5 — "persist a separate run record only if
+// transcript-based recovery proves insufficient"; it does not).
+
+/// Mark a trailing orphaned user turn as `interrupted`.
+///
+/// Reads the active transcript's last line; if it is a `user` turn (an
+/// unanswered prompt — incomplete work from a restart or child failure), appends
+/// a persisted synthetic [`ConversationTurn::interrupted`] assistant turn so the
+/// transcript ends in a truthful terminal state instead of a hanging question.
+/// After this runs the in-memory busy/waiting state is inherently clear (it is
+/// ephemeral — fresh and empty on restart; the per-project lock is released once
+/// the failed send returns), and a new turn is unblocked: nothing is left
+/// parked. Returns `true` when a marker was appended (for logging), `false` on a
+/// no-op.
+///
+/// **Idempotent:** a no-op when the transcript is empty, missing, ends in an
+/// `assistant` turn (already terminal), or has a partial/corrupt tail (left to
+/// load-time leniency). Safe to call repeatedly.
+///
+/// **Call-site safety (no reconcile-on-load):** this must NOT be called from a
+/// read path like `load_conversation`. A legitimately in-flight turn spends
+/// seconds between appending its user turn and appending the assistant reply,
+/// and a concurrent read that reconciled in that window would wrongly mark a
+/// live turn interrupted. The two safe call sites are (1) startup — no turn is
+/// in flight on a fresh process, and (2) the send-failure path — the failed
+/// send still holds the per-project lock and the turn is definitively over.
+pub fn reconcile_interrupted(repo_path: &Path) -> Result<bool, std::io::Error> {
+    // Read the raw transcript (NO orphan filtering — we need to SEE the orphan
+    // to classify it). Bounded by `TRANSCRIPT_MAX_BYTES` per FR4; the extreme
+    // edge of an orphan sitting beyond that bound in a >16 MB transcript is not
+    // reconciled here and instead degrades to the load-time orphan filter.
+    let content = match limits::read_bounded_to_string(
+        active_file(repo_path),
+        limits::TRANSCRIPT_MAX_BYTES,
+    ) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    // Only the tail matters: a turn is "incomplete" iff the last recorded line
+    // is an unanswered user prompt. `next_back()` short-circuits from the end
+    // rather than walking the whole transcript.
+    let last_line = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back();
+    let Some(line) = last_line else {
+        return Ok(false); // empty transcript — nothing to reconcile
+    };
+    let turn: ConversationTurn = match serde_json::from_str(line) {
+        Ok(t) => t,
+        Err(e) => {
+            // Partial/corrupt tail (a crash mid-append). Leave it for the
+            // load-time lenient parser rather than guessing — earlier valid
+            // turns still load.
+            tracing::debug!("reconcile_interrupted: unparseable tail, skipping: {e}");
+            return Ok(false);
+        }
+    };
+    if turn.role != "user" {
+        return Ok(false); // already terminal (assistant turn, or interrupted marker)
+    }
+
+    append_turn(repo_path, &ConversationTurn::interrupted())?;
+    Ok(true)
 }
 
 /// The maximum length of the `first_user_excerpt` shown in the history list.
@@ -1078,6 +1203,210 @@ mod tests {
         assert!(
             turns.is_empty(),
             "unanswered prompts should all be filtered"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── reconcile_interrupted (interruption recovery) ─────────────────
+
+    #[test]
+    fn reconcile_appends_marker_for_trailing_orphan() {
+        // The headline case: a user turn with no reply (process died mid-turn).
+        // Reconcile must append an `interrupted` assistant turn so the
+        // transcript ends in a terminal state — and `true` is returned.
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("orphan q")).unwrap();
+
+        let reconciled = reconcile_interrupted(&dir).unwrap();
+        assert!(reconciled, "trailing orphan should be reconciled");
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns.len(), 2, "orphan user turn now has a reply");
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].text, "orphan q");
+        assert_eq!(turns[1].role, "assistant");
+        assert!(turns[1].is_error, "interrupted marker is an error turn");
+        assert!(
+            turns[1].session_id.is_none(),
+            "no result event → no session id"
+        );
+        assert!(turns[1].text.contains("Interrupted"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_noop_when_already_terminal() {
+        // A transcript ending in an assistant turn is already terminal —
+        // reconcile must be a no-op (return false, append nothing).
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
+        append_turn(
+            &dir,
+            &ConversationTurn::assistant(
+                "a",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+
+        let reconciled = reconcile_interrupted(&dir).unwrap();
+        assert!(!reconciled, "terminal transcript should not be touched");
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns.len(), 2, "unchanged");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_idempotent() {
+        // Reconciling twice must not stack two interrupted markers — the
+        // second call sees an assistant turn at the tail and is a no-op.
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("orphan q")).unwrap();
+
+        assert!(reconcile_interrupted(&dir).unwrap());
+        assert!(
+            !reconcile_interrupted(&dir).unwrap(),
+            "second reconcile is a no-op"
+        );
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns.len(), 2, "exactly one interrupted marker");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_noop_when_no_active_file() {
+        // Fresh project — no transcript at all. NotFound degrades to a no-op.
+        let dir = temp_repo();
+        let reconciled = reconcile_interrupted(&dir).unwrap();
+        assert!(!reconciled);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_noop_when_empty() {
+        // An empty active file (created but no turns) — nothing to reconcile.
+        let dir = temp_repo();
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        std::fs::write(active_file(&dir), "").unwrap();
+        assert!(!reconcile_interrupted(&dir).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_noop_on_partial_corrupt_tail() {
+        // A crash mid-append leaves a partial final line. Reconcile must NOT
+        // guess — it leaves the corrupt tail for load-time leniency (earlier
+        // valid turns still load) and returns a no-op.
+        let dir = temp_repo();
+        let valid_user = serde_json::to_string(&ConversationTurn::user("real q")).unwrap();
+        let valid_asst = serde_json::to_string(&ConversationTurn::assistant(
+            "real a",
+            "s1".into(),
+            false,
+            None,
+            1,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap();
+        let partial = r#"{"role":"user","text":"partia"#; // truncated, no newline
+        std::fs::create_dir_all(sessions_dir(&dir)).unwrap();
+        std::fs::write(
+            active_file(&dir),
+            format!("{valid_user}\n{valid_asst}\n{partial}"),
+        )
+        .unwrap();
+
+        assert!(
+            !reconcile_interrupted(&dir).unwrap(),
+            "partial tail should not be reconciled"
+        );
+        // The valid pair still loads; the partial tail is skipped at parse time.
+        assert_eq!(load_conversation(&dir).len(), 2);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_unblocks_new_turn_after_completed_pair_then_orphan() {
+        // Completed exchange followed by a killed follow-up. Reconcile marks
+        // ONLY the trailing orphan; the earlier pair is untouched. After
+        // reconcile, load shows a fully-terminal transcript (no orphans).
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q1")).unwrap();
+        append_turn(
+            &dir,
+            &ConversationTurn::assistant(
+                "a1",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+        append_turn(&dir, &ConversationTurn::user("killed follow-up")).unwrap();
+
+        assert!(reconcile_interrupted(&dir).unwrap());
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns.len(), 4);
+        assert_eq!(turns[2].text, "killed follow-up");
+        assert_eq!(turns[3].role, "assistant");
+        assert!(turns[3].is_error);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_marker_has_no_session_id_so_resume_skips_it() {
+        // A follow-up after an interruption must NOT --resume from the
+        // interrupted marker (it carries no session_id). `last_session_id`
+        // scans past it to the last real assistant id — verifying the contract
+        // relied on by `with_session`'s resume path.
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q1")).unwrap();
+        append_turn(
+            &dir,
+            &ConversationTurn::assistant(
+                "a1",
+                "sess-real".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+        append_turn(&dir, &ConversationTurn::user("killed")).unwrap();
+        reconcile_interrupted(&dir).unwrap();
+
+        assert_eq!(
+            last_session_id(&dir).as_deref(),
+            Some("sess-real"),
+            "interrupted marker (no id) must not shadow the last real session id"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

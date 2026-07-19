@@ -904,6 +904,11 @@ pub(crate) fn parse_stream_line(line: &str) -> Option<StreamEvent> {
 }
 
 /// Parse a full NDJSON string into a structured `AgentResponse`.
+///
+/// Test-only helper: drains a canned NDJSON blob into one `AgentResponse`. The
+/// production paths feed the `ResponseAccumulator` line-by-line as events
+/// arrive, so this whole-blob entry point has no non-test caller.
+#[cfg(test)]
 fn parse_response(ndjson: &str) -> Option<AgentResponse> {
     let mut acc = ResponseAccumulator::new();
     for line in ndjson.lines().map(str::trim).filter(|l| !l.is_empty()) {

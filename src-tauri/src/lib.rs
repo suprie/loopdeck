@@ -64,6 +64,30 @@ pub fn run() {
         tracing::warn!("failed to persist config after auth-token migration: {e}");
     }
 
+    // Reconcile interrupted sessions (PRD FR5). A turn killed mid-flight by a
+    // restart/crash leaves the user turn (appended before the send) with no
+    // following assistant reply — a trailing orphan in `active.jsonl`. Mark each
+    // such orphan `interrupted` now, before any IPC load, so the transcript
+    // truthfully records that the turn did not complete and a new turn is
+    // unblocked (the in-memory busy/waiting state is already clear — it is
+    // ephemeral and starts empty on a fresh process). This is the
+    // restart-recovery half; the send-failure half runs in the agent pipelines.
+    // Transcript-based, so no separate run record is persisted. Best-effort per
+    // project: a reconciliation failure is logged, never fatal.
+    for project in &config.projects {
+        match conversation::reconcile_interrupted(&project.path) {
+            Ok(true) => tracing::info!(
+                "reconciled interrupted session for {}",
+                project.path.display()
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "failed to reconcile interrupted session for {}: {e}",
+                project.path.display()
+            ),
+        }
+    }
+
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -75,47 +99,52 @@ pub fn run() {
             interrupt_slots: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
-            commands::list_dir_entries,
-            commands::search_project_files,
-            commands::list_skills,
-            commands::scan_directory,
-            commands::import_project,
-            commands::list_projects,
-            commands::get_project,
-            commands::update_description,
-            commands::remove_project,
-            commands::open_in_finder,
-            commands::open_in_terminal,
-            commands::regenerate_description,
-            commands::rescan_project,
-            commands::get_decisions,
-            commands::get_loops,
-            commands::get_epics,
-            commands::get_epics_by_milestone,
-            commands::promote_epic_loop,
-            commands::toggle_loop_step,
-            commands::toggle_prd_loop,
-            commands::read_spec_file,
-            commands::write_spec_file,
-            commands::get_agent_config,
-            commands::set_agent_config,
-            commands::clear_auth_token,
-            commands::agent_start_loop,
-            commands::agent_start_loop_streaming,
-            commands::agent_send_message,
-            commands::agent_send_message_streaming,
-            commands::agent_get_conversation,
-            commands::agent_list_conversations,
-            commands::agent_get_conversation_by_id,
-            commands::agent_promote_to_active,
-            commands::agent_reset_session,
-            commands::agent_answer_question,
-            commands::agent_answer_permission,
-            commands::agent_add_allow_rule,
-            commands::agent_interrupt,
-            commands::agent_is_busy,
-            commands::agent_pending_permission,
-            commands::agent_pending_question,
+            // Composer + scan (composer.rs)
+            commands::composer::list_dir_entries,
+            commands::composer::search_project_files,
+            commands::composer::list_skills,
+            commands::composer::scan_directory,
+            // Project management (project.rs)
+            commands::project::import_project,
+            commands::project::list_projects,
+            commands::project::get_project,
+            commands::project::update_description,
+            commands::project::remove_project,
+            commands::project::open_in_finder,
+            commands::project::open_in_terminal,
+            commands::project::regenerate_description,
+            commands::project::rescan_project,
+            // Decisions / loops / epics / specs (epics.rs)
+            commands::epics::get_decisions,
+            commands::epics::get_loops,
+            commands::epics::get_epics,
+            commands::epics::get_epics_by_milestone,
+            commands::epics::promote_epic_loop,
+            commands::epics::toggle_loop_step,
+            commands::epics::toggle_prd_loop,
+            commands::epics::read_spec_file,
+            commands::epics::write_spec_file,
+            // Agent config + auth token (config_cmds.rs)
+            commands::config_cmds::get_agent_config,
+            commands::config_cmds::set_agent_config,
+            commands::config_cmds::clear_auth_token,
+            // Agent / Claude session (agent.rs)
+            commands::agent::agent_start_loop,
+            commands::agent::agent_start_loop_streaming,
+            commands::agent::agent_send_message,
+            commands::agent::agent_send_message_streaming,
+            commands::agent::agent_get_conversation,
+            commands::agent::agent_list_conversations,
+            commands::agent::agent_get_conversation_by_id,
+            commands::agent::agent_promote_to_active,
+            commands::agent::agent_reset_session,
+            commands::agent::agent_answer_question,
+            commands::agent::agent_answer_permission,
+            commands::agent::agent_add_allow_rule,
+            commands::agent::agent_interrupt,
+            commands::agent::agent_is_busy,
+            commands::agent::agent_pending_permission,
+            commands::agent::agent_pending_question,
         ])
         .run(tauri::generate_context!())
     {
