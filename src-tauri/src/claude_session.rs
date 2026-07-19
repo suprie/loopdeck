@@ -1694,7 +1694,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     async fn test_session_deny_path_is_graceful() {
-        use crate::permission::{PermissionPolicy, PermissionMode};
+        use crate::permission::{PermissionMode, PermissionPolicy};
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
             let mut session = ClaudeSession::spawn(

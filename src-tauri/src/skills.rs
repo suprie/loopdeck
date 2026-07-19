@@ -745,12 +745,30 @@ mod tests {
         // button instead.
         assert!(!has("Edit(*)"), "broad Edit rule must NOT be seeded");
         assert!(!has("Write(*)"), "broad Write rule must NOT be seeded");
-        assert!(!has("Bash(cargo:*)"), "broad build-runner rule must NOT be seeded");
-        assert!(!has("Bash(npm:*)"), "broad build-runner rule must NOT be seeded");
-        assert!(!has("Bash(npx:*)"), "broad build-runner rule must NOT be seeded");
-        assert!(!has("Bash(go:*)"), "broad build-runner rule must NOT be seeded");
-        assert!(!has("Bash(pnpm:*)"), "broad build-runner rule must NOT be seeded");
-        assert!(!has("Bash(yarn:*)"), "broad build-runner rule must NOT be seeded");
+        assert!(
+            !has("Bash(cargo:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(npm:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(npx:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(go:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(pnpm:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(yarn:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
         assert!(
             !has("Bash(rm -rf:*)"),
             "destructive patterns must NOT be in the allow list"
