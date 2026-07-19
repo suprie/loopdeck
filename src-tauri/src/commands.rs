@@ -1867,7 +1867,7 @@ async fn with_session(
         &path.to_path_buf(),
         &agent_config,
         resume_id.as_deref(),
-        PermissionPolicy::allow_by_default(),
+        PermissionPolicy::confirm_changes(),
     )?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     map_guard.insert(path.to_path_buf(), Arc::clone(&arc));
@@ -2472,7 +2472,7 @@ async fn spawn_fresh(
         &path.to_path_buf(),
         &agent_config,
         None,
-        PermissionPolicy::allow_by_default(),
+        PermissionPolicy::confirm_changes(),
     )?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state

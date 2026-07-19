@@ -1376,7 +1376,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
 
@@ -1414,7 +1414,7 @@ mod tests {
     async fn test_session_current_directory() {
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
 
-        let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::allow_by_default())
+        let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::confirm_changes())
             .expect("failed to spawn claude session");
 
         let response = session
@@ -1450,7 +1450,7 @@ mod tests {
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     async fn test_session_retains_context_across_turns() {
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::allow_by_default())
+            let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::confirm_changes())
             .expect("failed to spawn claude session");
 
         // Turn 1 — plant a distinctive fact the model could only repeat by
@@ -1513,7 +1513,7 @@ mod tests {
                 &test_path(),
                 &no_auth,
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
 
@@ -1560,7 +1560,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
             let first = session
@@ -1593,7 +1593,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 Some(&session_id),
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to re-spawn claude session with --resume");
 
@@ -1650,7 +1650,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
 
@@ -1694,14 +1694,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     async fn test_session_deny_path_is_graceful() {
-        use crate::permission::{PermissionPolicy, PolicyDefault};
+        use crate::permission::{PermissionPolicy, PermissionMode};
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
             let mut session = ClaudeSession::spawn(
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::with_default(PolicyDefault::Deny),
+                PermissionPolicy::with_mode(PermissionMode::Deny),
             )
             .expect("failed to spawn claude session");
 
