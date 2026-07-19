@@ -24,8 +24,8 @@ Source: [`docs/PRD-trust-boundary-hardening.md`](../docs/PRD-trust-boundary-hard
 
 - [x] **Honest permission default:** ship `ConfirmChanges` first; remove generated `Edit(*)`, `Write(*)`, and broad build-runner rules; align Claude spawn settings, LoopDeck policy, approval UI, and regression tests
 - [x] **Defer autonomous mode:** do not add per-project `AutonomousProject` configuration until the confirm-first path is proven usable; this is not an alpha blocker
-- [ ] **Crash-safe critical state:** add one shared atomic-write helper and use it for the registry, `project.yaml`, `loops.md`, PRDs, and generated Claude settings
-- [ ] **Recoverable registry:** keep one last-known-good backup and never overwrite a malformed primary registry with a fresh default
+- [x] **Crash-safe critical state:** add one shared atomic-write helper and use it for the registry, `project.yaml`, `loops.md`, PRDs, and generated Claude settings
+- [x] **Recoverable registry:** keep one last-known-good backup and never overwrite a malformed primary registry with a fresh default
 - [ ] **Central project boundary:** resolve every project-scoped IPC request through shared registered-root and contained-relative-path helpers; reject traversal and symlink escape
 - [ ] **Bound untrusted work:** cap recursive scan depth/entries/time, file and NDJSON line sizes, `ResponseAccumulator` bytes/blocks, and parked approval/question duration
 - [ ] **Minimal interruption recovery:** after restart or child failure, classify incomplete work as `interrupted`, clear stale busy/waiting state, and allow a new turn; persist a separate run record only if transcript-based recovery proves insufficient
@@ -109,6 +109,113 @@ prerequisite.
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
 ## History
+
+### 2026-07-19 — Phase 2 — Crash-safe persistence + recoverable registry
+
+- **Status**: completed
+- **Completed**: 2026-07-19
+
+Closes Gate A items 3 (Crash-safe critical state) and 4 (Recoverable
+registry). Phase 2 of the trust-boundary hardening PRD made LoopDeck's
+critical on-disk state survive process crashes and malformed data — no
+database, no journal, just the write pattern the filesystem already gives
+us for free.
+
+**The bug it fixed.** Every critical write in the codebase used
+`std::fs::write` (truncate-then-write): a crash, full disk, or OS-dropped
+write between the open and the final byte left a partial file. The most
+dangerous instance was the registry (`~/.config/loopdeck/config.yaml`): on
+malformed YAML, `GlobalConfig::load()` returned `Err`, and `lib.rs` caught
+it with `unwrap_or_else(|e| { let fresh = default(); fresh.save(); fresh })`
+— silently overwriting the malformed primary with an empty default. That
+turned recoverable corruption into silent data loss: the user's entire
+project list vanished without a trace.
+
+**Changes (5 commits, task-by-task).**
+- `1ddccba` — `persist.rs` (NEW): one shared `atomic_write(path, contents)`
+  primitive. Writes to a sibling temp file in the target's parent directory,
+  flushes + fsyncs, then renames over the target. Same-directory rename is
+  atomic on POSIX and atomic-with-replace on Windows for same-volume moves.
+  The temp name includes the PID so two writers can't collide; a stale temp
+  from a crashed prior run never conflicts. On any error the temp is removed
+  and the original is left untouched. 8 unit tests cover create / overwrite
+  / parent-dirs / no-temp-left / untouched-on-fail plus a `read_if_exists`
+  helper.
+- `6ca126e` — `config.rs`: `GlobalConfig::save_to_path` backs up the existing
+  primary to `config.yaml.bak` (best-effort) before `atomic_write`-ing the
+  new one. `load_from_path` runs a 4-step recovery: primary missing → fresh
+  default; primary parses → load; primary malformed → try the backup and
+  warn; both malformed → `Err`. The malformed primary is **never**
+  overwritten. `lib.rs` startup turned the `unwrap_or_else` silent-overwrite
+  into a hard `error!` + `exit(1)` so the user gets a structured log line
+  and the file stays on disk for manual recovery. Test-friendly inner fns
+  (`load_from_path` / `save_to_path`) take explicit paths so the 5 new
+  recovery tests can redirect without touching production code paths.
+  *Investigation note:* `serde_yaml` parses `:::not yaml:::` as a valid
+  empty document — the malformed-test fixtures use `agent: [unclosed` (a
+  rejected flow sequence) instead.
+- `6ee84bc` — `memory.rs` + `epic.rs`: `persist::atomic_write` applied to
+  every project-scoped markdown rewrite — `memory::toggle_loop_step` (loops.md
+  checklist toggles), `memory::ensure_memory_files` (fresh decisions.md /
+  loops.md bootstrap), `epic::toggle_epic_step` (loops.md Current section),
+  `epic::toggle_prd_step` (PRD phase checklists), `epic::write_spec_file`
+  (general PRD/epic markdown). `AppError`'s existing `#[from] std::io::Error`
+  meant the `io::Result` from `atomic_write` converted via `?` with no
+  adapter. Test-fixture writes in `#[cfg(test)]` stay on `std::fs::write`
+  for speed (fsync would slow tests; fixtures own their temp dirs).
+- `8b3d9c2` — `skills.rs`: `setup_hooks` writes the generated
+  `.claude/settings.json` (the curated permissions allowlist + hook config)
+  atomically. A crash here used to risk dropping the user's curated rules
+  or leaving malformed JSON that claude refuses to load.
+- `d697705` — `conversation.rs`: the whole-transcript rewrite path (promote
+  archive to active — archives current then seeds fresh active.jsonl) now
+  uses `atomic_write` so a crash can't break the next agent resume.
+  `append_turn` now `flush()`es the OS page cache before returning. No
+  `fsync` — that would tank streaming throughput; the PRD accepts line-
+  atomic appends as sufficient. New test
+  `load_tolerates_partial_final_line_after_crash` pins the recovery
+  contract: a valid user/assistant pair followed by a truncated final line
+  (what a crash mid-write leaves behind) loads the pair cleanly, skipping
+  the partial. Complements the existing mid-file-malformed test.
+
+**Design decisions.** Hand-rolled `persist` module over pulling in
+`tempfile` or `atomicwrites` — the primitive is ~80 lines and full control
+over the temp + fsync + rename sequence matters (e.g. dropping the file
+handle before the rename for Windows compatibility). Test-friendly inner
+fns (`load_from_path` / `save_to_path`) over an env-var path override —
+production code paths stay untouched and the recovery tests are honest
+about what they exercise. The `.bak` is overwritten on every save, so it's
+at most 1× the primary size — no unbounded growth. `append_turn` skips
+`fsync` deliberately: the PRD accepts line-atomic appends as sufficient
+for transcripts and per-turn fsync would tank streaming throughput; the
+`flush()` is enough to make an append visible to a same-process read
+without waiting for OS writeback. `parse_turns` already skipped
+unparseable lines via `filter_map` + warn, so read-side partial-line
+tolerance was in place — the new test just pins the specific crash-during-
+append scenario as a documented contract. `read_if_exists` helper lives in
+`persist` with `#[allow(dead_code)]` until a production caller arrives.
+See decisions.md ("Atomic writes via temp-file + fsync + same-dir rename;
+last-known-good backup for the registry").
+
+**Tradeoff accepted.** Every critical save now pays an `fsync`. In
+practice these saves are infrequent (registry updates, loop toggles,
+settings regen) — not per-token — so the latency is invisible. Transcript
+*appends* deliberately skip fsync (only `flush()` to the page cache) to
+keep streaming throughput reasonable.
+
+**Verification.** `cargo fmt --check` clean; `cargo clippy --all-targets`
+exit 0 — 0 new warnings (all 5 lib + 11 test warnings pre-existing at the
+Phase 2 baseline, same 14 count); `cargo test --lib` 271 passed / 0 failed
+/ 8 ignored (+13 vs Phase 1's 258: +7 `persist`, +5 registry recovery,
++1 partial-line tolerance); `npm run build` not re-run (backend-only
+changes, frontend unaffected). The 8 ignored are the live
+`claude`/keychain integration tests; recommend running them manually
+before tagging the alpha. Manual smoke test (kill app mid-save, corrupt
+registry on disk, restart) is the final confirmation the user runs.
+
+**Files changed:** src-tauri/src/{persist.rs (new), lib.rs, config.rs,
+memory.rs, epic.rs, skills.rs, conversation.rs}, .loopdeck/{loops.md,
+decisions.md}.
 
 ### 2026-07-19 — Phase 1 — Honest permission contract (ConfirmChanges default)
 
