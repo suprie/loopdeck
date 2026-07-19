@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::persist;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -344,10 +345,13 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
         root["permissions"]["allow"] = serde_json::Value::Array(existing);
     }
 
-    // Write settings.json (pretty-printed for readability)
+    // Write settings.json (pretty-printed for readability) atomically so a
+    // crash mid-write can't leave a truncated allowlist — a half-written
+    // settings.json could either drop the user's curated rules or leave
+    // malformed JSON that claude refuses to load.
     let formatted = serde_json::to_string_pretty(&root)
         .map_err(|e| AppError::Config(format!("JSON serialization error: {e}")))?;
-    std::fs::write(&settings_path, formatted)?;
+    persist::atomic_write(&settings_path, &formatted)?;
 
     Ok(())
 }
