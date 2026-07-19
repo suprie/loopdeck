@@ -10,6 +10,7 @@ mod git;
 mod logging;
 mod memory;
 mod permission;
+mod persist;
 mod project;
 pub mod retry;
 mod scanner;
