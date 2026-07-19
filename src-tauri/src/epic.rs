@@ -15,6 +15,7 @@
 
 use crate::error::AppError;
 use crate::memory;
+use crate::persist;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -264,7 +265,7 @@ pub fn promote_epic_loop(
     );
 
     let rewritten = replace_current_section(&content, &new_current);
-    std::fs::write(&loops_file, rewritten)?;
+    persist::atomic_write(&loops_file, &rewritten)?;
     Ok(())
 }
 /// Toggle a `- [ ]` / `- [x]` checklist item inside a PRD's `## Phases` body.
@@ -330,7 +331,7 @@ pub fn toggle_prd_loop(
     lines[line_idx] = format!("{}{} {}", " ".repeat(indent), new_box, item_text);
 
     let new_content = lines.join("\n");
-    std::fs::write(&prd_path, new_content)?;
+    persist::atomic_write(&prd_path, &new_content)?;
     Ok(!currently_checked)
 }
 
@@ -447,10 +448,13 @@ pub fn read_spec_file(repo_path: &Path, rel_path: &str) -> Result<String, AppErr
 /// broken file will be logged and skipped by the next `parse_epics` call.
 pub fn write_spec_file(repo_path: &Path, rel_path: &str, content: &str) -> Result<(), AppError> {
     let path = resolve_spec_path(repo_path, rel_path, false)?;
+    // atomic_write creates parent dirs itself, but keep the explicit
+    // create_dir_all so a missing-parent failure surfaces with the resolver's
+    // path semantics rather than the atomic_write temp path.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, content)?;
+    persist::atomic_write(&path, content)?;
     Ok(())
 }
 

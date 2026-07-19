@@ -4,6 +4,7 @@
 //! empty/default values rather than errors. This ensures the UI degrades
 //! gracefully before any AI agent has written the files.
 
+use crate::persist;
 use serde::Serialize;
 use std::path::Path;
 
@@ -118,12 +119,12 @@ pub fn ensure_memory_files(repo_path: &Path) -> Result<(), std::io::Error> {
 
     let decisions_file = loopdeck.join("decisions.md");
     if !decisions_file.exists() {
-        std::fs::write(&decisions_file, "# Decisions\n\n")?;
+        persist::atomic_write(&decisions_file, "# Decisions\n\n")?;
     }
 
     let loops_file = loopdeck.join("loops.md");
     if !loops_file.exists() {
-        std::fs::write(
+        persist::atomic_write(
             &loops_file,
             "# Loops\n\n## Current\n\n_No active loop._\n\n## Next Steps\n\n## History\n\n",
         )?;
@@ -175,7 +176,7 @@ pub fn toggle_loop_step(repo_path: &Path, step_text: &str) -> Result<bool, std::
     lines[line_idx] = format!("{}{} {}", " ".repeat(indent), new_box, item_text);
 
     let new_content = lines.join("\n");
-    std::fs::write(&loops_file, new_content)?;
+    persist::atomic_write(&loops_file, &new_content)?;
     Ok(!currently_checked)
 }
 
