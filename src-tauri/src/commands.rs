@@ -8,7 +8,9 @@ use crate::conversation::{self, ConversationSummary, ConversationTurn};
 use crate::epic::{self, Epic};
 use crate::error::AppError;
 use crate::git;
+use crate::limits;
 use crate::memory::{self, Decision, LoopStatus};
+use crate::paths;
 use crate::permission::Decision as PermissionDecision;
 use crate::permission::PermissionPolicy;
 use crate::project::{self, ProjectMeta};
@@ -103,41 +105,34 @@ pub struct SkillEntry {
 /// subfolders by selecting folders, which the frontend turns into successive
 /// calls with deeper `subdir` values.
 ///
-/// Security: `subdir` is joined onto the canonicalized root and the result is
-/// canonicalized and checked with `starts_with(&root)`, so `../` escapes and
-/// symlink-redirected paths are rejected. Hidden entries (dotfiles) and the
+/// Security: `path` is resolved to a canonical, **registered** project root
+/// via `paths::resolve_registered_root`, and `subdir` is resolved beneath it
+/// via `paths::resolve_within` — so `../` escapes, absolute paths, symlink
+/// redirects out of the project, and unregistered paths are all rejected by
+/// the shared boundary helpers (PRD FR3). Hidden entries (dotfiles) and the
 /// same `IGNORED_DIRS` used by project scanning are filtered out.
 #[tauri::command]
-pub async fn list_dir_entries(path: String, subdir: String) -> Result<Vec<DirEntry>, AppError> {
+pub async fn list_dir_entries(
+    path: String,
+    subdir: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<DirEntry>, AppError> {
     debug!("list_dir_entries called: path={path:?}, subdir={subdir:?}");
 
-    // Canonicalize the root first — every comparison below depends on an
-    // absolute, normalized form. `subdir` is then resolved relative to it.
-    let root = PathBuf::from(&path)
-        .canonicalize()
-        .map_err(|e| AppError::InvalidPath(format!("Invalid project path: {e}")))?;
-
-    // An empty subdir means "list the root itself". `join("")` would behave
-    // correctly, but being explicit avoids ambiguity on edge cases (trailing
-    // slashes, root-relative weirdness on some platforms).
-    let target = if subdir.is_empty() {
-        root.clone()
-    } else {
-        root.join(&subdir)
+    // Resolve the canonical, registered project root (PRD FR3): the IPC path is
+    // untrusted input, so it must canonicalize to a real directory that's
+    // actually in the registry before we list anything beneath it.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
     };
 
-    // Canonicalize the target too, then verify it's still under the root. This
-    // is the path-escape guard: a `subdir` like `../../etc/passwd` resolves to
-    // a path outside `root`, and symlinks pointing out of the project likewise
-    // resolve out, so both are rejected here.
-    let target = target
-        .canonicalize()
-        .map_err(|e| AppError::InvalidPath(format!("Invalid subdirectory: {e}")))?;
-    if !target.starts_with(&root) {
-        return Err(AppError::InvalidPath(
-            "Subdirectory is outside the project root".to_string(),
-        ));
-    }
+    // Resolve the subdirectory beneath the canonical root via the shared
+    // boundary helper: rejects `..` traversal, absolute paths, and symlink
+    // escape (a symlinked subdir pointing outside the root canonicalizes out
+    // and fails the starts_with check). An empty `subdir` resolves to the root
+    // itself.
+    let target = paths::resolve_within(&root, &subdir, true)?;
 
     let read_dir = std::fs::read_dir(&target).map_err(AppError::Io)?;
 
@@ -204,17 +199,46 @@ pub async fn list_dir_entries(path: String, subdir: String) -> Result<Vec<DirEnt
 /// Within a tier, shorter paths rank first (shallower, less noise).
 ///
 /// `walk_root` is a recursion helper that walks `dir` and pushes matches.
-fn walk_root(dir: &Path, root: &Path, query_lower: &str, out: &mut Vec<(DirEntry, u8, usize)>) {
+///
+/// Recursion is bounded by [`SearchBudget`] (PRD FR4): a max depth (also guards
+/// the call stack), a max visited-entry count, and a wall-clock cap. When any
+/// budget is exhausted the walk stops — the autocomplete popup returns what it
+/// found rather than freezing on a huge tree.
+fn walk_root(
+    dir: &Path,
+    root: &Path,
+    query_lower: &str,
+    out: &mut Vec<(DirEntry, u8, usize)>,
+    depth: u8,
+    budget: &mut SearchBudget,
+) {
+    if !budget.allow(depth) {
+        return;
+    }
+
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return, // permission denied / vanished — skip this subtree
     };
     for entry in read_dir.flatten() {
+        // Each iteration consumes one entry budget unit; stop descending once
+        // exhausted.
+        if !budget.visit() {
+            return;
+        }
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
         };
         let name = entry.file_name().to_string_lossy().into_owned();
+
+        // Do not follow symlinked directories (PRD FR3): skip symlinks entirely
+        // so the search can't traverse out of the project root via a planted
+        // link and never descends into one. `DirEntry::file_type` does not
+        // follow symlinks, so this also keeps the walk bounded to real entries.
+        if file_type.is_symlink() {
+            continue;
+        }
 
         // Skip hidden entries and the same ignored dirs as scanning. We do NOT
         // descend into them either, so node_modules/target/.git are pruned
@@ -246,7 +270,7 @@ fn walk_root(dir: &Path, root: &Path, query_lower: &str, out: &mut Vec<(DirEntry
         } else {
             // No match — descend if it's a dir, otherwise skip this entry.
             if is_dir {
-                walk_root(&entry.path(), root, query_lower, out);
+                walk_root(&entry.path(), root, query_lower, out, depth + 1, budget);
             }
             continue;
         };
@@ -265,8 +289,89 @@ fn walk_root(dir: &Path, root: &Path, query_lower: &str, out: &mut Vec<(DirEntry
         // surfaces nested files under it. The ranking keeps shallow/exact
         // matches on top regardless of how many deeper matches pile up.
         if is_dir {
-            walk_root(&entry.path(), root, query_lower, out);
+            walk_root(&entry.path(), root, query_lower, out, depth + 1, budget);
         }
+    }
+}
+
+/// Resource budget for a single `@`-mention search walk (PRD FR4).
+///
+/// Tracks visited entries and elapsed time against configurable ceilings.
+/// [`new`] seeds them from the [`limits`] constants; [`with`] lets tests inject
+/// small values. Once any budget is breached the walk short-circuits: [`allow`]
+/// returns `false` (don't descend further) and [`visit`] returns `false` (stop
+/// iterating the current directory). The result cap itself lives in
+/// `search_project_files` (`max_results`), since it bounds the returned list
+/// rather than the walk.
+struct SearchBudget {
+    entries: usize,
+    max_entries: usize,
+    max_depth: u8,
+    max_duration: std::time::Duration,
+    start: std::time::Instant,
+    exhausted: bool,
+}
+
+impl SearchBudget {
+    fn new() -> Self {
+        Self::with(
+            limits::SEARCH_MAX_DEPTH,
+            limits::SEARCH_MAX_ENTRIES,
+            limits::SEARCH_MAX_DURATION,
+        )
+    }
+
+    /// Construct with explicit ceilings. Production uses [`new`] (the
+    /// [`limits`] constants); tests pass small values to exercise the budgets.
+    fn with(max_depth: u8, max_entries: usize, max_duration: std::time::Duration) -> Self {
+        Self {
+            entries: 0,
+            max_entries,
+            max_depth,
+            max_duration,
+            start: std::time::Instant::now(),
+            exhausted: false,
+        }
+    }
+
+    /// Whether the walk may descend to `depth`. Records exhaustion (and returns
+    /// `false`) once depth, entries, or time is over budget.
+    fn allow(&mut self, depth: u8) -> bool {
+        if self.exhausted {
+            return false;
+        }
+        if depth > self.max_depth
+            || self.entries >= self.max_entries
+            || self.start.elapsed() >= self.max_duration
+        {
+            self.exhausted = true;
+            tracing::warn!(
+                depth = depth,
+                entries = self.entries,
+                elapsed = ?self.start.elapsed(),
+                "search walk hit a budget — returning partial results"
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Consume one visited entry; returns `false` when the entry budget is now
+    /// exhausted (caller stops iterating the current directory).
+    fn visit(&mut self) -> bool {
+        self.entries += 1;
+        if self.entries > self.max_entries {
+            if !self.exhausted {
+                self.exhausted = true;
+                tracing::warn!(
+                    entries = self.entries,
+                    limit = self.max_entries,
+                    "search walk hit entry budget — returning partial results"
+                );
+            }
+            return false;
+        }
+        true
     }
 }
 
@@ -275,6 +380,7 @@ pub async fn search_project_files(
     path: String,
     query: String,
     max_results: Option<usize>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<DirEntry>, AppError> {
     let query_lower = query.trim().to_lowercase();
     debug!(
@@ -289,13 +395,16 @@ pub async fn search_project_files(
         return Ok(Vec::new());
     }
 
-    let root = PathBuf::from(&path)
-        .canonicalize()
-        .map_err(|e| AppError::InvalidPath(format!("Invalid project path: {e}")))?;
+    // Resolve the canonical, registered project root (PRD FR3) before walking.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
 
     let cap = max_results.unwrap_or(50);
     let mut hits: Vec<(DirEntry, u8, usize)> = Vec::new();
-    walk_root(&root, &root, &query_lower, &mut hits);
+    let mut budget = SearchBudget::new();
+    walk_root(&root, &root, &query_lower, &mut hits, 0, &mut budget);
 
     // Sort by (score asc, path-length asc) → best, shallowest matches first.
     hits.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
@@ -373,13 +482,28 @@ fn parse_skill_frontmatter(content: &str) -> (String, String, String) {
 /// project command). Results are sorted by `name` for stable arrow-key
 /// navigation.
 #[tauri::command]
-pub async fn list_skills(path: String) -> Result<Vec<SkillEntry>, AppError> {
+pub async fn list_skills(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillEntry>, AppError> {
     debug!("list_skills called: path={path:?}");
 
-    let root = PathBuf::from(&path)
-        .canonicalize()
-        .map_err(|e| AppError::InvalidPath(format!("Invalid project path: {e}")))?;
+    // Resolve the canonical, registered project root (PRD FR3) before reading
+    // `.claude/skills/` beneath it.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
 
+    list_skills_at(&root)
+}
+
+/// Read and parse the skills under `<root>/.claude/skills/`.
+///
+/// Factored out of the [`list_skills`] command so the read path is unit-
+/// testable without a registered `AppState` — the registration check is the
+/// command layer's concern; this is pure filesystem read + frontmatter parse.
+fn list_skills_at(root: &Path) -> Result<Vec<SkillEntry>, AppError> {
     let skills_dir = root.join(".claude").join("skills");
 
     // Not bootstrapped yet — no skills to show. Treat as empty rather than an
@@ -405,7 +529,9 @@ pub async fn list_skills(path: String) -> Result<Vec<SkillEntry>, AppError> {
 
         let directory = entry.file_name().to_string_lossy().into_owned();
         let skill_md = entry.path().join("SKILL.md");
-        let content = match std::fs::read_to_string(&skill_md) {
+        // Bounded read (PRD FR4): a planted oversized SKILL.md shouldn't be
+        // loaded wholly into memory — only the frontmatter is parsed anyway.
+        let content = match limits::read_bounded_to_string(&skill_md, limits::SKILL_MAX_BYTES) {
             Ok(c) => c,
             Err(_) => continue, // dir without a SKILL.md — skip silently
         };
@@ -439,6 +565,18 @@ pub async fn list_skills(path: String) -> Result<Vec<SkillEntry>, AppError> {
 /// boundary instead of leaking a raw `tokio::task::JoinError`.
 fn blocking_task_failed(e: tokio::task::JoinError) -> AppError {
     AppError::BlockingTask(format!("background task failed: {e}"))
+}
+
+/// Resolve `path` to the canonical, **registered** project root.
+///
+/// Convenience for project-scoped commands that read project state and don't
+/// otherwise need to hold the config lock: briefly locks, resolves via the
+/// shared boundary helper ([`paths::resolve_registered_root`]), and returns
+/// the canonical root. Commands that need to mutate the registry under a lock
+/// resolve inline instead so the lock spans the mutation.
+fn resolve_root(state: &AppState, path: &str) -> Result<PathBuf, AppError> {
+    let config = state.config.lock().map_err(|_| AppError::LockError)?;
+    paths::resolve_registered_root(&config, path)
 }
 
 /// Scan a directory for project repositories.
@@ -499,12 +637,10 @@ pub async fn import_project(
 ) -> Result<ProjectEntry, AppError> {
     debug!("import_project called with path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-
-    // Canonicalize early so config lookups use the same path form
-    let canonical = repo_path
-        .canonicalize()
-        .map_err(|e| AppError::Scan(format!("Failed to resolve path: {e}")))?;
+    // Canonicalize via the shared boundary helper (PRD FR3) so config lookups
+    // use the canonical form. This is the registration path, so no registered-
+    // root check — but the path must resolve to a real directory.
+    let canonical = paths::canonical_root(&path)?;
 
     // Check if already registered (use canonical path for lookup). Done under a
     // brief lock so we don't hold the config mutex across the heavy bootstrapping
@@ -737,10 +873,14 @@ pub async fn get_project(
     state: State<'_, AppState>,
 ) -> Result<ProjectEntry, AppError> {
     debug!("get_project called with path: {path}");
-    let repo_path = PathBuf::from(&path);
     let config = state.config.lock().map_err(|_| AppError::LockError)?;
+    // Resolve the canonical, registered root (PRD FR3). Canonicalizing the
+    // input *before* the lookup also fixes a latent mismatch: the registry
+    // stores canonical paths, so a non-canonical input previously failed to
+    // match and returned a spurious ProjectNotFound.
+    let root = paths::resolve_registered_root(&config, &path)?;
     config
-        .find_by_path(&repo_path)
+        .find_by_path(&root)
         .cloned()
         .ok_or(AppError::ProjectNotFound(path))
 }
@@ -754,15 +894,21 @@ pub async fn update_description(
 ) -> Result<ProjectMeta, AppError> {
     debug!("update_description called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
+    // Resolve the canonical, registered root (PRD FR3) so both the
+    // `.loopdeck/project.yaml` write and the registry update target a
+    // registered project under its canonical path.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
 
     // Update the project.yaml file
-    let meta = project::update_description(&repo_path, &description)?;
+    let meta = project::update_description(&root, &description)?;
 
     // Update in config registry
     {
         let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
-        if let Some(entry) = config.find_by_path_mut(&repo_path) {
+        if let Some(entry) = config.find_by_path_mut(&root) {
             entry.description = description;
             config.save()?;
         }
@@ -778,12 +924,10 @@ pub async fn update_description(
 pub async fn remove_project(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("remove_project called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-
-    // Canonicalize so we match the stored path (which is always canonical)
-    let canonical = repo_path
-        .canonicalize()
-        .map_err(|e| AppError::Scan(format!("Failed to resolve path: {e}")))?;
+    // Canonicalize via the shared boundary helper so the path matches the
+    // stored canonical key. Registration isn't required here — this *is* the
+    // deregistration — but the path must still resolve to a real directory.
+    let canonical = paths::canonical_root(&path)?;
 
     let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
 
@@ -796,28 +940,15 @@ pub async fn remove_project(path: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
-/// Resolve and validate a user-supplied path before handing it to an OS
-/// opener (Finder/Terminal/explorer). The path originates from a Tauri IPC
-/// argument, so although it is normally a legitimate repo path we treat it as
-/// untrusted: this canonicalizes it and rejects anything that doesn't resolve
-/// to an existing directory. That blocks scheme-handler tricks (e.g. macOS
-/// `open "x-apple-..."`) and shell-metachar injection downstream.
-fn resolve_dir_arg(path: &str) -> Result<PathBuf, AppError> {
-    let resolved = std::fs::canonicalize(path)
-        .map_err(|_| AppError::Scan(format!("Path does not exist or is not accessible: {path}")))?;
-    if !resolved.is_dir() {
-        return Err(AppError::Scan(format!("Not a directory: {path}")));
-    }
-    Ok(resolved)
-}
-
 /// Open the repository path in the system file manager (Finder on macOS).
 #[tauri::command]
-pub async fn open_in_finder(path: String) -> Result<(), AppError> {
+pub async fn open_in_finder(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("open_in_finder called for path: {path}");
-    // Validate before any opener sees it. `open`, `xdg-open`, and `explorer`
-    // otherwise interpret some strings as URLs / handlers.
-    let resolved = resolve_dir_arg(&path)?;
+    // Resolve the canonical, registered root (PRD FR3) before handing it to an
+    // OS opener. `open`, `xdg-open`, and `explorer` otherwise interpret some
+    // strings as URLs / scheme handlers — a registered, canonical directory
+    // path blocks those tricks at the source.
+    let resolved = resolve_root(&state, &path)?;
 
     #[cfg(target_os = "macos")]
     {
@@ -849,9 +980,9 @@ pub async fn open_in_finder(path: String) -> Result<(), AppError> {
 
 /// Open the repository path in the system terminal.
 #[tauri::command]
-pub async fn open_in_terminal(path: String) -> Result<(), AppError> {
+pub async fn open_in_terminal(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("open_in_terminal called for path: {path}");
-    let resolved = resolve_dir_arg(&path)?;
+    let resolved = resolve_root(&state, &path)?;
     let path_str = resolved.to_string_lossy().to_string();
 
     #[cfg(target_os = "macos")]
@@ -969,28 +1100,23 @@ pub async fn rescan_project(
 ) -> Result<ProjectEntry, AppError> {
     debug!("rescan_project called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-
-    // Resolve the target under a brief lock: confirm it's registered and its
-    // path still exists. We capture the on-disk path to probe and release the
-    // lock before the git subprocess runs — same rationale as `list_projects`.
+    // Resolve the canonical, registered root under a brief lock (PRD FR3):
+    // confirms the path exists, is a directory, and is in the registry. The
+    // canonical form is what we probe with git and re-lookup in the apply
+    // pass, so a non-canonical input matches the stored entry. We capture the
+    // root and release the lock before the git subprocess runs — same
+    // rationale as `list_projects`.
     let target = {
         let config = state.config.lock().map_err(|_| AppError::LockError)?;
-        let entry = config
-            .find_by_path(&repo_path)
-            .ok_or(AppError::ProjectNotFound(path.clone()))?;
-        if !entry.path.exists() {
-            return Err(AppError::ProjectNotFound(format!(
-                "Project path no longer exists: {}",
-                entry.path.display()
-            )));
-        }
-        entry.path.clone()
+        paths::resolve_registered_root(&config, &path)?
     };
 
     // Refresh git info on the blocking pool — spawns git subprocesses and walks
-    // the tree for last-modified, so it must not run on the tokio worker.
-    let git_info = tokio::task::spawn_blocking(move || git::check_git_info(&target))
+    // the tree for last-modified, so it must not run on the tokio worker. Clone
+    // the root into the closure so the canonical path is still available for
+    // the apply-pass lookup below.
+    let target_for_probe = target.clone();
+    let git_info = tokio::task::spawn_blocking(move || git::check_git_info(&target_for_probe))
         .await
         .map_err(blocking_task_failed)?;
 
@@ -999,7 +1125,7 @@ pub async fn rescan_project(
     let mut result = {
         let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
         let entry = config
-            .find_by_path_mut(&repo_path)
+            .find_by_path_mut(&target)
             .ok_or(AppError::ProjectNotFound(path.clone()))?;
         entry.last_commit_date = git_info.last_commit_date.clone();
         entry.last_modified = git_info.last_modified.clone();
@@ -1030,17 +1156,22 @@ pub async fn regenerate_description(
 ) -> Result<String, AppError> {
     debug!("regenerate_description called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-    let repo_path_clone = repo_path.clone();
+    // Resolve the canonical, registered root (PRD FR3) before re-scanning and
+    // rewriting `.loopdeck/project.yaml`.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
+    let root_for_scan = root.clone();
 
     // Re-scan markers and README status for this repo
-    let (name, markers, has_readme) = scanner::quick_scan_directory(&repo_path_clone);
-    let desc = project::regenerate_description(&repo_path_clone, &name, &markers, has_readme)?;
+    let (name, markers, has_readme) = scanner::quick_scan_directory(&root_for_scan);
+    let desc = project::regenerate_description(&root_for_scan, &name, &markers, has_readme)?;
 
     // Update in config registry
     {
         let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
-        if let Some(entry) = config.find_by_path_mut(&repo_path) {
+        if let Some(entry) = config.find_by_path_mut(&root) {
             entry.description = desc.clone();
             config.save()?;
         }
@@ -1055,52 +1186,32 @@ pub async fn regenerate_description(
 #[tauri::command]
 pub async fn get_decisions(
     path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Decision>, AppError> {
     debug!("get_decisions called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    let decisions = memory::parse_decisions(&repo_path);
-    Ok(decisions)
+    let root = resolve_root(&state, &path)?;
+    Ok(memory::parse_decisions(&root))
 }
 
 /// Get loop status from `.loopdeck/loops.md`.
 /// Returns an empty/default LoopStatus if the file does not exist.
 #[tauri::command]
-pub async fn get_loops(path: String, _state: State<'_, AppState>) -> Result<LoopStatus, AppError> {
+pub async fn get_loops(path: String, state: State<'_, AppState>) -> Result<LoopStatus, AppError> {
     debug!("get_loops called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    let status = memory::parse_loops(&repo_path);
-    Ok(status)
+    let root = resolve_root(&state, &path)?;
+    Ok(memory::parse_loops(&root))
 }
 
 /// Get all epics from `docs/epics/`, each with its PRDs and phase checklists.
 /// Returns an empty list if `docs/epics/` does not exist.
 #[tauri::command]
-pub async fn get_epics(path: String, _state: State<'_, AppState>) -> Result<Vec<Epic>, AppError> {
+pub async fn get_epics(path: String, state: State<'_, AppState>) -> Result<Vec<Epic>, AppError> {
     debug!("get_epics called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    Ok(epic::parse_epics(&repo_path))
+    let root = resolve_root(&state, &path)?;
+    Ok(epic::parse_epics(&root))
 }
 
 /// Get epics grouped by milestone (ordered), for the cross-project `/epics` view.
@@ -1108,18 +1219,12 @@ pub async fn get_epics(path: String, _state: State<'_, AppState>) -> Result<Vec<
 #[tauri::command]
 pub async fn get_epics_by_milestone(
     path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<std::collections::BTreeMap<String, Vec<Epic>>, AppError> {
     debug!("get_epics_by_milestone called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    Ok(epic::epics_by_milestone(&repo_path))
+    let root = resolve_root(&state, &path)?;
+    Ok(epic::epics_by_milestone(&root))
 }
 
 /// Promote a PRD checklist item into `.loopdeck/loops.md ## Current`.
@@ -1133,18 +1238,14 @@ pub async fn promote_epic_loop(
     epic_slug: String,
     prd_filename: String,
     loop_title: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     debug!("promote_epic_loop called for path: {path}, epic: {epic_slug}, prd: {prd_filename}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    epic::promote_epic_loop(&repo_path, &epic_slug, &prd_filename, &loop_title)?;
+    // Resolve the canonical, registered root (PRD FR3) before rewriting
+    // `.loopdeck/loops.md`.
+    let root = resolve_root(&state, &path)?;
+    epic::promote_epic_loop(&root, &epic_slug, &prd_filename, &loop_title)?;
     Ok(())
 }
 
@@ -1154,18 +1255,12 @@ pub async fn promote_epic_loop(
 pub async fn toggle_loop_step(
     path: String,
     step_text: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<bool, AppError> {
     debug!("toggle_loop_step called for path: {path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    let now_checked = memory::toggle_loop_step(&repo_path, &step_text)?;
+    let root = resolve_root(&state, &path)?;
+    let now_checked = memory::toggle_loop_step(&root, &step_text)?;
     Ok(now_checked)
 }
 
@@ -1177,18 +1272,15 @@ pub async fn toggle_prd_loop(
     epic_slug: String,
     prd_filename: String,
     loop_title: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<bool, AppError> {
     debug!("toggle_prd_loop called for path: {path}, epic: {epic_slug}, prd: {prd_filename}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    let now_checked = epic::toggle_prd_loop(&repo_path, &epic_slug, &prd_filename, &loop_title)?;
+    // Resolve the canonical, registered root (PRD FR3). `epic_slug` /
+    // `prd_filename` are additionally sandboxed to `docs/epics/` inside
+    // `epic::toggle_prd_loop` via the shared `paths::resolve_within` helper.
+    let root = resolve_root(&state, &path)?;
+    let now_checked = epic::toggle_prd_loop(&root, &epic_slug, &prd_filename, &loop_title)?;
     Ok(now_checked)
 }
 
@@ -1198,18 +1290,14 @@ pub async fn toggle_prd_loop(
 pub async fn read_spec_file(
     path: String,
     rel_path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, AppError> {
     debug!("read_spec_file called for path: {path}, rel: {rel_path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    epic::read_spec_file(&repo_path, &rel_path)
+    // Resolve the canonical, registered root (PRD FR3); `rel_path` is then
+    // sandboxed to `docs/epics/` inside `epic::read_spec_file`.
+    let root = resolve_root(&state, &path)?;
+    epic::read_spec_file(&root, &rel_path)
 }
 
 /// Write (create or overwrite) a spec file under `docs/epics/`.
@@ -1220,18 +1308,14 @@ pub async fn write_spec_file(
     path: String,
     rel_path: String,
     content: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     debug!("write_spec_file called for path: {path}, rel: {rel_path}");
 
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-
-    epic::write_spec_file(&repo_path, &rel_path, &content)
+    // Resolve the canonical, registered root (PRD FR3); `rel_path` is then
+    // sandboxed to `docs/epics/` inside `epic::write_spec_file`.
+    let root = resolve_root(&state, &path)?;
+    epic::write_spec_file(&root, &rel_path, &content)
 }
 
 // ── Agent commands ─────────────────────────────────────────────────────────
@@ -1254,15 +1338,12 @@ pub async fn agent_start_loop(
     state: State<'_, AppState>,
 ) -> Result<AgentResponse, AppError> {
     debug!("agent_start_loop called for path: {path}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
+    // Resolve the canonical, registered root (PRD FR3): the agent process is
+    // spawned with this as its cwd, so it must be a registered project.
+    let root = resolve_root(&state, &path)?;
 
-    let prompt = build_next_loop_prompt(&repo_path);
-    let response = start_fresh_and_record(&state, &repo_path, &prompt).await?;
+    let prompt = build_next_loop_prompt(&root);
+    let response = start_fresh_and_record(&state, &root, &prompt).await?;
     info!("agent_start_loop complete for: {path}");
     Ok(response)
 }
@@ -1284,14 +1365,9 @@ pub async fn agent_send_message(
     state: State<'_, AppState>,
 ) -> Result<AgentResponse, AppError> {
     debug!("agent_send_message called for path: {path}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
+    let root = resolve_root(&state, &path)?;
 
-    let response = send_and_record(&state, &repo_path, &prompt).await?;
+    let response = send_and_record(&state, &root, &prompt).await?;
     info!("agent_send_message complete for: {path}");
     Ok(response)
 }
@@ -1315,15 +1391,10 @@ pub async fn agent_start_loop_streaming(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     debug!("agent_start_loop_streaming called for path: {path}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
+    let root = resolve_root(&state, &path)?;
 
-    let prompt = build_next_loop_prompt(&repo_path);
-    start_fresh_and_record_streaming(&state, &repo_path, &prompt, &on_event).await?;
+    let prompt = build_next_loop_prompt(&root);
+    start_fresh_and_record_streaming(&state, &root, &prompt, &on_event).await?;
     info!("agent_start_loop_streaming complete for: {path}");
     Ok(())
 }
@@ -1346,14 +1417,9 @@ pub async fn agent_send_message_streaming(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     debug!("agent_send_message_streaming called for path: {path}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
+    let root = resolve_root(&state, &path)?;
 
-    send_and_record_streaming(&state, &repo_path, &prompt, &on_event).await?;
+    send_and_record_streaming(&state, &root, &prompt, &on_event).await?;
     info!("agent_send_message_streaming complete for: {path}");
     Ok(())
 }
@@ -1365,16 +1431,11 @@ pub async fn agent_send_message_streaming(
 #[tauri::command]
 pub async fn agent_get_conversation(
     path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ConversationTurn>, AppError> {
     debug!("agent_get_conversation called for path: {path}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-    Ok(conversation::load_conversation(&repo_path))
+    let root = resolve_root(&state, &path)?;
+    Ok(conversation::load_conversation(&root))
 }
 
 /// List all conversations (active + archived) for the history UI.
@@ -1386,16 +1447,11 @@ pub async fn agent_get_conversation(
 #[tauri::command]
 pub async fn agent_list_conversations(
     path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ConversationSummary>, AppError> {
     debug!("agent_list_conversations called for path: {path}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-    Ok(conversation::list_conversations(&repo_path))
+    let root = resolve_root(&state, &path)?;
+    Ok(conversation::list_conversations(&root))
 }
 
 /// Load a specific conversation by id (`"active"` or an archive stem).
@@ -1407,16 +1463,11 @@ pub async fn agent_list_conversations(
 pub async fn agent_get_conversation_by_id(
     path: String,
     id: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ConversationTurn>, AppError> {
     debug!("agent_get_conversation_by_id called for path: {path}, id: {id}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
-    Ok(conversation::load_conversation_by_id(&repo_path, &id))
+    let root = resolve_root(&state, &path)?;
+    Ok(conversation::load_conversation_by_id(&root, &id))
 }
 
 /// Promote an archived conversation to active, returning its `session_id`.
@@ -1440,29 +1491,26 @@ pub async fn agent_promote_to_active(
     state: State<'_, AppState>,
 ) -> Result<Option<String>, AppError> {
     debug!("agent_promote_to_active called for path: {path}, id: {id}");
-    let repo_path = PathBuf::from(&path);
-    if !repo_path.exists() {
-        return Err(AppError::ProjectNotFound(format!(
-            "Path does not exist: {path}"
-        )));
-    }
+    let root = resolve_root(&state, &path)?;
 
     // Extract the resume id BEFORE promoting (after promotion the turns live
     // in active.jsonl, but reading from the source id is unambiguous).
-    let resume_id = conversation::session_id_for_conversation(&repo_path, &id);
+    let resume_id = conversation::session_id_for_conversation(&root, &id);
 
     // Promote: archive current active, seed new active from the source. No-op
     // for `id == "active"` or an unknown/empty source — both safe here.
-    conversation::promote_to_active(&repo_path, &id)?;
+    conversation::promote_to_active(&root, &id)?;
 
     // Drop any live session — its in-process context is now stale relative to
     // the promoted transcript. The next send re-spawns with `--resume <id>`
     // via `with_session` (which reads `last_session_id` off the new active).
+    // The session map is keyed by the canonical root (installed by the agent
+    // pipeline), so removing by `root` matches.
     let removed = state
         .claude_sessions
         .lock()
         .map_err(|_| AppError::LockError)?
-        .remove(&repo_path)
+        .remove(&root)
         .is_some();
     if removed {
         debug!("dropped live session for promote of {id} in: {path}");
@@ -1480,15 +1528,16 @@ pub async fn agent_promote_to_active(
 #[tauri::command]
 pub async fn agent_reset_session(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     debug!("agent_reset_session called for path: {path}");
-    let repo_path = PathBuf::from(&path);
+    let root = resolve_root(&state, &path)?;
 
     // Remove the live session from the map. The Arc's last reference drops
-    // here → `ClaudeSession::Drop` closes stdin and reaps the child.
+    // here → `ClaudeSession::Drop` closes stdin and reaps the child. The map
+    // is keyed by the canonical root (installed by the agent pipeline).
     let removed = state
         .claude_sessions
         .lock()
         .map_err(|_| AppError::LockError)?
-        .remove(&repo_path)
+        .remove(&root)
         .is_some();
     if removed {
         debug!("dropped live claude session for: {path}");
@@ -1496,7 +1545,7 @@ pub async fn agent_reset_session(path: String, state: State<'_, AppState>) -> Re
 
     // Archive the transcript regardless of whether a live session existed —
     // a reset should always mean "next Start is fresh".
-    conversation::archive_conversation(&repo_path)?;
+    conversation::archive_conversation(&root)?;
 
     info!("agent_reset_session complete for: {path}");
     Ok(())
@@ -1695,10 +1744,17 @@ pub async fn agent_answer_permission(
 /// Idempotent: re-adding an existing rule is a no-op (the dedup preserves the
 /// original write order). Creates `.claude/` and the file if absent.
 #[tauri::command]
-pub async fn agent_add_allow_rule(path: String, rule: String) -> Result<(), AppError> {
+pub async fn agent_add_allow_rule(
+    path: String,
+    rule: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
     debug!("agent_add_allow_rule called for path: {path}, rule: {rule}");
-    let repo_path = PathBuf::from(&path);
-    let claude_dir = repo_path.join(".claude");
+    // Resolve the canonical, registered root (PRD FR3) before writing the
+    // project's `.claude/settings.local.json`. (Local var is `proj_root` to
+    // avoid clashing with the JSON `root` value below.)
+    let proj_root = resolve_root(&state, &path)?;
+    let claude_dir = proj_root.join(".claude");
     let settings_path = claude_dir.join("settings.local.json");
 
     // Load existing settings (or start fresh). A missing file or unparseable
@@ -1920,7 +1976,11 @@ fn build_next_loop_prompt(path: &Path) -> String {
 /// `## Next Steps`. Returns `None` if the file is missing, the section is
 /// absent, or every step is already checked.
 fn next_unchecked_loop_step(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path.join(".loopdeck").join("loops.md")).ok()?;
+    let content = limits::read_bounded_to_string(
+        path.join(".loopdeck").join("loops.md"),
+        limits::SPEC_MAX_BYTES,
+    )
+    .ok()?;
 
     // Walk to the `## Next Steps` section, then read lines until the next
     // `## ` heading. Return the first `- [ ]` item in that window.
@@ -2636,6 +2696,76 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // ── search walk resource budgets (PRD FR4) ─────────────────────────
+
+    /// Build a temp project root with `depth` nested dirs, each containing a
+    /// file whose basename matches `query` — so the walk would visit every
+    /// level without the budget.
+    fn nested_match_tree(depth: usize, query: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("loopdeck-walk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut cur = root.clone();
+        for _ in 0..depth {
+            cur = cur.join("sub");
+            std::fs::create_dir_all(&cur).unwrap();
+            std::fs::write(cur.join(format!("{query}.txt")), "x").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn walk_root_depth_budget_stops_descent() {
+        // A tree 6 levels deep, but a depth budget of 2 — only the first two
+        // levels' matches should be returned; deeper ones are pruned.
+        let query = "match";
+        let root = nested_match_tree(6, query);
+        let mut hits: Vec<(DirEntry, u8, usize)> = Vec::new();
+        let mut budget = SearchBudget::with(2, 100_000, std::time::Duration::from_secs(30));
+        walk_root(&root, &root, query, &mut hits, 0, &mut budget);
+
+        // Depth 0 = root level (no match file at root), depth 1 = sub/match,
+        // depth 2 = sub/sub/match. Beyond depth 2 must be pruned.
+        let paths: Vec<&str> = hits.iter().map(|(e, _, _)| e.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("sub/match.txt")),
+            "depth-1 hit present"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("sub/sub/match.txt")),
+            "depth-2 hit present"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("sub/sub/sub/match.txt")),
+            "depth-3 hit must be pruned by the depth budget"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn walk_root_entry_budget_stops_walk() {
+        // 50 sibling files all matching, but an entry budget of 5 — the walk
+        // must stop early and return only a handful of hits.
+        let query = "f";
+        let root = std::env::temp_dir().join(format!("loopdeck-walk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..50 {
+            std::fs::write(root.join(format!("{query}{i}.txt")), "x").unwrap();
+        }
+
+        let mut hits: Vec<(DirEntry, u8, usize)> = Vec::new();
+        let mut budget = SearchBudget::with(15, 5, std::time::Duration::from_secs(30));
+        walk_root(&root, &root, query, &mut hits, 0, &mut budget);
+
+        assert!(
+            hits.len() < 50,
+            "entry budget should stop the walk before visiting all 50 files"
+        );
+        assert!(!hits.is_empty(), "some hits should still be returned");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn build_prompt_uses_step_when_present() {
         let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
@@ -2763,9 +2893,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = list_skills(dir.to_string_lossy().to_string())
-            .await
-            .unwrap();
+        let result = list_skills_at(&dir).unwrap();
 
         // Sorted by name → orchestrator before rust-expert.
         assert_eq!(result.len(), 2);
@@ -2782,23 +2910,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[tokio::test]
-    async fn list_skills_empty_when_not_bootstrapped() {
+    #[test]
+    fn list_skills_empty_when_not_bootstrapped() {
         // A project with no `.claude/skills/` (not yet bootstrapped) returns an
         // empty list, not an error — the menu shows "no skills".
         let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let result = list_skills(dir.to_string_lossy().to_string())
-            .await
-            .unwrap();
+        let result = list_skills_at(&dir).unwrap();
         assert!(result.is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[tokio::test]
-    async fn list_skills_skips_dir_without_skillmd() {
+    #[test]
+    fn list_skills_skips_dir_without_skillmd() {
         let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
         let skills_dir = dir.join(".claude").join("skills");
         std::fs::create_dir_all(skills_dir.join("valid-skill")).unwrap();
@@ -2819,9 +2945,7 @@ mod tests {
         // A loose file directly under skills/ — ignored (only dirs are skills).
         std::fs::write(skills_dir.join("loose-file.md"), "whatever").unwrap();
 
-        let result = list_skills(dir.to_string_lossy().to_string())
-            .await
-            .unwrap();
+        let result = list_skills_at(&dir).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "valid");
 

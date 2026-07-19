@@ -38,6 +38,9 @@ pub enum AppError {
 
     #[error("Background task failed: {0}")]
     BlockingTask(String),
+
+    #[error("Resource limit exceeded: {0}")]
+    Limit(String),
 }
 
 impl Serialize for AppError {
@@ -63,6 +66,7 @@ impl Serialize for AppError {
                 AppError::Conflict(_) => "conflict",
                 AppError::Agent(_) => "agent",
                 AppError::BlockingTask(_) => "blockingTask",
+                AppError::Limit(_) => "limit",
             },
         )?;
         state.end()

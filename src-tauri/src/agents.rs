@@ -692,11 +692,38 @@ pub(crate) struct ResponseAccumulator {
     /// live ClaudeEvent::TaskUpdate emissions so the persisted transcript
     /// records task creates / updates.
     tasks: Vec<crate::conversation::TaskRecord>,
+    /// Running byte total of the accumulated content strings (text, thinking,
+    /// tool-call input, task payloads). Bounded by [`crate::limits::ACCUMULATOR_MAX_BYTES`]
+    /// (PRD FR4) so a runaway agent turn can't grow the persisted response
+    /// without limit. `blocks` mirror the same content and are bounded
+    /// separately by [`crate::limits::ACCUMULATOR_MAX_BLOCKS`].
+    bytes: usize,
+    /// Set once [`ACCUMULATOR_MAX_BLOCKS`] or [`ACCUMULATOR_MAX_BYTES`] is
+    /// breached. Further content is dropped; [`finish`] / [`clone_partial`]
+    /// stamp a truncation marker so the (persisted + streamed) result shows the
+    /// turn was bounded. The terminal `Result` fields are still recorded.
+    over_limit: bool,
 }
+
+/// Truncation marker appended to the `result` text when the accumulator hit a
+/// block/byte budget (PRD FR4). Visible in both the transcript and the streamed
+/// `ClaudeEvent::Result` so the user can tell the response was bounded.
+const ACCUMULATOR_TRUNCATION_MARKER: &str =
+    "\n\n[LoopDeck: response truncated — exceeded block or byte accumulation limit]";
 
 impl ResponseAccumulator {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the accumulator has breached a block/byte budget (PRD FR4).
+    /// Once true, [`ingest_event`] drops further content pushes (the terminal
+    /// `Result` fields are still recorded) and sets [`over_limit`] so the
+    /// finished response carries a truncation marker.
+    fn at_limit(&self) -> bool {
+        self.over_limit
+            || self.blocks.len() >= crate::limits::ACCUMULATOR_MAX_BLOCKS
+            || self.bytes >= crate::limits::ACCUMULATOR_MAX_BYTES
     }
 
     /// Feed one parsed stream event. Returns true if this event was the
@@ -709,12 +736,24 @@ impl ResponseAccumulator {
                 session_id: sid,
             } => {
                 for block in message.content {
+                    // Budget guard (PRD FR4): once a block/byte ceiling is
+                    // breached, stop ingesting further content for this turn —
+                    // drop the remaining blocks, record the breach, and keep
+                    // the session_id (still set below). The terminal Result
+                    // event is unaffected, so the turn finishes naturally with
+                    // a truncated response rather than aborting mid-stream.
+                    if self.at_limit() {
+                        self.over_limit = true;
+                        break;
+                    }
                     match block {
                         ContentBlock::Text { text: t } => {
+                            self.bytes += t.len();
                             self.text.push_str(&t);
                             self.blocks.push(ContentBlockRecord::Text { text: t });
                         }
                         ContentBlock::Thinking { thinking: th } => {
+                            self.bytes += th.len();
                             self.thinking.get_or_insert_default().push_str(&th);
                             self.blocks
                                 .push(ContentBlockRecord::Thinking { thinking: th });
@@ -734,6 +773,7 @@ impl ResponseAccumulator {
                                 continue;
                             }
                             let input_str = input.to_string();
+                            self.bytes += name.len() + input_str.len();
                             self.tool_calls.push(crate::conversation::ToolCallRecord {
                                 name: name.clone(),
                                 input: input_str.clone(),
@@ -747,6 +787,8 @@ impl ResponseAccumulator {
                             // emission in send_message_streaming). TaskCreate's
                             // id+subject arrive via the tool *result* path below.
                             if let Some(task) = extract_task_from_tool_use(&name, &input) {
+                                self.bytes +=
+                                    task.id.len() + task.subject.len() + task.status.len();
                                 self.tasks.push(task);
                             }
                         }
@@ -797,9 +839,16 @@ impl ResponseAccumulator {
     /// Produce the final response. Returns `None` if we never saw any
     /// assistant text or a result event — useful for the caller to detect
     /// "claude produced nothing".
-    pub(crate) fn finish(self) -> Option<AgentResponse> {
+    pub(crate) fn finish(mut self) -> Option<AgentResponse> {
         if self.result_text.is_empty() && self.text.is_empty() {
             return None;
+        }
+        // Stamp the truncation marker (PRD FR4) onto the visible result text so
+        // the user/transcript can see the turn was bounded by a block/byte
+        // ceiling. `result_text` is set by the terminal Result event; if it's
+        // empty the marker alone still surfaces the condition.
+        if self.over_limit {
+            self.result_text.push_str(ACCUMULATOR_TRUNCATION_MARKER);
         }
 
         Some(AgentResponse {
@@ -825,10 +874,16 @@ impl ResponseAccumulator {
     /// transcript). `result_text` is empty until the real result event, so the
     /// caller stamps a "(interrupted)" marker onto the synthesized result.
     pub(crate) fn clone_partial(&self) -> AgentResponse {
+        // Stamp the truncation marker (PRD FR4) so an interrupted turn that had
+        // already breached a budget still surfaces it in the synthesized result.
+        let mut result = self.result_text.clone();
+        if self.over_limit {
+            result.push_str(ACCUMULATOR_TRUNCATION_MARKER);
+        }
         AgentResponse {
             text: self.text.clone(),
             thinking: self.thinking.clone(),
-            result: self.result_text.clone(),
+            result,
             usage: self.usage.clone(),
             is_error: self.is_error,
             duration_ms: self.duration_ms,
@@ -1410,6 +1465,59 @@ mod tests {
         assert_eq!(response.text, "let me checkdone");
         assert_eq!(response.thinking.as_deref(), Some("plannow edit"));
         assert_eq!(response.tool_calls.len(), 1);
+    }
+
+    // ── accumulator resource budgets (PRD FR4) ──────────────────────────
+
+    #[test]
+    fn accumulator_caps_blocks_and_marks_truncation() {
+        // Push well over the block cap (one tiny text block per assistant
+        // message), then a terminal Result. The accumulator must stop ingesting
+        // at the cap and stamp the truncation marker onto the visible result.
+        let mut acc = ResponseAccumulator::new();
+        for _ in 0..(crate::limits::ACCUMULATOR_MAX_BLOCKS + 1000) {
+            let _ = acc.ingest_event(StreamEvent::Assistant {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text { text: "x".into() }],
+                },
+                session_id: "s".into(),
+            });
+        }
+        let _ = acc.ingest_event(StreamEvent::Result {
+            result: "done".into(),
+            is_error: false,
+            duration_ms: 1,
+            total_cost_usd: None,
+            usage: None,
+        });
+        let resp = acc.finish().expect("finish must produce a response");
+        assert!(
+            resp.blocks.len() <= crate::limits::ACCUMULATOR_MAX_BLOCKS,
+            "blocks should be capped at ACCUMULATOR_MAX_BLOCKS, got {}",
+            resp.blocks.len()
+        );
+        assert!(
+            resp.result.contains("truncated"),
+            "result should carry the truncation marker: {}",
+            resp.result
+        );
+    }
+
+    #[test]
+    fn accumulator_clone_partial_stamps_truncation_when_over_limit() {
+        // An interrupted turn that already breached the budget must still
+        // surface the marker via clone_partial (the synthesized Result path).
+        let mut acc = ResponseAccumulator::new();
+        for _ in 0..(crate::limits::ACCUMULATOR_MAX_BLOCKS + 100) {
+            let _ = acc.ingest_event(StreamEvent::Assistant {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text { text: "y".into() }],
+                },
+                session_id: "s".into(),
+            });
+        }
+        let partial = acc.clone_partial();
+        assert!(partial.result.contains("truncated"));
     }
 
     // ── apply_agent_config tests ─────────────────────────────────────────

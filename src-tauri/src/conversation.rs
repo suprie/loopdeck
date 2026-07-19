@@ -17,6 +17,7 @@
 //! bricks the UI.
 
 use crate::agents::{ContentBlockRecord, UsageInfo};
+use crate::limits;
 use crate::persist;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -286,7 +287,7 @@ pub fn load_conversation(repo_path: &Path) -> Vec<ConversationTurn> {
 /// in the UI (e.g. an archive deleted out from under us) just shows nothing.
 pub fn load_conversation_by_id(repo_path: &Path, id: &str) -> Vec<ConversationTurn> {
     let path = file_for_id(repo_path, id);
-    let content = match std::fs::read_to_string(&path) {
+    let content = match limits::read_bounded_to_string(&path, limits::TRANSCRIPT_MAX_BYTES) {
         Ok(c) => c,
         Err(e) => {
             // Missing file is the common case (no turns yet, or stale id) —
@@ -418,7 +419,10 @@ pub fn promote_to_active(repo_path: &Path, id: &str) -> Result<(), std::io::Erro
 
     let source = file_for_id(repo_path, id);
     let turns = if source.exists() {
-        parse_turns(&std::fs::read_to_string(&source).unwrap_or_default())
+        parse_turns(
+            &limits::read_bounded_to_string(&source, limits::TRANSCRIPT_MAX_BYTES)
+                .unwrap_or_default(),
+        )
     } else {
         return Ok(()); // unknown id — nothing to promote
     };
@@ -551,7 +555,10 @@ pub fn list_conversations(repo_path: &Path) -> Vec<ConversationSummary> {
                 return None;
             };
 
-            let turns = parse_turns(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+            let turns = parse_turns(
+                &limits::read_bounded_to_string(entry.path(), limits::TRANSCRIPT_MAX_BYTES)
+                    .unwrap_or_default(),
+            );
             Some(summarize(&id, kind, &turns))
         })
         .collect();

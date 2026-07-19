@@ -10,11 +10,13 @@
   signed artifacts and a small cross-boundary regression suite. Broader product
   maturity work remains tracked but does not block the alpha.
 - **Status**: in_progress
-- **Last completed**: 2026-07-12 — Converted the hardening review into
-  `docs/PRD-trust-boundary-hardening.md` and recalibrated production readiness:
-  the private-alpha gate is separated from public-release and post-release
-  maturity work so LoopDeck can harden the real trust boundaries without
-  building mature-product infrastructure prematurely.
+- **Last completed**: 2026-07-19 — Bounded untrusted work (PRD FR4): a new
+  `limits` module centralizes the resource budgets, and every untrusted-input
+  path is now capped — recursive scan entries/time/results, `@`-mention search
+  depth/entries/time, README/spec/transcript/SKILL file reads, NDJSON stream
+  line size, `ResponseAccumulator` blocks/bytes, and parked approval/question
+  duration. A structured `AppError::Limit` surfaces the breaches that can't
+  degrade to a partial result. Closes Gate A item 6.
 
 ## Next Steps
 
@@ -26,8 +28,8 @@ Source: [`docs/PRD-trust-boundary-hardening.md`](../docs/PRD-trust-boundary-hard
 - [x] **Defer autonomous mode:** do not add per-project `AutonomousProject` configuration until the confirm-first path is proven usable; this is not an alpha blocker
 - [x] **Crash-safe critical state:** add one shared atomic-write helper and use it for the registry, `project.yaml`, `loops.md`, PRDs, and generated Claude settings
 - [x] **Recoverable registry:** keep one last-known-good backup and never overwrite a malformed primary registry with a fresh default
-- [ ] **Central project boundary:** resolve every project-scoped IPC request through shared registered-root and contained-relative-path helpers; reject traversal and symlink escape
-- [ ] **Bound untrusted work:** cap recursive scan depth/entries/time, file and NDJSON line sizes, `ResponseAccumulator` bytes/blocks, and parked approval/question duration
+- [x] **Central project boundary:** resolve every project-scoped IPC request through shared registered-root and contained-relative-path helpers; reject traversal and symlink escape
+- [x] **Bound untrusted work:** cap recursive scan depth/entries/time, file and NDJSON line sizes, `ResponseAccumulator` bytes/blocks, and parked approval/question duration
 - [ ] **Minimal interruption recovery:** after restart or child failure, classify incomplete work as `interrupted`, clear stale busy/waiting state, and allow a new turn; persist a separate run record only if transcript-based recovery proves insufficient
 - [ ] **Basic CI:** require `cargo fmt --check`, Clippy, `cargo test`, `npm ci`, and `npm run build`; start with the alpha's supported OS rather than a three-OS matrix
 - [ ] **Clear current lint debt:** resolve existing Clippy failures before enabling `-D warnings`
@@ -110,7 +112,236 @@ prerequisite.
 
 ## History
 
-### 2026-07-19 — Phase 2 — Crash-safe persistence + recoverable registry
+### 2026-07-19 — Phase 3b — Bounded untrusted work (FR4)
+
+- **Status**: completed
+- **Completed**: 2026-07-19
+
+Closes Gate A item 6 ("Bound untrusted work"). Phase 3's second slice of the
+trust-boundary hardening PRD made every path that processes untrusted input —
+a repository's filesystem, the `claude` CLI's NDJSON stream, and accumulated
+agent/model output — bounded by a named, centralized budget so a large or
+adversarial input can't freeze the UI or exhaust memory. The blocking-pool
+offload (the other half of FR4) was already done in the earlier `spawn_blocking`
+work; this step adds the size/time/depth budgets.
+
+**The shape — one `limits` module, one structured error.**
+
+- `limits.rs` (NEW): every budget is a named `pub const` in one place —
+  `SCAN_MAX_ENTRIES` / `SCAN_MAX_RESULTS` / `SCAN_MAX_DURATION`,
+  `SEARCH_MAX_DEPTH` / `SEARCH_MAX_ENTRIES` / `SEARCH_MAX_DURATION`,
+  `README_MAX_BYTES` / `SPEC_MAX_BYTES` / `SKILL_MAX_BYTES` /
+  `TRANSCRIPT_MAX_BYTES`, `STREAM_LINE_MAX_BYTES`,
+  `ACCUMULATOR_MAX_BLOCKS` / `ACCUMULATOR_MAX_BYTES`, and
+  `PARKED_SLOT_TIMEOUT`. Centralizing them makes the budgets visible and
+  tunable as a set rather than scattered magic numbers. Plus a shared
+  `read_bounded_to_string(path, max)` helper (lossy-decoded, `AsRef<Path>`).
+- `error.rs`: new `AppError::Limit(String)` variant, serialized as
+  `kind: "limit"`. The frontend only switches on `kind === "conflict"`, so a
+  new kind degrades to a generic message — the error surface is unchanged.
+
+**The bounds, by surface.**
+
+- *Recursive discovery scan* (`scanner::scan_directory`): the walkdir loop now
+  counts visited entries and watches the clock; on either budget (or the
+  result-count cap) it stops and returns what it found so far with a `warn!`.
+  Returning partial results (not an error) is the deliberate choice — discovery
+  still surfaces repos, just fewer, and the app stays usable. Core extracted as
+  `scan_directory_bounded(...)` so the budgets are injectable in tests.
+- *`@`-mention search walk* (`commands::walk_root`): gained a `SearchBudget`
+  (max depth, entries, time). Depth also bounds the recursion / call stack.
+  Same stop-and-return-partial stance. `SearchBudget::with(...)` is the
+  test seam.
+- *File reads*: README (`project.rs`), spec/PRD/epic Markdown (`epic.rs`),
+  SKILL.md (`commands.rs`), and transcripts (`conversation.rs`) now read
+  through `read_bounded_to_string` so a planted oversized file isn't loaded
+  wholly into memory. Lossy decode + the existing lenient parsers mean a cap
+  that splits a line/UTF-8 sequence degrades, not errors.
+- *NDJSON stream lines* (`claude_session.rs`): a new cancel-safe
+  `read_bounded_line` helper replaces `read_line` in both read loops. It never
+  buffers more than `STREAM_LINE_MAX_BYTES` for one line — once exceeded, the
+  line is drained (discarded through its newline) and the turn ends with
+  `AppError::Limit`. Cancel-safety (only `fill_buf` is awaited; `consume` is
+  sync) means it's safe to race in the streaming `select!` against interrupt /
+  timeout, and a dropped partial line is re-read cleanly next turn. Generic
+  over `AsyncBufRead + Unpin` so it's unit-tested with a `Cursor`.
+- *`ResponseAccumulator`* (`agents.rs`): tracks running `bytes` and an
+  `over_limit` flag; `at_limit()` guards every content push against
+  `ACCUMULATOR_MAX_BLOCKS` / `ACCUMULATOR_MAX_BYTES`. Past the cap, further
+  content is dropped (the terminal `Result` fields are still recorded) and
+  `finish()` / `clone_partial()` stamp a visible truncation marker onto the
+  result text. The turn finishes naturally rather than aborting — consistent
+  with the best-effort-channel / always-recorded-transcript architecture.
+- *Parked approval / question* (`claude_session.rs`): a new `park_or_expire`
+  helper races the oneshot receiver against `PARKED_SLOT_TIMEOUT` (10 min) in
+  both `answer_ask_user_question` and `answer_manual_permission`. On expiry the
+  slot is reclaimed, the request is denied (so claude unblocks), the pending
+  approval card resolves to ✗, and the turn ends — the per-project turn lock is
+  never held indefinitely. This restores the bound the old turn-level timeout
+  gave up (it fired mid-park) without that flaw.
+
+**Design decisions.** Walk/scan budgets stop-and-return-partial (logged)
+because that's the most usable outcome for discovery; the `Limit` error is
+reserved for single-object loads that can't degrade to a partial (an oversized
+stream line). The accumulator caps *memory* and stamps a marker rather than
+aborting the turn — aborting would orphan the live process for a bound that's
+about the persisted response size, not turn correctness. The bounded line
+reader is the riskiest change (hot streaming path, `select!`); it's cancel-safe
+by construction and pinned by 5 `Cursor`-based unit tests. The stderr drain in
+`spawn` still uses unbounded `read_line` — deliberately out of scope (stderr is
+small diagnostics, not the NDJSON content path); noted as a follow-up. So are
+the small structured-config reads (`project.yaml`, `config.yaml`,
+`.claude/settings.json`, `.loopdeck/*.md` via `memory.rs`) — low-risk and not
+the bulk-text inputs FR4 targets. See decisions.md ("Bounded untrusted work via
+central `limits` budgets").
+
+**Verification.** `cargo fmt --check` clean; `cargo clippy --all-targets` exit
+0 — 0 new warnings (all 12 remaining are pre-existing: 6 `ingest_event`
+`must_use` in existing accumulator tests + 6 in untouched modules);
+`cargo test --lib` 305 passed / 0 failed / 8 ignored (+18 vs Phase 3a's 287:
++4 `limits`, +2 scanner budgets, +2 `walk_root` budgets, +2 accumulator caps,
++3 `read_bounded_line`, +3 `park_or_expire`, +1 … rounding); `npx tsc --noEmit`
+clean. The 8 ignored are the live `claude`/keychain integration tests; the
+bounded-reader and parked-expiry contracts are pinned by the offline
+`Cursor`/oneshot tests. Backend-only change (the new `limit` error kind
+degrades gracefully in the frontend), so `npm run build` was not re-run.
+Recommend the manual alpha smoke test (oversized file read, long-running
+approval that times out) on a packaged build before tagging.
+
+**Files changed:** src-tauri/src/{limits.rs (new), lib.rs, error.rs, scanner.rs,
+commands.rs, project.rs, epic.rs, conversation.rs, agents.rs, claude_session.rs},
+.loopdeck/{loops.md, decisions.md}.
+
+
+### 2026-07-19 — Phase 3a — Central registered-project boundary (FR3)
+
+- **Status**: completed
+- **Completed**: 2026-07-19
+
+Closes Gate A item 5 ("Central project boundary"). Phase 3's first slice of
+the trust-boundary hardening PRD made the project filesystem boundary a single
+chokepoint instead of a per-command convention. Before this work, every
+project-scoped command did `PathBuf::from(&path)` + `if path.exists()` and
+trusted the result — no command verified the path was a **registered** project
+root, and only two (`list_dir_entries`, `epic::resolve_spec_path`) did any
+containment checking. The most acute gap: `toggle_prd_loop` joined
+`epic_slug`/`prd_filename` straight into a filesystem path, so a `../` in
+either escaped `docs/epics/` and read/wrote an arbitrary file, and
+`agent_add_allow_rule` wrote `.claude/settings.local.json` with zero checks.
+
+**The fix — one shared module, two responsibilities.**
+
+- `paths.rs` (NEW): the boundary helpers every project-scoped command funnels
+  through.
+  - `canonical_root(raw)` — canonicalize, must be an existing directory. The
+    filesystem half of the check.
+  - `resolve_registered_root(&config, raw)` — `canonical_root` + must be in the
+    registry. Returns `ProjectNotFound` (the structured "missing/moved" state
+    FR3 calls for) for an unregistered path. Borrows `config` so the caller
+    controls lock lifetime — important because most callers must release the
+    config lock before doing blocking I/O on the returned root.
+  - `resolve_within(root, rel, must_exist)` — join a relative path beneath a
+    canonical root and reject traversal/escape. Lexically rejects `..`,
+    absolute (`RootDir`), and Windows `Prefix` components *before* touching the
+    filesystem (a `join` with an absolute path silently replaces the base — the
+    classic containment bug). Then: `must_exist=true` canonicalizes the target
+    (a symlink pointing outside the root resolves out and fails `starts_with`);
+    `must_exist=false` canonicalizes the longest existing ancestor
+    (`canonicalize_prefix`) and re-appends the rest, so a write to a new file
+    still gets a symlink-escaped prefix caught.
+  - `canonicalize_prefix(path)` — moved here from `epic.rs` (it was a local
+    copy); now `pub(crate)` and the single implementation.
+  - 15 unit tests cover canonical resolution, registered/unregistered split,
+    `..`/absolute/symlink-escape rejection for both read and write paths, and
+    the empty-rel (list-root) case.
+- `epic.rs`: `resolve_spec_path` now delegates traversal/symlink/absolute
+  checks to `paths::resolve_within` (keeps only the spec-specific `.md`
+  requirement); `canonicalize_prefix` deleted (lives in `paths`).
+  `toggle_prd_loop` resolves `epic_slug`/`prd_filename` through
+  `paths::resolve_within` under the canonical `docs/epics/` root — closing the
+  `../` escape. New test `test_toggle_prd_loop_rejects_traversal_in_slug`
+  pins it.
+
+**Routed through the helpers.** Every project-scoped IPC command now resolves
+its path via `resolve_registered_root` (read/parse/write/spec/agent/open) or
+`canonical_root` (`import_project`, `remove_project` — the registration and
+deregistration paths themselves, which can't require registration):
+
+- Read/parse: `get_project`, `get_decisions`, `get_loops`, `get_epics`,
+  `get_epics_by_milestone`, `rescan_project`, `list_dir_entries` (+ `subdir`
+  via `resolve_within`), `search_project_files`, `list_skills`.
+- Write/spec: `update_description`, `regenerate_description`,
+  `promote_epic_loop`, `toggle_loop_step`, `toggle_prd_loop`, `read_spec_file`,
+  `write_spec_file`, `agent_add_allow_rule`.
+- Agent: `agent_start_loop[_streaming]`, `agent_send_message[_streaming]`,
+  `agent_get_conversation[_by_id]`, `agent_list_conversations`,
+  `agent_promote_to_active`, `agent_reset_session`.
+- OS open: `open_in_finder`, `open_in_terminal` (the old `resolve_dir_arg` is
+  deleted; the registered-root resolve replaces it and still blocks the
+  scheme-handler tricks `resolve_dir_arg` was written for).
+
+**Deliberately not routed** — the six pure in-memory slot/session-map commands
+(`agent_answer_question`, `agent_answer_permission`, `agent_interrupt`,
+`agent_pending_question`, `agent_pending_permission`, `agent_is_busy`). They
+touch no filesystem — they pop slots / read a session map keyed by the same
+canonical `project.path` the frontend always supplies (it only ever has
+canonical paths from `list_projects`), so the keys already match. Adding a
+registration check there would be dead weight and would change
+`agent_interrupt`'s documented "Ok(()) whether or not a turn is in flight"
+contract. FR5 (session recovery, a later step) handles the
+removal-during-turn edge case properly.
+
+**Symlink-during-search.** `walk_root` (the `@`-mention autocomplete walk) now
+skips symlinks entirely — `entry.file_type().is_symlink()` → `continue` — so
+the search can't traverse out of the root via a planted link and never
+descends into a symlinked directory. `scan_directory` (the discovery scanner)
+already used `walkdir::follow_links(false)`, so it was already correct.
+
+**Bonus correctness fix.** Routing `get_project` / `update_description` /
+`regenerate_description` / `rescan_project` through canonical resolution also
+fixed a latent bug: those commands looked the registry up with the raw
+(non-canonical) input, but the registry stores canonical paths, so a
+non-canonical input silently failed to match and returned a spurious
+`ProjectNotFound`.
+
+**Design decisions.** The helpers borrow `config` rather than taking the
+`AppState` lock, so each caller controls lock lifetime — needed for the
+`spawn_blocking`-offloaded commands (`rescan_project`, `import_project`,
+`list_projects`) that must release the lock before blocking I/O. A small
+`resolve_root(state, path)` convenience wraps the lock+resolve for commands
+that only read project state and don't otherwise need the lock; mutating
+commands resolve inline so the lock spans the mutation. An unregistered path
+surfaces as the *existing* `ProjectNotFound` kind (not a new variant) — the
+frontend only switches on `kind === "conflict"`, so the error surface is
+unchanged and it degrades to a message. The registration requirement is
+strict on every mutating/executing path (the security-critical ones) and on
+every read of project state — there is no legitimate flow that operates on an
+unregistered project, since the frontend only ever holds paths from
+`list_projects` / `import_project`. See decisions.md ("Central registered-
+project boundary via shared `paths` helpers").
+
+**Tradeoff accepted.** `list_dir_entries`, `search_project_files`,
+`list_skills`, `open_in_finder`, `open_in_terminal`, and
+`agent_add_allow_rule` each gained a brief config-lock acquisition (they
+previously took no `State`). The lock is held only for the `find_by_path`
+lookup — microseconds — so the autocomplete / open paths are unaffected in
+practice.
+
+**Verification.** `cargo fmt --check` clean; `cargo clippy --all-targets`
+exit 0 — 0 new warnings (all 14 pre-existing: 5 lib + test, none in `paths.rs`
+or the changed `commands.rs`/`epic.rs` sections); `cargo test --lib` 287
+passed / 0 failed / 8 ignored (+16 vs Phase 2's 271: +15 `paths`, +1 epic
+traversal); `npx tsc --noEmit` clean. The 8 ignored are the live
+`claude`/keychain integration tests; the boundary helpers are offline-tested,
+and the command-layer wiring is structural (Tauri injects `State`, so the
+frontend `invoke` calls are unchanged). Recommend the manual alpha smoke test
+(import → agent turn → approval → interrupt) on a packaged build before
+tagging.
+
+**Files changed:** src-tauri/src/{paths.rs (new), lib.rs, commands.rs,
+epic.rs}, .loopdeck/{loops.md, decisions.md}.
+
+
 
 - **Status**: completed
 - **Completed**: 2026-07-19

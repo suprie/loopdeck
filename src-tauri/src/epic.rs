@@ -14,7 +14,9 @@
 //! epic skipped, never a panic).
 
 use crate::error::AppError;
+use crate::limits;
 use crate::memory;
+use crate::paths;
 use crate::persist;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -232,7 +234,7 @@ pub fn promote_epic_loop(
         memory::ensure_memory_files(repo_path)?;
     }
 
-    let content = std::fs::read_to_string(&loops_file)?;
+    let content = limits::read_bounded_to_string(&loops_file, limits::SPEC_MAX_BYTES)?;
 
     // Clobber guard: refuse if a loop is already in progress.
     let status = memory::parse_loops(repo_path);
@@ -281,20 +283,28 @@ pub fn toggle_prd_loop(
     prd_filename: &str,
     loop_title: &str,
 ) -> Result<bool, AppError> {
-    let prd_path = repo_path
+    // Containment: `epic_slug` and `prd_filename` are joined into a filesystem
+    // path, so route them through the shared boundary helper under the
+    // canonical `docs/epics/` root. This rejects `../` in either field (which
+    // would otherwise escape `docs/epics/` and read/write an arbitrary file)
+    // and symlink-redirected prefixes. `must_exist = false` lets the resolver
+    // canonicalize the parent without failing on the not-yet-checked target;
+    // the explicit `exists()` below then gives the friendly not-found error.
+    let epics_root = repo_path
         .join("docs")
         .join("epics")
-        .join(epic_slug)
-        .join(prd_filename);
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("docs/epics not found: {e}")))?;
+    let prd_path =
+        paths::resolve_within(&epics_root, &format!("{epic_slug}/{prd_filename}"), false)?;
 
     if !prd_path.exists() {
         return Err(AppError::ProjectNotFound(format!(
-            "PRD file not found: {}",
-            prd_path.display()
+            "PRD file not found: {epic_slug}/{prd_filename}"
         )));
     }
 
-    let content = std::fs::read_to_string(&prd_path)?;
+    let content = limits::read_bounded_to_string(&prd_path, limits::SPEC_MAX_BYTES)?;
     let needle = loop_title.trim();
     let mut found: Option<(usize, bool)> = None;
 
@@ -338,16 +348,15 @@ pub fn toggle_prd_loop(
 // ── Spec file read/write (sandboxed to docs/epics/) ──────────────────
 
 /// Resolve a relative path under `docs/epics/` to an absolute, sandbox-safe
-/// path. Rejects `../` escapes, symlinks pointing outside the root, and
-/// non-`.md` files.
+/// path. The traversal / absolute / symlink-escape checks are delegated to the
+/// shared [`crate::paths::resolve_within`] helper (PRD FR3); this wrapper only
+/// adds the spec-specific `.md` extension requirement and canonicalizes the
+/// `docs/epics/` root.
 ///
-/// - `must_exist: true` (reads): canonicalizes the target file — catches
-///   symlinks pointing outside the root.
+/// - `must_exist: true` (reads): the target is canonicalized — symlinks
+///   pointing outside the root resolve out and are rejected.
 /// - `must_exist: false` (writes): the target may not exist yet, so the
-///   parent dir may not either. Uses a lexical check: rejects any `..`
-///   component in `rel_path`, then verifies the joined path is under the
-///   canonicalized root. Symlink escapes in the *existing* prefix are caught
-///   by canonicalizing whatever prefix of the path already exists on disk.
+///   longest existing ancestor is canonicalized and the rest re-appended.
 fn resolve_spec_path(
     repo_path: &Path,
     rel_path: &str,
@@ -365,81 +374,16 @@ fn resolve_spec_path(
         .canonicalize()
         .map_err(|e| AppError::InvalidPath(format!("docs/epics not found: {e}")))?;
 
-    // Reject any `..` component lexically — catches traversal before touching
-    // the filesystem.
-    for component in std::path::Path::new(rel_path).components() {
-        if component == std::path::Component::ParentDir {
-            return Err(AppError::InvalidPath(
-                "rel_path contains `..` — traversal rejected".into(),
-            ));
-        }
-    }
-
-    let target = epics_root.join(rel_path);
-
-    let resolved = if must_exist {
-        // Read: the file must exist — canonicalize it to resolve symlinks.
-        target
-            .canonicalize()
-            .map_err(|e| AppError::InvalidPath(format!("spec file not found: {e}")))?
-    } else {
-        // Write: the file/parent may not exist yet. Canonicalize the deepest
-        // existing ancestor, then re-append the remaining components.
-        canonicalize_prefix(&target)?
-    };
-
-    if !resolved.starts_with(&epics_root) {
-        return Err(AppError::InvalidPath(
-            "spec file is outside docs/epics/".into(),
-        ));
-    }
-
-    Ok(resolved)
-}
-
-/// Canonicalize the longest existing prefix of `path` and re-append the
-/// remaining (non-existent) components. Used for write-path validation where
-/// the target file or its parent directory may not exist yet.
-fn canonicalize_prefix(path: &Path) -> Result<PathBuf, AppError> {
-    // Collect components from the leaf upward until we find an existing path.
-    let mut to_append: Vec<std::ffi::OsString> = Vec::new();
-    let mut current = path.to_path_buf();
-
-    loop {
-        match current.canonicalize() {
-            Ok(canon) => {
-                let mut result = canon;
-                for comp in to_append.into_iter().rev() {
-                    result.push(comp);
-                }
-                return Ok(result);
-            }
-            Err(_) => {
-                // Strip the last component and try again.
-                let parent = current.parent();
-                let filename = current.file_name();
-                match (parent, filename) {
-                    (Some(p), Some(f)) => {
-                        to_append.push(f.to_os_string());
-                        current = p.to_path_buf();
-                    }
-                    _ => {
-                        return Err(AppError::InvalidPath(format!(
-                            "cannot canonicalize any prefix of: {}",
-                            path.display()
-                        )));
-                    }
-                }
-            }
-        }
-    }
+    paths::resolve_within(&epics_root, rel_path, must_exist)
 }
 
 /// Read a spec file under `docs/epics/`. The relative path is sandboxed —
 /// `../` escapes and symlinks pointing outside the root are rejected.
 pub fn read_spec_file(repo_path: &Path, rel_path: &str) -> Result<String, AppError> {
     let path = resolve_spec_path(repo_path, rel_path, true)?;
-    let content = std::fs::read_to_string(&path)?;
+    // Bounded read (PRD FR4): spec Markdown is untrusted content under the
+    // project; cap so a planted oversized file isn't loaded wholly into memory.
+    let content = limits::read_bounded_to_string(&path, limits::SPEC_MAX_BYTES)?;
     Ok(content)
 }
 
@@ -531,7 +475,7 @@ fn replace_current_section(content: &str, new_current: &str) -> String {
 /// `AppError::Yaml` (carrying the serde_yaml error). Missing frontmatter
 /// entirely is `AppError::Config` naming the file.
 fn parse_epic_readme(path: &Path) -> Result<Epic, AppError> {
-    let content = std::fs::read_to_string(path)?;
+    let content = limits::read_bounded_to_string(path, limits::SPEC_MAX_BYTES)?;
     let (fm_str, _body) = split_frontmatter(&content).ok_or_else(|| {
         AppError::Config(format!(
             "epic README missing YAML frontmatter: {}",
@@ -561,7 +505,7 @@ fn parse_epic_readme(path: &Path) -> Result<Epic, AppError> {
 
 /// Parse a single PRD file into a `Prd` with its phase checklists.
 fn parse_prd(path: &Path) -> Result<Prd, AppError> {
-    let content = std::fs::read_to_string(path)?;
+    let content = limits::read_bounded_to_string(path, limits::SPEC_MAX_BYTES)?;
     let (fm_str, body) = split_frontmatter(&content).ok_or_else(|| {
         AppError::Config(format!("PRD missing YAML frontmatter: {}", path.display()))
     })?;
@@ -1444,6 +1388,29 @@ _No active loop._
 
         let err = toggle_prd_loop(&dir, "e", "prd-x.md", "nonexistent loop");
         assert!(err.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_toggle_prd_loop_rejects_traversal_in_slug() {
+        // PRD FR3: `epic_slug` is joined into a filesystem path, so a `../`
+        // in it must not escape `docs/epics/` and touch a file outside the
+        // sandbox. Seed a real file outside docs/epics/ to prove the toggle
+        // does NOT reach it.
+        let dir = create_temp_repo();
+        std::fs::write(dir.join("secret.md"), "- [ ] pwned\n").unwrap();
+
+        let err = toggle_prd_loop(&dir, "../../.", "secret.md", "pwned");
+        assert!(
+            err.is_err(),
+            "traversal in epic_slug must be rejected, not followed"
+        );
+        // The out-of-sandbox file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("secret.md")).unwrap(),
+            "- [ ] pwned\n"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::limits;
 use crate::scanner::detect_stack;
 use crate::skills;
 use chrono::Utc;
@@ -217,7 +218,11 @@ fn extract_readme_paragraph(repo_path: &Path) -> Result<Option<String>, AppError
         None => return Ok(None),
     };
 
-    let readme_content = std::fs::read_to_string(&readme_path)?;
+    // Bounded read (PRD FR4): only the first paragraph is wanted, so cap the
+    // read at README_MAX_BYTES — a hostile giant README stays out of memory and
+    // the extracted paragraph is unaffected in practice. Lossy decode keeps a
+    // cap that splits a UTF-8 sequence from erroring.
+    let readme_content = limits::read_bounded_to_string(&readme_path, limits::README_MAX_BYTES)?;
 
     // Parse: find the first paragraph of meaningful content
     let mut in_code_block = false;

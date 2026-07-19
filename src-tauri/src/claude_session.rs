@@ -57,6 +57,128 @@ enum ReadOutcome {
     Interrupted,
 }
 
+/// Outcome of a single bounded line read — see [`read_bounded_line`].
+///
+/// Replaces the `usize` returned by `read_line` with three explicit states so
+/// the read loops can distinguish "got a line", "EOF", and "discarded an
+/// oversized line" without overloading a byte count.
+enum BoundedRead {
+    /// A complete line (including its trailing newline) is in the buffer.
+    Line,
+    /// EOF was reached before any bytes were read for this line.
+    Eof,
+    /// The line exceeded the byte cap and was discarded in full.
+    Oversized,
+}
+
+/// Read one newline-terminated line from `reader` into `buf`, bounding peak
+/// memory to `max_bytes` (PRD FR4).
+///
+/// Drop-in for `AsyncBufReadExt::read_line` that never buffers more than
+/// `max_bytes` for a single line: once a line exceeds the cap we drain it
+/// (discarding bytes up to and including its newline) and report
+/// [`BoundedRead::Oversized`], so a pathologically large NDJSON line from the
+/// `claude` CLI (a tool result embedding a huge file, a runaway `result`
+/// event) can't exhaust memory. On a normal line the full line — newline
+/// included — lands in `buf`.
+///
+/// **Cancel-safe:** the only `.await` is `fill_buf`, which leaves the reader
+/// consistent if the future is dropped mid-call (the internal buffer is
+/// untouched until the synchronous `consume`). Safe to race in a `select!`
+/// against an interrupt / a timeout, as the streaming loop does — a dropped
+/// partial line is simply re-read on the next turn.
+///
+/// Generic over `AsyncBufRead + Unpin` so it's unit-testable with a `Cursor`.
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<BoundedRead, std::io::Error>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    buf.clear();
+    let mut oversized = false;
+    loop {
+        // `fill_buf` borrows `reader` for the lifetime of `data`; we lift
+        // everything we need (lengths, whether to append) into locals below so
+        // the borrow ends before the `&mut self` `consume`.
+        let data = reader.fill_buf().await?;
+        if data.is_empty() {
+            // EOF. A pending oversized line with no terminating newline still
+            // counts as oversized; otherwise an empty buffer is a clean EOF.
+            return Ok(if oversized {
+                BoundedRead::Oversized
+            } else if buf.is_empty() {
+                BoundedRead::Eof
+            } else {
+                BoundedRead::Line
+            });
+        }
+        match data.iter().position(|&b| b == b'\n') {
+            Some(nl) => {
+                // The line ends within this chunk.
+                let consume = nl + 1;
+                if oversized || buf.len() + consume > max_bytes {
+                    // Whole line is oversized — discard it (consume through the
+                    // newline) and report. `consume` is a copy, so `data`'s
+                    // borrow has ended by the time we mutably borrow `reader`.
+                    reader.consume(consume);
+                    buf.clear();
+                    return Ok(BoundedRead::Oversized);
+                }
+                // Last use of `data` — the borrow ends here, so `consume` below
+                // can take `&mut reader`.
+                buf.extend_from_slice(&data[..consume]);
+                reader.consume(consume);
+                return Ok(BoundedRead::Line);
+            }
+            None => {
+                // No newline yet. Capture the length (a copy) so the `data`
+                // borrow ends before `consume`.
+                let len = data.len();
+                let over = oversized || buf.len() + len > max_bytes;
+                if over {
+                    oversized = true;
+                } else {
+                    buf.extend_from_slice(data);
+                }
+                reader.consume(len);
+            }
+        }
+    }
+}
+
+/// Outcome of racing a parked-slot receiver against an expiry deadline — see
+/// [`park_or_expire`].
+enum ParkOutcome<T> {
+    /// The user resolved the slot (Allow/Deny, or answers).
+    Resolved(T),
+    /// The sender was dropped without resolving — the turn was cancelled.
+    Closed,
+    /// The deadline elapsed with no resolution.
+    Expired,
+}
+
+/// Race a parked-slot oneshot receiver against an expiry [`Duration`] (PRD FR4).
+///
+/// The parked approval / `AskUserQuestion` flow must not hold the per-project
+/// turn lock forever: if the user steps away, the slot expires, the request is
+/// denied, and the turn ends so the project isn't wedged. Both
+/// `oneshot::Receiver::await` and `tokio::time::sleep` are cancel-safe, so this
+/// is safe to use inline. Generic over `T` so it serves both the answer and
+/// permission slots.
+async fn park_or_expire<T>(rx: oneshot::Receiver<T>, timeout: Duration) -> ParkOutcome<T> {
+    tokio::select! {
+        biased;
+        res = rx => match res {
+            Ok(v) => ParkOutcome::Resolved(v),
+            Err(_) => ParkOutcome::Closed,
+        },
+        _ = tokio::time::sleep(timeout) => ParkOutcome::Expired,
+    }
+}
+
 /// The user's answer to a single `AskUserQuestion` question.
 ///
 /// The user selects one or more canned option labels (radio/checkbox) and may
@@ -520,18 +642,40 @@ impl ClaudeSession {
                 .await;
         }
 
-        // Park until the user answers. The borrow of `self` is released at the
-        // `.await` boundary (no self ref held across it), so the subsequent
-        // `write_allow_with_updated_input` can take `&mut self` again.
-        let answers = match rx.await {
-            Ok(answers) => answers,
-            Err(_) => {
+        // Park until the user answers, but bounded by PARKED_SLOT_TIMEOUT
+        // (PRD FR4): a user who steps away can't wedge the per-project turn
+        // lock forever. On expiry we reclaim the slot, deny the request so
+        // claude unblocks, and end the turn. The borrow of `self` is released
+        // at the `.await` boundary, so the subsequent writes can re-take
+        // `&mut self`.
+        let answers = match park_or_expire(rx, crate::limits::PARKED_SLOT_TIMEOUT).await {
+            ParkOutcome::Resolved(answers) => answers,
+            ParkOutcome::Closed => {
                 // Sender dropped without sending — the turn was cancelled
-                // (e.g. session dropped, or timeout aborted the turn). Return
-                // an error so the caller stops reading.
+                // (e.g. session dropped). Return an error so the caller stops
+                // reading.
                 return Err(AppError::Agent(
                     "AskUserQuestion cancelled — answer channel closed".into(),
                 ));
+            }
+            ParkOutcome::Expired => {
+                // Reclaim the slot so a late answer doesn't find a dangling
+                // sender, deny so claude unblocks, and end the turn.
+                let _ = question_slot.lock().ok().and_then(|mut g| g.take());
+                tracing::warn!(
+                    request_id = %request_id,
+                    secs = crate::limits::PARKED_SLOT_TIMEOUT.as_secs(),
+                    "AskUserQuestion timed out waiting for a user answer — denying"
+                );
+                self.write_deny(
+                    request_id,
+                    "AskUserQuestion timed out waiting for a user answer",
+                )
+                .await?;
+                return Err(AppError::Agent(format!(
+                    "AskUserQuestion timed out after {}s",
+                    crate::limits::PARKED_SLOT_TIMEOUT.as_secs()
+                )));
             }
         };
 
@@ -656,17 +800,47 @@ impl ClaudeSession {
             return Ok(());
         }
 
-        // Park until the user answers. Borrow of `self` is released at the
-        // `.await`, so the writes below can re-take `&mut self`.
-        let decision = match rx.await {
-            Ok(d) => d,
-            Err(_) => {
-                // Sender dropped without sending — the turn was cancelled or
-                // timed out. Return an error so the caller stops reading
-                // (mirrors the AskUserQuestion cancellation path).
+        // Park until the user answers, but bounded by PARKED_SLOT_TIMEOUT
+        // (PRD FR4): on expiry the pending card resolves to denied, claude
+        // unblocks, and the turn ends — the per-project turn lock is never
+        // held indefinitely. Borrow of `self` is released at the `.await`, so
+        // the writes below can re-take `&mut self`.
+        let decision = match park_or_expire(rx, crate::limits::PARKED_SLOT_TIMEOUT).await {
+            ParkOutcome::Resolved(d) => d,
+            ParkOutcome::Closed => {
+                // Sender dropped without sending — the turn was cancelled.
+                // Return an error so the caller stops reading (mirrors the
+                // AskUserQuestion cancellation path).
                 return Err(AppError::Agent(
                     "manual approval cancelled — answer channel closed".into(),
                 ));
+            }
+            ParkOutcome::Expired => {
+                // Reclaim the slot, surface the expiry as a resolved deny so
+                // the UI's pending marker becomes ✗, deny so claude unblocks,
+                // and end the turn.
+                let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
+                if let Some(channel) = channel {
+                    let _ = channel.send(ClaudeEvent::PermissionRequest {
+                        request_id: request_id.to_string(),
+                        tool_name: request.tool_name.clone(),
+                        input: input_str.to_string(),
+                        decision: String::from("deny"),
+                        reason: String::from("timed out waiting for user approval"),
+                    });
+                }
+                tracing::warn!(
+                    request_id = %request_id,
+                    tool = %request.tool_name,
+                    secs = crate::limits::PARKED_SLOT_TIMEOUT.as_secs(),
+                    "manual approval timed out waiting for a user decision — denying"
+                );
+                let reason = "approval timed out waiting for a user decision";
+                self.write_deny(request_id, reason).await?;
+                return Err(AppError::Agent(format!(
+                    "manual approval timed out after {}s",
+                    crate::limits::PARKED_SLOT_TIMEOUT.as_secs()
+                )));
             }
         };
 
@@ -851,35 +1025,51 @@ impl ClaudeSession {
                 .map_err(|e| AppError::Agent(format!("flush failed: {}", e)))?;
             // ---- read stdout until the terminal `result` event ----
             let mut acc = ResponseAccumulator::new();
-            let mut line = String::new();
+            let mut line_bytes: Vec<u8> = Vec::new();
             loop {
-                line.clear();
-                // read_line returns 0 only on EOF. With a persistent process that
-                // means it died — treat as an error rather than a turn boundary.
-                // The per-read timeout catches a stuck peer (no stdout for
+                // Bounded line read (PRD FR4): a single NDJSON line is capped
+                // at STREAM_LINE_MAX_BYTES so a pathologically large line (a
+                // tool result embedding a huge file) can't exhaust memory. The
+                // per-read timeout catches a stuck peer (no stdout for
                 // READ_LINE_TIMEOUT seconds) without bounding the parked phase.
-                let n =
-                    match tokio::time::timeout(READ_LINE_TIMEOUT, self.stdout.read_line(&mut line))
-                        .await
-                    {
-                        Ok(Ok(n)) => n,
-                        Ok(Err(e)) => {
-                            return Err(AppError::Agent(format!("read failed: {}", e)));
-                        }
-                        Err(_) => {
-                            return Err(AppError::Agent(format!(
-                                "claude produced no stdout for {}s — assuming stuck",
-                                READ_LINE_TIMEOUT.as_secs()
-                            )));
-                        }
-                    };
+                let read = match tokio::time::timeout(
+                    READ_LINE_TIMEOUT,
+                    read_bounded_line(
+                        &mut self.stdout,
+                        &mut line_bytes,
+                        crate::limits::STREAM_LINE_MAX_BYTES,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(read)) => read,
+                    Ok(Err(e)) => {
+                        return Err(AppError::Agent(format!("read failed: {}", e)));
+                    }
+                    Err(_) => {
+                        return Err(AppError::Agent(format!(
+                            "claude produced no stdout for {}s — assuming stuck",
+                            READ_LINE_TIMEOUT.as_secs()
+                        )));
+                    }
+                };
 
-                if n == 0 {
-                    return Err(AppError::Agent(
-                        "claude closed stdout before sending a result event".into(),
-                    ));
+                match read {
+                    BoundedRead::Eof => {
+                        return Err(AppError::Agent(
+                            "claude closed stdout before sending a result event".into(),
+                        ));
+                    }
+                    BoundedRead::Oversized => {
+                        return Err(AppError::Limit(format!(
+                            "claude stream line exceeded {} bytes — discarded",
+                            crate::limits::STREAM_LINE_MAX_BYTES
+                        )));
+                    }
+                    BoundedRead::Line => {}
                 }
 
+                let line = String::from_utf8_lossy(&line_bytes);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -992,15 +1182,20 @@ impl ClaudeSession {
             }
 
             let mut acc = ResponseAccumulator::new();
-            let mut line = String::new();
+            let mut line_bytes: Vec<u8> = Vec::new();
             loop {
-                line.clear();
                 // Race the next stdout line against an interrupt. On
                 // interrupt we write the graceful control_request and end the
                 // turn — the live process survives, so the next send resumes
                 // the same conversation. (During a parked approval/question
-                // the loop is off `read_line`, so an interrupt there won't be
+                // the loop is off the read, so an interrupt there won't be
                 // observed this turn; the user should deny the card instead.)
+                //
+                // The read is bounded (PRD FR4): `read_bounded_line` caps a
+                // single NDJSON line at STREAM_LINE_MAX_BYTES. It is cancel-safe
+                // (only `fill_buf` is awaited), so dropping it mid-line on
+                // interrupt/timeout leaves the reader consistent for the next
+                // turn — no data lost or duplicated.
                 let read_or_interrupt = tokio::select! {
                     biased; // interrupt wins the race when both are ready
                     res = &mut interrupt_rx => match res {
@@ -1017,8 +1212,19 @@ impl ClaudeSession {
                             READ_LINE_TIMEOUT.as_secs()
                         )));
                     },
-                    res = self.stdout.read_line(&mut line) => match res {
-                        Ok(n) => ReadOutcome::ReadResult(n),
+                    read = read_bounded_line(
+                        &mut self.stdout,
+                        &mut line_bytes,
+                        crate::limits::STREAM_LINE_MAX_BYTES,
+                    ) => match read {
+                        Ok(BoundedRead::Line) => ReadOutcome::ReadResult(1),
+                        Ok(BoundedRead::Eof) => ReadOutcome::ReadResult(0),
+                        Ok(BoundedRead::Oversized) => {
+                            return Err(AppError::Limit(format!(
+                                "claude stream line exceeded {} bytes — discarded",
+                                crate::limits::STREAM_LINE_MAX_BYTES
+                            )))
+                        }
                         Err(e) => return Err(AppError::Agent(format!("read failed: {}", e))),
                     },
                 };
@@ -1057,6 +1263,7 @@ impl ClaudeSession {
                     ));
                 }
 
+                let line = String::from_utf8_lossy(&line_bytes);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -1361,6 +1568,107 @@ mod tests {
     /// path; an empty slot stands in for "no interrupt requested".
     fn islot() -> InterruptSlot {
         Arc::new(StdMutex::new(None))
+    }
+
+    // ── bounded line reader (PRD FR4) ───────────────────────────────────
+
+    /// Wrap raw bytes in the same `BufReader<Cursor>` shape `read_bounded_line`
+    /// is built for, so the unit tests exercise the real async path.
+    fn buf_reader(bytes: &'static [u8]) -> tokio::io::BufReader<std::io::Cursor<&'static [u8]>> {
+        tokio::io::BufReader::new(std::io::Cursor::new(bytes))
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_returns_normal_line() {
+        let mut reader = buf_reader(b"{\"type\":\"result\"}\nsecond\n");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"{\"type\":\"result\"}\n");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_eof_on_empty() {
+        let mut reader = buf_reader(b"");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, BoundedRead::Eof));
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_discards_oversized_line() {
+        // A 50-byte line (incl. newline) under a 10-byte cap → Oversized, the
+        // whole line consumed, buf empty, and the NEXT read resumes at the
+        // following line (no data lost across the discarded one).
+        let mut payload: Vec<u8> = vec![b'x'; 49];
+        payload.push(b'\n');
+        let mut stream: Vec<u8> = payload.clone();
+        stream.extend_from_slice(b"ok\n");
+        let mut cursor = std::io::Cursor::new(stream);
+        let mut reader = tokio::io::BufReader::new(&mut cursor);
+
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 10).await.unwrap();
+        assert!(matches!(read, BoundedRead::Oversized));
+        assert!(buf.is_empty(), "oversized line must not be buffered");
+
+        // Next read returns the following, normal line.
+        let read = read_bounded_line(&mut reader, &mut buf, 10).await.unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"ok\n");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_allows_line_at_exact_cap() {
+        // A line exactly at the cap (inclusive) is allowed — the bound is `>`.
+        let mut reader = buf_reader(b"abc\n");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 4).await.unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"abc\n");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_returns_final_line_without_newline() {
+        // A trailing line with no newline at EOF is still returned as a Line.
+        let mut reader = buf_reader(b"tail-no-newline");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"tail-no-newline");
+    }
+
+    // ── parked-slot expiry (PRD FR4) ────────────────────────────────────
+
+    #[tokio::test]
+    async fn park_or_expire_returns_resolved_value() {
+        let (tx, rx) = oneshot::channel::<u32>();
+        tx.send(42).unwrap();
+        let outcome = park_or_expire(rx, Duration::from_millis(50)).await;
+        assert!(matches!(outcome, ParkOutcome::Resolved(42)));
+    }
+
+    #[tokio::test]
+    async fn park_or_expire_reports_closed_when_sender_dropped() {
+        let (tx, rx) = oneshot::channel::<u32>();
+        drop(tx); // sender dropped without sending
+        let outcome = park_or_expire(rx, Duration::from_millis(50)).await;
+        assert!(matches!(outcome, ParkOutcome::<u32>::Closed));
+    }
+
+    #[tokio::test]
+    async fn park_or_expire_expires_when_no_answer() {
+        // Never send on the channel; a short deadline must fire.
+        let (_tx, rx) = oneshot::channel::<u32>();
+        let outcome = park_or_expire(rx, Duration::from_millis(20)).await;
+        assert!(matches!(outcome, ParkOutcome::<u32>::Expired));
     }
 
     /// Smoke test: spawn one session, send one message, get a structured reply.
