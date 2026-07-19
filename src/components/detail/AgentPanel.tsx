@@ -652,14 +652,16 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
 
   /** Start the next development loop (streaming). */
   async function runStartLoop() {
-    // Start always begins a fresh (active) conversation server-side, so make
-    // sure the view reflects it — otherwise the streaming bubble would render
-    // into a read-only archive view.
-    if (selectedIdRef.current !== "active") {
-      setSelectedId("active");
-      const data = await api.agentGetConversationById(projectPath, "active");
-      if (mountedRef.current) setTurns(data);
-    }
+    // Start always begins a FRESH conversation server-side: `spawn_fresh`
+    // archives the current `active.jsonl` (it becomes history) and spawns a
+    // new claude process without `--resume`. So the on-disk `active` transcript
+    // is now empty — we must reload from it unconditionally, even when already
+    // viewing `"active"`. The old code only reloaded when switching from an
+    // archive view, which left the previous loop's turns rendered while the
+    // new loop prompt streamed in on top of them.
+    setSelectedId("active");
+    const data = await api.agentGetConversationById(projectPath, "active");
+    if (mountedRef.current) setTurns(data);
     await runStreamingTurn(undefined);
   }
 
