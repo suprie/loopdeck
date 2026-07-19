@@ -17,6 +17,7 @@
 //! bricks the UI.
 
 use crate::agents::{ContentBlockRecord, UsageInfo};
+use crate::persist;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -430,6 +431,9 @@ pub fn promote_to_active(repo_path: &Path, id: &str) -> Result<(), std::io::Erro
     archive_conversation(repo_path)?;
 
     // Seed a fresh active.jsonl with the source conversation's turns.
+    // Atomic so a crash here can't leave a truncated transcript that breaks
+    // the next agent resume — either the old active (now archived) or the
+    // new complete one survives.
     let dir = sessions_dir(repo_path);
     std::fs::create_dir_all(&dir)?;
     let mut content = String::new();
@@ -443,7 +447,7 @@ pub fn promote_to_active(repo_path: &Path, id: &str) -> Result<(), std::io::Erro
         line.push('\n');
         content.push_str(&line);
     }
-    std::fs::write(active_file(repo_path), content)?;
+    persist::atomic_write(&active_file(repo_path), &content)?;
     Ok(())
 }
 
@@ -469,6 +473,12 @@ pub fn append_turn(repo_path: &Path, turn: &ConversationTurn) -> Result<(), std:
         .append(true)
         .open(active_file(repo_path))?;
     file.write_all(line.as_bytes())?;
+    // Flush to the OS page cache (no fsync — that would tank streaming
+    // throughput). The PRD accepts line-atomic appends as sufficient for
+    // transcripts; flush() is enough to make the append visible to a
+    // subsequent read from the same process without waiting for the OS
+    // writeback delay.
+    file.flush()?;
     Ok(())
 }
 
@@ -889,6 +899,49 @@ mod tests {
         );
         assert_eq!(turns[0].text, "first");
         assert_eq!(turns[1].text, "second");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_tolerates_partial_final_line_after_crash() {
+        // PRD FR2: append-only transcript writes must tolerate a partial
+        // final line during recovery — a crash mid-append leaves a
+        // half-written JSON object at the tail. The prior valid turns must
+        // still load.
+        let dir = temp_repo();
+        let dir_sessions = dir.join(".loopdeck").join("sessions");
+        std::fs::create_dir_all(&dir_sessions).unwrap();
+
+        // A complete user/assistant pair (so neither gets filtered as an
+        // orphan), then a truncated final assistant line — what a crash
+        // mid-write would leave behind. Half a JSON object, no terminating
+        // brace, no newline.
+        let valid_user = serde_json::to_string(&ConversationTurn::user("question")).unwrap();
+        let valid_asst = serde_json::to_string(&ConversationTurn::assistant(
+            "answer",
+            "s1".into(),
+            false,
+            None,
+            10,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap();
+        let partial = r#"{"role":"assistant","text":"partia"#;
+        let content = format!("{valid_user}\n{valid_asst}\n{partial}");
+        std::fs::write(active_file(&dir), content).unwrap();
+
+        let turns = load_conversation(&dir);
+        assert_eq!(
+            turns.len(),
+            2,
+            "valid pair loads; partial final line is skipped, not fatal"
+        );
+        assert_eq!(turns[0].text, "question");
+        assert_eq!(turns[1].text, "answer");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
