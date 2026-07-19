@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .loopdeck/hooks/orchestrator-start.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .loopdeck/hooks/loopdeck-stop-hook.py"
+          },
+          {
+            "type": "command",
+            "command": "bash .loopdeck/hooks/loopdeck-memory-write.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
