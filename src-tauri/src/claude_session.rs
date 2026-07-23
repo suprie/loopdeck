@@ -149,36 +149,6 @@ where
     }
 }
 
-/// Outcome of racing a parked-slot receiver against an expiry deadline — see
-/// [`park_or_expire`].
-enum ParkOutcome<T> {
-    /// The user resolved the slot (Allow/Deny, or answers).
-    Resolved(T),
-    /// The sender was dropped without resolving — the turn was cancelled.
-    Closed,
-    /// The deadline elapsed with no resolution.
-    Expired,
-}
-
-/// Race a parked-slot oneshot receiver against an expiry [`Duration`] (PRD FR4).
-///
-/// The parked approval / `AskUserQuestion` flow must not hold the per-project
-/// turn lock forever: if the user steps away, the slot expires, the request is
-/// denied, and the turn ends so the project isn't wedged. Both
-/// `oneshot::Receiver::await` and `tokio::time::sleep` are cancel-safe, so this
-/// is safe to use inline. Generic over `T` so it serves both the answer and
-/// permission slots.
-async fn park_or_expire<T>(rx: oneshot::Receiver<T>, timeout: Duration) -> ParkOutcome<T> {
-    tokio::select! {
-        biased;
-        res = rx => match res {
-            Ok(v) => ParkOutcome::Resolved(v),
-            Err(_) => ParkOutcome::Closed,
-        },
-        _ = tokio::time::sleep(timeout) => ParkOutcome::Expired,
-    }
-}
-
 /// The user's answer to a single `AskUserQuestion` question.
 ///
 /// The user selects one or more canned option labels (radio/checkbox) and may
@@ -506,7 +476,14 @@ impl ClaudeSession {
         // only when the floor didn't already deny. We check `policy_decision`
         // rather than calling `check_destructive_floor` directly so any future
         // hard-deny added to the policy is also exempt from prompting.
+        //
+        // **Autonomous mode skips this arm** (`is_autonomous()`): the project
+        // is opted into unattended operation, so floor-clearing mutating tools
+        // fall through to arm 4 and are auto-allowed. The floor in arm 2 still
+        // ran first, so `rm -rf` / force-push / `curl|sh` / `sudo` are denied
+        // regardless — this arm only governs whether *safe* mutations park.
         if policy_decision == Decision::Allow
+            && !self.policy.is_autonomous()
             && crate::permission::requires_manual_approval(&request.tool_name)
         {
             return self
@@ -514,13 +491,20 @@ impl ClaudeSession {
                 .await;
         }
 
-        // ── Arm 4: synchronous auto-policy (read-only tools, floor denies). ──
+        // ── Arm 4: synchronous auto-policy (read-only tools, floor denies,
+        //         autonomous-mode auto-allow for mutating tools). ──
         let decision = policy_decision;
+        // Under autonomous mode, distinguish "the policy auto-allowed this"
+        // from a read-only auto-allow or a user's manual Allow. The UI uses
+        // this discriminator to tag auto-approved calls in the transcript so
+        // the morning review can see what the agent did without asking.
+        let autonomous_auto_allow = self.policy.is_autonomous() && decision == Decision::Allow;
         tracing::info!(
             tool = %request.tool_name,
             input = %input_str,
             behavior = decision.behavior(),
             reason = decision.reason(),
+            autonomous = autonomous_auto_allow,
             "permission decision",
         );
 
@@ -551,7 +535,13 @@ impl ClaudeSession {
                 request_id: request_id.to_string(),
                 tool_name: request.tool_name.clone(),
                 input: input_str,
-                decision: decision.behavior().to_string(),
+                // `"allow"` for read-only / user-confirmed; `"auto-allow"` for
+                // autonomous-mode auto-approvals; `"deny"` for floor denies.
+                decision: if autonomous_auto_allow {
+                    String::from("auto-allow")
+                } else {
+                    decision.behavior().to_string()
+                },
                 reason: decision.reason().to_string(),
             });
         }
@@ -642,41 +632,22 @@ impl ClaudeSession {
                 .await;
         }
 
-        // Park until the user answers, but bounded by PARKED_SLOT_TIMEOUT
-        // (PRD FR4): a user who steps away can't wedge the per-project turn
-        // lock forever. On expiry we reclaim the slot, deny the request so
-        // claude unblocks, and end the turn. The borrow of `self` is released
-        // at the `.await` boundary, so the subsequent writes can re-take
-        // `&mut self`.
-        let answers = match park_or_expire(rx, crate::limits::PARKED_SLOT_TIMEOUT).await {
-            ParkOutcome::Resolved(answers) => answers,
-            ParkOutcome::Closed => {
+        // Park until the user answers. There is no expiry: the visibility
+        // layer (toast / ProjectCard pill / detail-view callout, reconciled on
+        // app launch + window focus + visibilitychange) surfaces the pending
+        // question so it isn't missed, and the user's only escapes are to
+        // answer it or hit Stop (which cancels the turn and drops the sender).
+        // `rx` is a `oneshot::Receiver`, so awaiting it is cancel-safe and
+        // resolves the moment the user's answer arrives.
+        let answers = match rx.await {
+            Ok(answers) => answers,
+            Err(_) => {
                 // Sender dropped without sending — the turn was cancelled
-                // (e.g. session dropped). Return an error so the caller stops
-                // reading.
+                // (e.g. session dropped or Stop was hit). Return an error so
+                // the caller stops reading.
                 return Err(AppError::Agent(
                     "AskUserQuestion cancelled — answer channel closed".into(),
                 ));
-            }
-            ParkOutcome::Expired => {
-                // Reclaim the slot so a late answer doesn't find a dangling
-                // sender, deny so claude unblocks, and end the turn.
-                let _ = question_slot.lock().ok().and_then(|mut g| g.take());
-                tracing::warn!(
-                    request_id = %request_id,
-                    secs = crate::limits::PARKED_SLOT_TIMEOUT.as_secs(),
-                    "AskUserQuestion timed out waiting for a user answer — denying"
-                );
-                self.write_deny(
-                    request_id,
-                    "AskUserQuestion timed out waiting for a user answer",
-                )
-                .await?;
-                // Typed `QuestionTimeout` (not a generic `Agent` string) so the
-                // send pipeline can record a truthful "question timed out"
-                // terminal turn instead of the generic "process exited"
-                // interruption.
-                return Err(AppError::QuestionTimeout);
             }
         };
 
@@ -801,50 +772,22 @@ impl ClaudeSession {
             return Ok(());
         }
 
-        // Park until the user answers, but bounded by PARKED_SLOT_TIMEOUT
-        // (PRD FR4): on expiry the pending card resolves to denied, claude
-        // unblocks, and the turn ends — the per-project turn lock is never
-        // held indefinitely. Borrow of `self` is released at the `.await`, so
-        // the writes below can re-take `&mut self`.
-        let decision = match park_or_expire(rx, crate::limits::PARKED_SLOT_TIMEOUT).await {
-            ParkOutcome::Resolved(d) => d,
-            ParkOutcome::Closed => {
+        // Park until the user decides. There is no expiry: the visibility
+        // layer surfaces pending approvals (toast / ProjectCard pill /
+        // detail-view callout, reconciled on app launch + window focus +
+        // visibilitychange) so the user can't miss one, and the only escapes
+        // are Allow/Deny or Stop (which cancels the turn and drops the
+        // sender). Borrow of `self` is released at the `.await`, so the writes
+        // below can re-take `&mut self`.
+        let decision = match rx.await {
+            Ok(d) => d,
+            Err(_) => {
                 // Sender dropped without sending — the turn was cancelled.
                 // Return an error so the caller stops reading (mirrors the
                 // AskUserQuestion cancellation path).
                 return Err(AppError::Agent(
                     "manual approval cancelled — answer channel closed".into(),
                 ));
-            }
-            ParkOutcome::Expired => {
-                // Reclaim the slot, surface the expiry as a resolved deny so
-                // the UI's pending marker becomes ✗, deny so claude unblocks,
-                // and end the turn.
-                let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
-                if let Some(channel) = channel {
-                    let _ = channel.send(ClaudeEvent::PermissionRequest {
-                        request_id: request_id.to_string(),
-                        tool_name: request.tool_name.clone(),
-                        input: input_str.to_string(),
-                        decision: String::from("deny"),
-                        reason: String::from("timed out waiting for user approval"),
-                    });
-                }
-                tracing::warn!(
-                    request_id = %request_id,
-                    tool = %request.tool_name,
-                    secs = crate::limits::PARKED_SLOT_TIMEOUT.as_secs(),
-                    "manual approval timed out waiting for a user decision — denying"
-                );
-                let reason = "approval timed out waiting for a user decision";
-                self.write_deny(request_id, reason).await?;
-                // Typed `ApprovalTimeout` (not a generic `Agent` string) so the
-                // send pipeline can record a truthful "approval timed out"
-                // terminal turn instead of the generic "process exited"
-                // interruption — the recurring "Interrupted" bubbles the user
-                // saw were mostly these auto-denied approvals, not real
-                // process deaths.
-                return Err(AppError::ApprovalTimeout);
             }
         };
 
@@ -1647,32 +1590,6 @@ mod tests {
             .unwrap();
         assert!(matches!(read, BoundedRead::Line));
         assert_eq!(&buf, b"tail-no-newline");
-    }
-
-    // ── parked-slot expiry (PRD FR4) ────────────────────────────────────
-
-    #[tokio::test]
-    async fn park_or_expire_returns_resolved_value() {
-        let (tx, rx) = oneshot::channel::<u32>();
-        tx.send(42).unwrap();
-        let outcome = park_or_expire(rx, Duration::from_millis(50)).await;
-        assert!(matches!(outcome, ParkOutcome::Resolved(42)));
-    }
-
-    #[tokio::test]
-    async fn park_or_expire_reports_closed_when_sender_dropped() {
-        let (tx, rx) = oneshot::channel::<u32>();
-        drop(tx); // sender dropped without sending
-        let outcome = park_or_expire(rx, Duration::from_millis(50)).await;
-        assert!(matches!(outcome, ParkOutcome::<u32>::Closed));
-    }
-
-    #[tokio::test]
-    async fn park_or_expire_expires_when_no_answer() {
-        // Never send on the channel; a short deadline must fire.
-        let (_tx, rx) = oneshot::channel::<u32>();
-        let outcome = park_or_expire(rx, Duration::from_millis(20)).await;
-        assert!(matches!(outcome, ParkOutcome::<u32>::Expired));
     }
 
     /// Smoke test: spawn one session, send one message, get a structured reply.

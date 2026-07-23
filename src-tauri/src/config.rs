@@ -137,6 +137,13 @@ pub struct ProjectEntry {
     /// Older configs without this field deserialize to `Idle`.
     #[serde(default, skip_serializing_if = "is_run_state_idle")]
     pub run_state: RunState,
+    /// Per-project autonomous mode: when true, the agent self-approves
+    /// floor-clearing tool calls (Edit/Write, safe Bash, MCP, WebFetch) so
+    /// loops run unattended. The destructive floor still applies. Older
+    /// configs without this field deserialize to `false` (confirm-changes).
+    /// `skip_serializing_if` keeps the registry tidy for the common case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autonomous: bool,
 }
 
 /// serde `skip_serializing_if` predicate: omit `run_state` when `Idle` so the
@@ -168,6 +175,7 @@ impl Default for ProjectEntry {
             last_modified: None,
             uncommitted: UncommittedStats::default(),
             run_state: RunState::Idle,
+            autonomous: false,
         }
     }
 }

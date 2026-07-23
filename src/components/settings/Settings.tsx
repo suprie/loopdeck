@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Save, Loader2, Check, Settings2, Eye, EyeOff } from "lucide-react";
+import { Save, Loader2, Check, Settings2, Eye, EyeOff, FileText, FolderOpen } from "lucide-react";
 import { PageHeader } from "../layout/AppShell";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -11,8 +11,14 @@ import {
   SelectValue,
 } from "../ui/select";
 import { useAppStore } from "../../store/appStore";
-import { getAgentConfig, setAgentConfig, clearAuthToken } from "../../lib/tauri";
-import type { AgentConfig } from "../../types";
+import {
+  getAgentConfig,
+  setAgentConfig,
+  clearAuthToken,
+  getLogInfo,
+  revealLogDir,
+} from "../../lib/tauri";
+import type { AgentConfig, LogInfo } from "../../types";
 
 const EFFORT_OPTIONS = [
   { value: "low", label: "Low — fastest, least thorough" },
@@ -277,9 +283,110 @@ export function Settings() {
               </span>
             )}
           </div>
+
+          {/* Diagnostics — where the logs live + bounded-retention summary.
+              Surfaces the user-accessible log folder and the retention cap so
+              "logs grow forever" is a visible, bounded quantity, not magic. */}
+          <Diagnostics />
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────────────
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+}
+
+function Diagnostics() {
+  const setError = useAppStore((s) => s.setError);
+  const [info, setInfo] = useState<LogInfo | null>(null);
+  const [opening, setOpening] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setInfo(await getLogInfo());
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleOpen = useCallback(async () => {
+    setOpening(true);
+    try {
+      await revealLogDir();
+      // Re-read after opening so the file list reflects any external changes
+      // (e.g. the user deletes a file from the now-open folder).
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpening(false);
+    }
+  }, [refresh, setError]);
+
+  const dir = info?.dir ?? null;
+  const fileCount = info?.files.length ?? 0;
+
+  return (
+    <>
+      <div className="mt-10 mb-4 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <FileText className="size-3.5" />
+        Diagnostics
+      </div>
+
+      <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-sm)]">
+        {!info ? (
+          <div className="flex items-center justify-center py-2">
+            <Loader2 className="size-4 animate-spin text-muted-foreground" />
+          </div>
+        ) : dir ? (
+          <div className="space-y-4">
+            <div>
+              <Label className="mb-1.5 block text-xs font-medium">Log folder</Label>
+              <p
+                className="truncate rounded-md bg-muted/40 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground"
+                title={dir}
+              >
+                {dir}
+              </p>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                {fileCount} {fileCount === 1 ? "file" : "files"} · {formatBytes(info.total_bytes)} ·
+                keeping the last {info.max_files} daily logs.
+              </p>
+            </div>
+
+            <button
+              onClick={handleOpen}
+              disabled={opening}
+              className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-md border border-border bg-background text-sm font-medium text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
+            >
+              {opening ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <FolderOpen className="size-4" />
+              )}
+              Open logs folder
+            </button>
+          </div>
+        ) : (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Logging is stderr-only — no log folder is available on disk. This is
+            unexpected outside of a misconfigured/headless environment.
+          </p>
+        )}
+      </div>
+    </>
   );
 }
 

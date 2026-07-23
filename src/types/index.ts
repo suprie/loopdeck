@@ -95,6 +95,14 @@ export interface ProjectEntry {
   /** Live agent run state — derived at read time, not persisted. Older configs
    *  without this field load as `idle`. */
   run_state: RunState;
+  /**
+   * Per-project autonomous mode: when true, the agent self-approves
+   * floor-clearing tool calls (Edit/Write, safe Bash, MCP, WebFetch) so loops
+   * run unattended. The destructive floor still applies. Older configs without
+   * this field load as `false` (confirm-changes). Optional on the wire because
+   * the backend `skip_serializing_if`s it when false.
+   */
+  autonomous?: boolean;
 }
 
 /** Content of .loopdeck/project.yaml. */
@@ -171,6 +179,30 @@ export interface AgentConfig {
    * so the Settings UI uses this to show a "token stored" affordance.
    */
   has_auth_token?: boolean;
+}
+
+/** One retained log file, surfaced in Settings → Diagnostics. Mirrors Rust `LogFileInfo`. */
+export interface LogFileInfo {
+  /** File name, e.g. `loopdeck.log.2026-07-23`. */
+  name: string;
+  /** Size in bytes. */
+  size_bytes: number;
+}
+
+/**
+ * Snapshot of the log directory for Settings → Diagnostics. Mirrors Rust
+ * `LogInfo`. The backend reads only file names/sizes — never contents — so
+ * this surface can't exfiltrate whatever a log line might contain.
+ */
+export interface LogInfo {
+  /** Absolute path to the log directory; `null` when logging is stderr-only. */
+  dir: string | null;
+  /** Retained `loopdeck.log*` files, newest-first. */
+  files: LogFileInfo[];
+  /** Total bytes across `files`. */
+  total_bytes: number;
+  /** Configured retention cap (max daily files kept on disk). */
+  max_files: number;
 }
 
 /** A single architectural decision record from .loopdeck/decisions.md. */

@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../../lib/tauri";
+import { stripFrontmatter } from "../../lib/markdown";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { Markdown } from "../shared/Markdown";
 
@@ -138,13 +139,4 @@ export function SpecEditor({
       </div>
     </div>
   );
-}
-
-/** Strip the leading `---\n…\n---` YAML frontmatter for preview rendering. */
-function stripFrontmatter(content: string): string {
-  if (!content.startsWith("---\n")) return content;
-  const after = content.slice(4);
-  const end = after.indexOf("\n---\n");
-  if (end === -1) return content;
-  return after.slice(end + 5);
 }

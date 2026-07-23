@@ -194,15 +194,20 @@ LoopDeck writes one rolling log file per day:
   ```bash
   RUST_LOG=loopdeck=debug open -a LoopDeck
   ```
-- **Retention:** logs are rolled daily and **kept across restarts; they are
-  not auto-purged.** Manage them manually if they grow (tracked cleanup is a
-  P2 follow-up). The auth token is **never** logged.
-- **Viewing:** open the file directly, or use **Console.app** / `log show`
-  (the directory is the standard macOS per-app log dir).
+- **Retention:** logs are rolled daily and **bounded to the last 14 daily
+  files** (`logging::MAX_LOG_FILES`). Older files are pruned automatically —
+  at startup and on each daily rollover — so the log directory cannot grow
+  without bound. The auth token is **never** logged (the `AgentConfig` `Debug`
+  impl redacts it, and a regression test pins that invariant).
+- **Viewing:** the easiest path is **Settings → Diagnostics → "Open logs
+  folder"**, which reveals the directory in Finder and shows the current file
+  count, total size, and the retention cap. You can also open the file
+  directly, or use **Console.app** / `log show` (the directory is the standard
+  macOS per-app log dir).
 
-The current log directory is also resolvable in-process
-(`logging::log_dir()`), surfaced for a future Settings "Reveal logs" button —
-not yet wired into the UI for the alpha.
+The log directory is resolved in-process (`logging::log_dir()`) and surfaced
+over IPC by the `get_log_info` / `reveal_log_dir` commands that back the
+Diagnostics panel.
 
 ---
 

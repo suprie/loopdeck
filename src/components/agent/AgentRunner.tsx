@@ -82,7 +82,9 @@ export function AgentRunner() {
         subtitle="Chat with the agent across any project"
         actions={
           <>
-            <PermissionModeBadge />
+            <PermissionModeBadge
+              mode={selected?.autonomous ? "autonomous" : "confirm"}
+            />
             <button
               type="button"
               onClick={handleScan}

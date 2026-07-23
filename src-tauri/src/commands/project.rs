@@ -74,6 +74,7 @@ pub async fn import_project(
         last_modified: git_info.last_modified,
         uncommitted: git_info.uncommitted.into(),
         run_state: RunState::Idle,
+        autonomous: false,
     };
 
     {
@@ -237,6 +238,37 @@ pub async fn update_description(
 
     info!("update_description complete for: {path}");
     Ok(meta)
+}
+
+/// Set the per-project autonomous-mode flag in the config registry.
+///
+/// When true, the project's LoopDeck-spawned agent self-approves
+/// floor-clearing tool calls (Edit/Write, safe Bash, MCP, WebFetch) so loops
+/// can run unattended — the user reviews the resulting PRs instead of each
+/// tool call. The destructive floor (`rm -rf`, force-push, `curl|sh`, `sudo`,
+/// …) still applies regardless. Takes effect on the next spawned session
+/// (the policy is resolved at spawn time in `with_session`); a live session
+/// keeps its current policy until reset.
+#[tauri::command]
+pub async fn set_project_autonomous(
+    path: String,
+    autonomous: bool,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("set_project_autonomous called for path: {path}, autonomous: {autonomous}");
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
+    {
+        let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+        if let Some(entry) = config.find_by_path_mut(&root) {
+            entry.autonomous = autonomous;
+            config.save()?;
+        }
+    }
+    info!("set_project_autonomous complete for: {path} → {autonomous}");
+    Ok(())
 }
 
 /// Remove a project from the registry.

@@ -1,10 +1,13 @@
-//! Global agent config commands (named `config_cmds` to avoid clashing with
-//! the top-level `config` module). Reads/writes the non-secret agent config
-//! and manages the local-secrets-file auth token.
+//! Global, non-project-scoped commands (named `config_cmds` to avoid clashing
+//! with the top-level `config` module). Three concerns live here because none
+//! of them is tied to a registered project root: the non-secret agent config,
+//! the local-secrets-file auth token, and user-accessible diagnostics (the log
+//! directory snapshot + "reveal in Finder").
 
 use super::state::AppState;
 use crate::config::AgentConfig;
 use crate::error::AppError;
+use crate::logging;
 use crate::secrets;
 use tauri::State;
 
@@ -74,4 +77,73 @@ pub async fn set_agent_config(
 #[tauri::command]
 pub async fn clear_auth_token() -> Result<(), AppError> {
     secrets::delete_auth_token()
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+
+/// Return a snapshot of the log directory for the Settings → Diagnostics panel:
+/// the folder path, the retained log files + their sizes, the total size, and
+/// the retention cap. Reads file *names/sizes only* — never contents — so the
+/// panel can't exfiltrate whatever a future log line might contain. Never fails
+/// (a missing/unreadable dir degrades to an empty file list); `dir` is `None`
+/// when logging fell back to stderr-only at startup.
+#[tauri::command]
+pub async fn get_log_info() -> Result<logging::LogInfo, AppError> {
+    Ok(logging::collect_log_info())
+}
+
+/// Open the log directory in the OS file manager (Finder on macOS) so the user
+/// can inspect or share diagnostics. Returns a structured error when logging is
+/// stderr-only (no folder exists) or the directory has vanished since startup —
+/// the panel renders those as plain text rather than offering the button.
+#[tauri::command]
+pub async fn reveal_log_dir() -> Result<(), AppError> {
+    let dir = logging::log_dir()
+        .ok_or_else(|| AppError::Config("log directory unavailable (stderr-only mode)".into()))?
+        .to_path_buf();
+    if !dir.exists() {
+        return Err(AppError::Config(format!(
+            "log directory no longer exists: {}",
+            dir.display()
+        )));
+    }
+    open_dir_in_file_manager(&dir)
+}
+
+/// Spawn the OS file manager on `dir`. The path is app-controlled (resolved
+/// from the logging module, never user input), so it needs none of the
+/// project-boundary containment `open_in_finder` applies — but it is still
+/// passed as a single argv element (never interpolated into a shell) so a path
+/// can't be reinterpreted as a URL or scheme handler. Mirrors the
+/// platform-fanout in `commands::project::open_in_finder`.
+fn open_dir_in_file_manager(dir: &std::path::Path) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| AppError::Config(format!("failed to open log folder: {e}")))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| AppError::Config(format!("failed to open log folder: {e}")))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| AppError::Config(format!("failed to open log folder: {e}")))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = dir; // unused on unsupported platforms
+        return Err(AppError::Config(
+            "opening the log folder is unsupported on this platform".into(),
+        ));
+    }
+    Ok(())
 }

@@ -144,6 +144,33 @@ pub(crate) fn resolve_agent_config(state: &AppState) -> Result<AgentConfig, AppE
     Ok(agent_config)
 }
 
+/// Resolve the per-project `PermissionPolicy` from the registry.
+///
+/// Looks up the project's `autonomous` flag under the config lock and returns
+/// `Autonomous` (skip the manual-approval card) or `ConfirmChanges` (the
+/// default). The destructive floor applies under both — it runs in `decide()`
+/// before the mode match, so `rm -rf` / force-push / `curl|sh` / `sudo` are
+/// denied regardless. An unregistered path resolves to `ConfirmChanges`
+/// (safest), so a stale registry entry can never silently grant autonomy.
+pub(crate) fn resolve_permission_policy(state: &AppState, path: &Path) -> PermissionPolicy {
+    let autonomous = state
+        .config
+        .lock()
+        .map(|cfg| {
+            cfg.projects
+                .iter()
+                .find(|p| p.path.as_path() == path)
+                .map(|p| p.autonomous)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if autonomous {
+        PermissionPolicy::with_mode(crate::permission::PermissionMode::Autonomous)
+    } else {
+        PermissionPolicy::confirm_changes()
+    }
+}
+
 /// Get the live `ClaudeSession` for `path` as an owned `Arc`, spawning one if
 /// none exists (or resuming a prior conversation via `--resume`).
 ///
@@ -176,13 +203,14 @@ pub(crate) async fn with_session(
     // No live session — spawn one. Read agent config + resume id while we
     // still hold the map lock cheaply (still no .await in this scope).
     let agent_config = resolve_agent_config(state)?;
+    let policy = resolve_permission_policy(state, path);
 
     let resume_id = conversation::last_session_id(path);
     let session = ClaudeSession::spawn(
         &path.to_path_buf(),
         &agent_config,
         resume_id.as_deref(),
-        PermissionPolicy::confirm_changes(),
+        policy,
     )?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     map_guard.insert(path.to_path_buf(), Arc::clone(&arc));

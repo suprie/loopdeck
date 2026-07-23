@@ -112,6 +112,7 @@ pub fn run() {
             commands::project::list_projects,
             commands::project::get_project,
             commands::project::update_description,
+            commands::project::set_project_autonomous,
             commands::project::remove_project,
             commands::project::open_in_finder,
             commands::project::open_in_terminal,
@@ -128,10 +129,12 @@ pub fn run() {
             commands::epics::toggle_prd_loop,
             commands::epics::read_spec_file,
             commands::epics::write_spec_file,
-            // Agent config + auth token (config_cmds.rs)
+            // Agent config + auth token + diagnostics (config_cmds.rs)
             commands::config_cmds::get_agent_config,
             commands::config_cmds::set_agent_config,
             commands::config_cmds::clear_auth_token,
+            commands::config_cmds::get_log_info,
+            commands::config_cmds::reveal_log_dir,
             // Agent / Claude session (agent.rs)
             commands::agent::agent_start_loop,
             commands::agent::agent_start_loop_streaming,

@@ -19,6 +19,7 @@ import type {
   PendingQuestionEntry,
   PendingPermissionEntry,
   SkillEntry,
+  LogInfo,
 } from "../types";
 
 /**
@@ -62,6 +63,19 @@ export async function updateDescription(
   description: string,
 ): Promise<ProjectMeta> {
   return invoke<ProjectMeta>("update_description", { path, description });
+}
+
+/**
+ * Toggle per-project autonomous mode. When enabled, the project's agent
+ * self-approves floor-clearing tool calls so loops run unattended. The
+ * destructive floor still applies. Takes effect on the next spawned session.
+ * Rust: set_project_autonomous(path: String, autonomous: bool) -> Result<(), AppError>
+ */
+export async function setProjectAutonomous(
+  path: string,
+  autonomous: boolean,
+): Promise<void> {
+  return invoke<void>("set_project_autonomous", { path, autonomous });
 }
 
 /**
@@ -246,6 +260,24 @@ export async function setAgentConfig(config: AgentConfig): Promise<AgentConfig> 
  */
 export async function clearAuthToken(): Promise<void> {
   return invoke<void>("clear_auth_token");
+}
+
+/**
+ * Snapshot of the log directory (path, retained files + sizes, total, cap) for
+ * the Settings → Diagnostics panel. Reads names/sizes only — never contents.
+ * Rust: get_log_info() -> Result<LogInfo, AppError>
+ */
+export async function getLogInfo(): Promise<LogInfo> {
+  return invoke<LogInfo>("get_log_info");
+}
+
+/**
+ * Open the log directory in the OS file manager (Finder on macOS) so the user
+ * can inspect or share diagnostics.
+ * Rust: reveal_log_dir() -> Result<(), AppError>
+ */
+export async function revealLogDir(): Promise<void> {
+  return invoke<void>("reveal_log_dir");
 }
 
 // ── Agent session commands ─────────────────────────────────────────────────

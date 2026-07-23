@@ -255,6 +255,15 @@ export const ProjectCard = memo(function ProjectCard({
       {/* Status */}
       <div className="mt-4 flex items-center gap-2">
         <StatusBadge status={project.status} />
+        {project.autonomous && (
+          <span
+            title="Autonomous mode: the agent self-approves tool calls so loops run unattended. The destructive floor still applies."
+            className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400"
+          >
+            <ShieldCheck className="size-3" />
+            Autonomous
+          </span>
+        )}
         {hasStuckQuestion && (
           <span
             role="button"

@@ -127,18 +127,6 @@ pub const ACCUMULATOR_MAX_BLOCKS: usize = 5_000;
 /// response is stamped with a truncation marker.
 pub const ACCUMULATOR_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-// ── Parked approval / question (`claude_session`) ──────────────────────────
-
-/// Max time a manual-approval or `AskUserQuestion` parks the read loop awaiting
-/// the user.
-///
-/// The old turn-level timeout was removed because it fired mid-park (while the
-/// user had stepped away); this per-park expiry restores the bound without that
-/// flaw: on expiry the request is denied and the turn ends, so the per-project
-/// turn lock is never held forever. 10 minutes covers stepping away for a break
-/// without expiring a deliberate, in-progress decision.
-pub const PARKED_SLOT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
 // ── Bounded file-read helper ───────────────────────────────────────────────
 
 /// Read up to `max_bytes` from `path` into a `String`, decoding lossily.

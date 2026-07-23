@@ -139,11 +139,12 @@ pub struct ConversationTurn {
     ///   restart/crash, force-quit, or a child/transport failure before any
     ///   `result` event arrived). The historical case — startup reconciliation
     ///   genuinely can't distinguish, so it uses this default.
-    /// - `"approval_timeout"`: a parked manual tool-approval expired on
-    ///   `PARKED_SLOT_TIMEOUT` and was auto-denied. The recurring
-    ///   "Interrupted — this turn did not complete" bubbles the user saw were
-    ///   mostly these, not real process deaths.
-    /// - `"question_timeout"`: a parked `AskUserQuestion` expired the same way.
+    /// - `"approval_timeout"` / `"question_timeout"`: **legacy only** —
+    ///   written by builds that auto-denied parked approvals/questions on a
+    ///   10-minute `PARKED_SLOT_TIMEOUT`. That limit was removed (parked slots
+    ///   now wait indefinitely until answered or Stopped), so no new turn is
+    ///   written with these kinds. Kept here so old transcripts still render
+    ///   their truthful "timed out" tag.
     /// - `None` (default): not an interruption — normal turns and legacy
     ///   transcripts (written before this field existed) load as `None` and the
     ///   UI treats them as the historical generic interruption if `is_error`.
@@ -297,64 +298,6 @@ impl ConversationTurn {
             session_id: None,
             is_error: true,
             interrupt_kind: Some(String::from("process_exited")),
-            usage: None,
-            duration_ms: 0,
-            thinking: None,
-            tool_calls: Vec::new(),
-            blocks: Vec::new(),
-            tasks: Vec::new(),
-        }
-    }
-
-    /// Build a synthetic assistant turn marking the preceding user turn as
-    /// interrupted because a **parked manual tool-approval expired** on
-    /// `PARKED_SLOT_TIMEOUT` and was auto-denied.
-    ///
-    /// Permission-side counterpart of [`ConversationTurn::interrupted`]. Same
-    /// `is_error: true` + no `session_id` shape, but a distinct
-    /// `interrupt_kind: "approval_timeout"` and a body that tells the user the
-    /// real reason — the approval was needed and the time limit elapsed, NOT
-    /// that the process crashed. The recurring "Interrupted" bubbles the user
-    /// kept seeing (and typing `oke / ok / continue` into) were almost
-    /// entirely these auto-denied approvals, not process deaths.
-    pub fn interrupted_approval_timeout() -> Self {
-        Self {
-            ts: Utc::now().to_rfc3339(),
-            role: String::from("assistant"),
-            source: String::new(),
-            text: String::from(
-                "⏹ Interrupted — your approval was needed and the 10-minute \
-                 limit elapsed. The tool was auto-denied. Send a new message \
-                 to continue.",
-            ),
-            session_id: None,
-            is_error: true,
-            interrupt_kind: Some(String::from("approval_timeout")),
-            usage: None,
-            duration_ms: 0,
-            thinking: None,
-            tool_calls: Vec::new(),
-            blocks: Vec::new(),
-            tasks: Vec::new(),
-        }
-    }
-
-    /// Build a synthetic assistant turn marking the preceding user turn as
-    /// interrupted because a **parked `AskUserQuestion` expired** on
-    /// `PARKED_SLOT_TIMEOUT` and was auto-denied. The question-side counterpart
-    /// of [`ConversationTurn::interrupted_approval_timeout`].
-    pub fn interrupted_question_timeout() -> Self {
-        Self {
-            ts: Utc::now().to_rfc3339(),
-            role: String::from("assistant"),
-            source: String::new(),
-            text: String::from(
-                "⏹ Interrupted — a question was asked and the 10-minute limit \
-                 elapsed before you answered. Send a new message to continue.",
-            ),
-            session_id: None,
-            is_error: true,
-            interrupt_kind: Some(String::from("question_timeout")),
             usage: None,
             duration_ms: 0,
             thinking: None,
@@ -1514,47 +1457,6 @@ mod tests {
     // ── append_terminal_if_orphan (reason-specific terminal turns) ──────
 
     #[test]
-    fn append_terminal_writes_approval_timeout_kind() {
-        // The send-failure path appends a reason-specific terminal turn so the
-        // transcript records *why* the turn failed. An approval timeout must
-        // carry interrupt_kind = "approval_timeout", not the generic
-        // process-exited marker.
-        let dir = temp_repo();
-        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
-        assert!(
-            append_terminal_if_orphan(&dir, &ConversationTurn::interrupted_approval_timeout())
-                .unwrap()
-        );
-
-        let turns = load_conversation(&dir);
-        assert_eq!(turns.len(), 2, "user turn + terminal marker");
-        assert_eq!(turns[1].role, "assistant");
-        assert!(turns[1].is_error, "terminal marker is an error");
-        assert_eq!(
-            turns[1].interrupt_kind.as_deref(),
-            Some("approval_timeout"),
-            "approval timeout carries its own kind"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn append_terminal_writes_question_timeout_kind() {
-        let dir = temp_repo();
-        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
-        assert!(
-            append_terminal_if_orphan(&dir, &ConversationTurn::interrupted_question_timeout())
-                .unwrap()
-        );
-
-        let turns = load_conversation(&dir);
-        assert_eq!(turns[1].interrupt_kind.as_deref(), Some("question_timeout"));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn append_terminal_writes_process_exited_kind() {
         let dir = temp_repo();
         append_turn(&dir, &ConversationTurn::user("q")).unwrap();
@@ -1593,8 +1495,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            !append_terminal_if_orphan(&dir, &ConversationTurn::interrupted_approval_timeout())
-                .unwrap(),
+            !append_terminal_if_orphan(&dir, &ConversationTurn::interrupted()).unwrap(),
             "no orphan to mark"
         );
 
@@ -1623,11 +1524,10 @@ mod tests {
             "normal turn omits interrupt_kind: {normal}"
         );
 
-        let timed_out =
-            serde_json::to_string(&ConversationTurn::interrupted_approval_timeout()).unwrap();
+        let terminal = serde_json::to_string(&ConversationTurn::interrupted()).unwrap();
         assert!(
-            timed_out.contains("\"interrupt_kind\":\"approval_timeout\""),
-            "terminal turn carries interrupt_kind: {timed_out}"
+            terminal.contains("\"interrupt_kind\":\"process_exited\""),
+            "terminal turn carries interrupt_kind: {terminal}"
         );
     }
 

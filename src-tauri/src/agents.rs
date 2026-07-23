@@ -145,7 +145,10 @@ pub enum ClaudeEvent {
         tool_name: String,
         /// The raw tool input object, serialized to a JSON string.
         input: String,
-        /// `"pending"` (awaiting user), or `"allow"` / `"deny"` (resolved).
+        /// `"pending"` (awaiting user), `"allow"` / `"deny"` (resolved), or
+        /// `"auto-allow"` (the autonomous-mode policy approved a floor-clearing
+        /// mutating tool without parking). The UI uses `"auto-allow"` to tag
+        /// unattended approvals in the transcript for the morning review.
         decision: String,
         /// Why LoopDeck allowed or denied. Empty for pending and plain allows.
         reason: String,

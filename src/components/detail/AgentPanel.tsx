@@ -108,6 +108,11 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     (s) => s.byPath[projectPath]?.retrying ?? null,
   );
   const error = useStreamingState((s) => s.byPath[projectPath]?.error ?? null);
+  // Per-project autonomous flag — drives the PermissionModeBadge label so the
+  // user sees at a glance whether this project's agent self-approves tool calls.
+  const autonomous = useAppStore(
+    (s) => s.projects.find((p) => p.path === projectPath)?.autonomous ?? false,
+  );
 
   // ── Composer focus nonce — bumped to ask Chat to focus its composer. ──
   // Used by "New conversation": after archiving the transcript we want the
@@ -917,7 +922,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       <div className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-1 flex-col">
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-2 pb-3 mb-3 border-b border-border shrink-0">
-        <PermissionModeBadge />
+        <PermissionModeBadge mode={autonomous ? "autonomous" : "confirm"} />
         <button
           onClick={runStartLoop}
           disabled={busy}

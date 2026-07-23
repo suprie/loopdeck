@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import { Layers, Zap, CheckCircle2, Circle, Loader2, Pencil } from "lucide-react";
+import { Layers, Zap, CheckCircle2, Circle, Loader2, Pencil, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import type { Epic, PrdLoop, LoopStatus, AppError } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { SpecEditor } from "./SpecEditor";
+import { PrdContent } from "./PrdContent";
 
 interface EpicsPanelProps {
   projectPath: string;
@@ -19,6 +21,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [toggling, setToggling] = useState<string | null>(null);
   /** Relative path of the spec file being edited, or null. */
   const [editingSpec, setEditingSpec] = useState<string | null>(null);
+  /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
+  const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -233,13 +237,43 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
 
             {/* PRDs */}
             <div className="space-y-3">
-              {epic.prds.map((prd) => (
+              {epic.prds.map((prd) => {
+                const prdKey = `${epic.slug}/${prd.file}`;
+                const isEditing = editingSpec === prdKey;
+                const isExpanded = !isEditing && expandedSpec === prdKey;
+                const loopCount = prd.phases.reduce((n, p) => n + p.loops.length, 0);
+                const prdIsActive =
+                  hasActiveLoop &&
+                  prd.phases.some((p) => p.loops.some((l) => l.title === currentGoal));
+                return (
                 <div key={prd.file} className="rounded-lg border border-border/60 p-3">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-medium text-foreground">{prd.slug}</span>
+                  <div className="flex items-center justify-between">
+                    {/* Tap to expand/collapse into Content + Checklist tabs */}
+                    <button
+                      onClick={() => setExpandedSpec(isExpanded ? null : prdKey)}
+                      title={isExpanded ? "Collapse PRD" : "Expand PRD"}
+                      className="flex min-w-0 items-center gap-1.5 rounded text-left transition-colors hover:text-foreground"
+                    >
+                      <ChevronRight
+                        size={12}
+                        className={`shrink-0 text-muted-foreground transition-transform ${
+                          isExpanded ? "rotate-90" : ""
+                        }`}
+                      />
+                      <span className="text-xs font-medium text-foreground">{prd.slug}</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {loopCount} loop{loopCount !== 1 ? "s" : ""}
+                      </span>
+                      {prdIsActive && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[var(--primary)]">
+                          <Zap size={9} />
+                          active
+                        </span>
+                      )}
+                    </button>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setEditingSpec(`${epic.slug}/${prd.file}`)}
+                        onClick={() => setEditingSpec(prdKey)}
                         title={`Edit ${prd.file}`}
                         className="flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                       >
@@ -251,111 +285,131 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                     </div>
                   </div>
 
-                  {/* PRD editor (replaces phase checklist when editing) */}
-                  {editingSpec === `${epic.slug}/${prd.file}` ? (
-                    <SpecEditor
-                      projectPath={projectPath}
-                      relPath={`${epic.slug}/${prd.file}`}
-                      filename={prd.file}
-                      onSaved={() => {
-                        setEditingSpec(null);
-                        load();
-                      }}
-                      onCancel={() => setEditingSpec(null)}
-                    />
-                  ) : (
-                    /* Phases checklist (shown when not editing) */
-                    <div className="space-y-3">
-                      {prd.phases.map((phase) => (
-                        <div key={phase.name}>
-                          <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            {phase.name}
-                          </h4>
-                          <ul className="space-y-1">
-                            {phase.loops.map((loop, i) => {
-                              const key = `${epic.slug}/${prd.file}/${loop.title}`;
-                              const done = loop.checked || loop.done_in_history;
-                              const isCurrent =
-                                hasActiveLoop && currentGoal === loop.title;
-                              const disabled =
-                                hasActiveLoop && !isCurrent;
-                              const isPromoting = promoting === key;
-                              const isToggling = toggling === key;
-                              return (
-                                <li
-                                  key={i}
-                                  className={`flex items-start gap-2 rounded px-1.5 py-1 text-xs leading-relaxed ${
-                                    isCurrent
-                                      ? "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]"
-                                      : ""
-                                  }`}
-                                >
-                                  <button
-                                    onClick={() => handleToggle(epic.slug, prd.file, loop)}
-                                    disabled={isToggling}
-                                    title={loop.checked ? "Mark as not done" : "Mark as done"}
-                                    className="mt-0.5 shrink-0 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-                                  >
-                                    {isToggling ? (
-                                      <Loader2 size={12} className="animate-spin" />
-                                    ) : done ? (
-                                      <CheckCircle2 size={12} className="text-[var(--success)]" />
-                                    ) : (
-                                      <Circle size={12} />
-                                    )}
-                                  </button>
-                                  <span
-                                    className={`flex-1 ${
-                                      done ? "text-muted-foreground line-through" : "text-foreground"
-                                    }`}
-                                  >
-                                    {loop.title}
-                                  </span>
+                  {isEditing ? (
+                    <div className="mt-2">
+                      <SpecEditor
+                        projectPath={projectPath}
+                        relPath={prdKey}
+                        filename={prd.file}
+                        onSaved={() => {
+                          setEditingSpec(null);
+                          load();
+                        }}
+                        onCancel={() => setEditingSpec(null)}
+                      />
+                    </div>
+                  ) : isExpanded ? (
+                    <Tabs defaultValue="content" className="mt-2">
+                      <TabsList className="h-7">
+                        <TabsTrigger value="content" className="px-2.5 py-0.5 text-[11px]">
+                          Content
+                        </TabsTrigger>
+                        <TabsTrigger value="checklist" className="px-2.5 py-0.5 text-[11px]">
+                          Checklist
+                        </TabsTrigger>
+                      </TabsList>
 
-                                  {/* Promote action — only on not-done loops */}
-                                  {!done && (
-                                    <button
-                                      onClick={() => handlePromote(epic.slug, prd.file, loop)}
-                                      disabled={disabled || isPromoting}
-                                      title={
+                      {/* Content — full PRD markdown body, lazy-loaded */}
+                      <TabsContent value="content">
+                        <PrdContent projectPath={projectPath} relPath={prdKey} />
+                      </TabsContent>
+
+                      {/* Checklist — the existing toggle/promote phase list */}
+                      <TabsContent value="checklist">
+                        <div className="space-y-3">
+                          {prd.phases.map((phase) => (
+                            <div key={phase.name}>
+                              <h4 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                {phase.name}
+                              </h4>
+                              <ul className="space-y-1">
+                                {phase.loops.map((loop, i) => {
+                                  const key = `${epic.slug}/${prd.file}/${loop.title}`;
+                                  const done = loop.checked || loop.done_in_history;
+                                  const isCurrent =
+                                    hasActiveLoop && currentGoal === loop.title;
+                                  const disabled =
+                                    hasActiveLoop && !isCurrent;
+                                  const isPromoting = promoting === key;
+                                  const isToggling = toggling === key;
+                                  return (
+                                    <li
+                                      key={i}
+                                      className={`flex items-start gap-2 rounded px-1.5 py-1 text-xs leading-relaxed ${
                                         isCurrent
-                                          ? "Currently in progress"
-                                          : disabled
-                                            ? "Another loop is in progress"
-                                            : "Promote to current loop"
-                                      }
-                                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
-                                        isCurrent
-                                          ? "text-[var(--primary)]"
-                                          : disabled
-                                            ? "cursor-not-allowed text-muted-foreground/40"
-                                            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                                          ? "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]"
+                                          : ""
                                       }`}
                                     >
-                                      {isPromoting ? (
-                                        <Loader2 size={10} className="animate-spin" />
-                                      ) : isCurrent ? (
-                                        "active"
-                                      ) : (
-                                        "promote"
+                                      <button
+                                        onClick={() => handleToggle(epic.slug, prd.file, loop)}
+                                        disabled={isToggling}
+                                        title={loop.checked ? "Mark as not done" : "Mark as done"}
+                                        className="mt-0.5 shrink-0 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                                      >
+                                        {isToggling ? (
+                                          <Loader2 size={12} className="animate-spin" />
+                                        ) : done ? (
+                                          <CheckCircle2 size={12} className="text-[var(--success)]" />
+                                        ) : (
+                                          <Circle size={12} />
+                                        )}
+                                      </button>
+                                      <span
+                                        className={`flex-1 ${
+                                          done ? "text-muted-foreground line-through" : "text-foreground"
+                                        }`}
+                                      >
+                                        {loop.title}
+                                      </span>
+
+                                      {/* Promote action — only on not-done loops */}
+                                      {!done && (
+                                        <button
+                                          onClick={() => handlePromote(epic.slug, prd.file, loop)}
+                                          disabled={disabled || isPromoting}
+                                          title={
+                                            isCurrent
+                                              ? "Currently in progress"
+                                              : disabled
+                                                ? "Another loop is in progress"
+                                                : "Promote to current loop"
+                                          }
+                                          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                                            isCurrent
+                                              ? "text-[var(--primary)]"
+                                              : disabled
+                                                ? "cursor-not-allowed text-muted-foreground/40"
+                                                : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                                          }`}
+                                        >
+                                          {isPromoting ? (
+                                            <Loader2 size={10} className="animate-spin" />
+                                          ) : isCurrent ? (
+                                            "active"
+                                          ) : (
+                                            "promote"
+                                          )}
+                                        </button>
                                       )}
-                                    </button>
-                                  )}
-                                </li>
-                              );
-                            })}
-                          </ul>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          ))}
+                          {prd.phases.length === 0 && (
+                            <p className="text-[11px] italic text-muted-foreground">
+                              No phases defined.
+                            </p>
+                          )}
                         </div>
-                      ))}
-                      {prd.phases.length === 0 && (
-                        <p className="text-[11px] italic text-muted-foreground">
-                          No phases defined.
-                        </p>
-                      )}
-                    </div>
-                  )}
+                      </TabsContent>
+                    </Tabs>
+                  ) : null}
                 </div>
-              ))}
+                );
+              })}
               {epic.prds.length === 0 && (
                 <p className="text-xs italic text-muted-foreground">
                   No PRDs in this epic.

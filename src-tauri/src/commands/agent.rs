@@ -4,7 +4,7 @@
 
 use super::state::{
     interrupt_slot, permission_slot, project_busy, question_slot, resolve_agent_config,
-    resolve_root, with_session, AppState,
+    resolve_permission_policy, resolve_root, with_session, AppState,
 };
 use crate::agents::{AgentResponse, ClaudeEvent};
 use crate::claude_session::{ClaudeSession, QuestionAnswers};
@@ -658,8 +658,9 @@ pub(crate) fn collect_pending_questions(
 /// `AppState.pending_permissions`; this walks that map and snapshots every
 /// non-empty slot. Used by the frontend's global "stuck prompt" reconciliation
 /// (app launch + window focus + manual refresh) so an approval parked while the
-/// user was on another view — or with the Mac locked — is never silently
-/// missed and left to auto-deny on the 10-min `PARKED_SLOT_TIMEOUT`.
+/// user was on another view — or with the Mac locked — is surfaced rather than
+/// missed (parked approvals now wait indefinitely until answered or Stopped,
+/// so this is no longer racing a timeout).
 /// `agent_pending_permission` covers the single-project case; this is the
 /// cross-project aggregate.
 ///
@@ -1001,14 +1002,14 @@ async fn send_streaming_with_retry(
 /// On a mid-turn send failure, mark the just-orphaned user turn with a
 /// reason-appropriate terminal marker.
 ///
-/// Routes on the **typed** `AppError` so the transcript records *why* the turn
-/// failed, not a blanket "process exited" — a parked approval that timed out
-/// (`ApprovalTimeout`) gets an "approval timed out" marker, a timed-out
-/// question (`QuestionTimeout`) gets a "question timed out" marker, and
-/// everything else (transport/child/spawn failure) keeps the generic
-/// process-exited marker. This is what stops the recurring "Interrupted — the
-/// agent process exited" bubbles from lying: most of them were auto-denied
-/// approvals, not process deaths.
+/// All send failures now map to the generic process-exited marker: the
+/// per-park timeout (`ApprovalTimeout` / `QuestionTimeout`) and its distinct
+/// "timed out" markers were removed — parked approvals/questions now wait
+/// indefinitely until answered or Stopped, so the only send failures that
+/// reach here are transport/child/spawn failures (which are genuinely
+/// process-exited-shaped). Old transcripts carrying `interrupt_kind:
+/// "approval_timeout"` / `"question_timeout"` still render their truthful
+/// "timed out" tag (the kinds are kept for backward compatibility).
 ///
 /// Best-effort wrapper over [`conversation::append_terminal_if_orphan`]: a
 /// write failure here is only logged, and the caller's original send error
@@ -1016,15 +1017,11 @@ async fn send_streaming_with_retry(
 /// the failed send still holds the per-project lock — no concurrent send can
 /// be appending, so the trailing user turn is a genuine orphan, not an
 /// in-flight turn mid-window.
-fn mark_turn_terminal(path: &Path, err: &AppError) {
-    let turn = match err {
-        AppError::ApprovalTimeout => ConversationTurn::interrupted_approval_timeout(),
-        AppError::QuestionTimeout => ConversationTurn::interrupted_question_timeout(),
-        // Transport failure, child exit, spawn failure, or anything else: the
-        // historical process-exited marker. Startup reconciliation uses the
-        // same kind via `reconcile_interrupted`.
-        _ => ConversationTurn::interrupted(),
-    };
+fn mark_turn_terminal(path: &Path, _err: &AppError) {
+    // Transport failure, child exit, spawn failure — the historical
+    // process-exited marker. Startup reconciliation uses the same kind via
+    // `reconcile_interrupted`.
+    let turn = ConversationTurn::interrupted();
     match conversation::append_terminal_if_orphan(path, &turn) {
         Ok(true) => info!(
             "marked terminal turn in transcript ({}): {}",
@@ -1252,13 +1249,9 @@ async fn spawn_fresh(
 
     // ── Phase 4: spawn fresh (no --resume) and insert. ──
     let agent_config = resolve_agent_config(state)?;
+    let policy = resolve_permission_policy(state, path);
 
-    let session = ClaudeSession::spawn(
-        &path.to_path_buf(),
-        &agent_config,
-        None,
-        crate::permission::PermissionPolicy::confirm_changes(),
-    )?;
+    let session = ClaudeSession::spawn(&path.to_path_buf(), &agent_config, None, policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state
         .claude_sessions
