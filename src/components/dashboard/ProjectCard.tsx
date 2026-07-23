@@ -11,6 +11,7 @@ import {
   Play,
   Loader2,
   MessageCircleQuestion,
+  ShieldCheck,
   Check,
   FileDiff,
 } from "lucide-react";
@@ -18,6 +19,7 @@ import type { ProjectEntry, RunState } from "../../types";
 import { relativeTime } from "../../lib/time";
 import { StatusBadge } from "../shared/StatusBadge";
 import { cn } from "../../lib/utils";
+import { usePendingInteractions } from "../../store/pendingInteractions";
 
 interface ProjectCardProps {
   project: ProjectEntry;
@@ -124,6 +126,19 @@ export const ProjectCard = memo(function ProjectCard({
   const monogram = project.name.charAt(0).toUpperCase() || "?";
   const { uncommitted } = project;
   const hasChanges = uncommitted.files > 0;
+  // True when a LoopDeck-spawned agent has an AskUserQuestion parked for this
+  // project (reconciled globally by useStuckSessions on launch + focus).
+  const hasStuckQuestion = usePendingInteractions(
+    (s) => !!s.questions[project.path],
+  );
+  // True when a LoopDeck-spawned agent has a manual tool-approval parked for
+  // this project (reconciled globally by useStuckSessions on launch + focus).
+  // Distinct pill from the question case so the two are distinguishable at a
+  // glance; without this, an approval parked while on another view would
+  // silently auto-deny on the 10-min PARKED_SLOT_TIMEOUT.
+  const hasPendingPermission = usePendingInteractions(
+    (s) => !!s.permissions[project.path],
+  );
 
   return (
     <div
@@ -238,8 +253,58 @@ export const ProjectCard = memo(function ProjectCard({
       </div>
 
       {/* Status */}
-      <div className="mt-4">
+      <div className="mt-4 flex items-center gap-2">
         <StatusBadge status={project.status} />
+        {hasStuckQuestion && (
+          <span
+            role="button"
+            tabIndex={0}
+            // Stop propagation so the click selects the project (landing on the
+            // detail view, where the stuck-question callout lives) instead of
+            // being swallowed by the card's own onClick.
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect(project);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                onSelect(project);
+              }
+            }}
+            title="Agent is waiting for your answer"
+            className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400 transition hover:bg-amber-500/20"
+          >
+            <MessageCircleQuestion className="size-3" />
+            Waiting
+          </span>
+        )}
+        {hasPendingPermission && (
+          <span
+            role="button"
+            tabIndex={0}
+            // Same propagation-stopping behavior as the question pill: click
+            // selects the project (landing on the detail view where the
+            // approval callout lives) rather than triggering the card body.
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect(project);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                onSelect(project);
+              }
+            }}
+            title="Agent needs your approval"
+            className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-rose-600 dark:text-rose-400 transition hover:bg-rose-500/20"
+          >
+            <ShieldCheck className="size-3" />
+            Approve
+          </span>
+        )}
       </div>
 
       {/* Action footer */}

@@ -104,6 +104,9 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   const pendingUserText = useStreamingState(
     (s) => s.byPath[projectPath]?.pendingUserText ?? null,
   );
+  const retrying = useStreamingState(
+    (s) => s.byPath[projectPath]?.retrying ?? null,
+  );
   const error = useStreamingState((s) => s.byPath[projectPath]?.error ?? null);
 
   // ── Composer focus nonce — bumped to ask Chat to focus its composer. ──
@@ -559,6 +562,23 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           });
           break;
         }
+        case "retrying": {
+          // A transient gateway overload (e.g. 529) was hit and the backend is
+          // retrying after a backoff. Without surfacing this the UI looks frozen
+          // — the failed attempt's terminal Result has landed and the next
+          // attempt hasn't started. Stash the payload so Chat can render an
+          // honest "Retrying 2/9 in 4s…" row. Cleared by the next non-retry
+          // `result` (success, non-transient error, or exhausted retries).
+          useStreamingState.getState().patch(projectPath, {
+            retrying: {
+              attempt: event.attempt,
+              maxAttempts: event.max_attempts,
+              backoffMs: event.backoff_ms,
+              error: event.error,
+            },
+          });
+          break;
+        }
         case "result":
           resultHandled = true;
           setStreamingResult(event);
@@ -570,6 +590,10 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // Instead we keep the bubble mounted (now showing the Result meta)
           // and clear it only once reload() resolves, then drop busyRef.
           setBusy(false);
+          // A terminal result supersedes any retry indicator — the turn is over
+          // (success, non-transient error, or retries exhausted). Drop the
+          // payload so the "Retrying…" row disappears.
+          useStreamingState.getState().patch(projectPath, { retrying: null });
           // Turn ended — any pending question/approval is moot (e.g. the turn
           // errored or timed out while parked). Clear so the cards disappear.
           clearPendingQuestion(projectPath);
@@ -1011,6 +1035,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         streamingResult={isActiveView ? streamingResult : null}
         pendingUserText={isActiveView ? pendingUserText : null}
         busy={busy}
+        retrying={isActiveView ? retrying : null}
         error={error}
         onSend={runSendMessage}
         onClearError={() => setError(null)}

@@ -586,6 +586,109 @@ pub struct PendingQuestionInfo {
     pub questions: Vec<crate::agents::AskUserQuestionSpec>,
 }
 
+/// One project's pending `AskUserQuestion`, surfaced across the whole registry
+/// by `list_pending_questions`. Carries the project `path` (so the frontend can
+/// route the answer) alongside the same payload as `PendingQuestionInfo`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingQuestionEntry {
+    /// Canonical registered project path — the key into `pending_answers` and
+    /// the value the frontend echoes back to `agent_answer_question`.
+    pub path: String,
+    pub request_id: String,
+    pub questions: Vec<crate::agents::AskUserQuestionSpec>,
+}
+
+/// One project's pending manual-approval request, surfaced across the whole
+/// registry by `list_pending_permissions`. Carries the project `path` (so the
+/// frontend can route the verdict) alongside the same payload as
+/// `PendingPermissionInfo`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPermissionEntry {
+    /// Canonical registered project path — the key into `pending_permissions`
+    /// and the value the frontend echoes back to `agent_answer_permission`.
+    pub path: String,
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: String,
+}
+
+/// Collect every project that currently has a pending `AskUserQuestion`, across
+/// the whole registry.
+///
+/// The read loop parks one oneshot per pending question in
+/// `AppState.pending_answers`; this walks that map and snapshots every
+/// non-empty slot. Used by the frontend's global "stuck prompt" reconciliation
+/// (app launch + window focus + manual refresh) so a prompt parked while the
+/// user was on another view — or with the Mac locked — is never silently
+/// missed. `agent_pending_question` covers the single-project case; this is the
+/// cross-project aggregate.
+///
+/// Fully synchronous and lock-bounded like `agent_pending_question`: each
+/// inner slot is locked only long enough to clone the payload, and the outer
+/// map guard is dropped before returning.
+pub(crate) fn collect_pending_questions(
+    pending: &std::sync::Mutex<HashMap<PathBuf, crate::claude_session::QuestionSlot>>,
+) -> Result<Vec<PendingQuestionEntry>, AppError> {
+    let guard = pending.lock().map_err(|_| AppError::LockError)?;
+    let mut out = Vec::new();
+    for (path, slot) in guard.iter() {
+        // Snapshot the payload inside the slot guard's scope — cloning outside
+        // would borrow the temporary guard (cf. `agent_pending_question`).
+        let entry = slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingQuestionEntry {
+                path: path.to_string_lossy().into_owned(),
+                request_id: p.request_id.clone(),
+                questions: p.questions.clone(),
+            })
+        });
+        if let Some(entry) = entry {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
+/// Collect every project that currently has a pending manual-approval request,
+/// across the whole registry. The permission-side mirror of
+/// [`collect_pending_questions`].
+///
+/// The read loop parks one oneshot per pending approval in
+/// `AppState.pending_permissions`; this walks that map and snapshots every
+/// non-empty slot. Used by the frontend's global "stuck prompt" reconciliation
+/// (app launch + window focus + manual refresh) so an approval parked while the
+/// user was on another view — or with the Mac locked — is never silently
+/// missed and left to auto-deny on the 10-min `PARKED_SLOT_TIMEOUT`.
+/// `agent_pending_permission` covers the single-project case; this is the
+/// cross-project aggregate.
+///
+/// Fully synchronous and lock-bounded like `agent_pending_permission`: each
+/// inner slot is locked only long enough to clone the payload, and the outer
+/// map guard is dropped before returning.
+pub(crate) fn collect_pending_permissions(
+    pending: &std::sync::Mutex<HashMap<PathBuf, crate::claude_session::PermissionSlot>>,
+) -> Result<Vec<PendingPermissionEntry>, AppError> {
+    let guard = pending.lock().map_err(|_| AppError::LockError)?;
+    let mut out = Vec::new();
+    for (path, slot) in guard.iter() {
+        // Snapshot the payload inside the slot guard's scope — cloning outside
+        // would borrow the temporary guard (cf. `agent_pending_permission`).
+        let entry = slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingPermissionEntry {
+                path: path.to_string_lossy().into_owned(),
+                request_id: p.request_id.clone(),
+                tool_name: p.tool_name.clone(),
+                input: p.input.clone(),
+            })
+        });
+        if let Some(entry) = entry {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
 /// Read the pending manual-approval payload for a project, if any.
 ///
 /// Does NOT consume the sender — only the payload. The frontend uses this to
@@ -635,6 +738,37 @@ pub async fn agent_pending_question(
             })
         })
     }))
+}
+
+/// List every project with a pending `AskUserQuestion`, across the whole
+/// registry. The cross-project aggregate of `agent_pending_question`.
+///
+/// Returns one `PendingQuestionEntry` per parked prompt (path + request_id +
+/// the structured questions). Empty when nothing is waiting anywhere. The
+/// frontend calls this on app launch, on window focus, and on manual refresh
+/// to surface "stuck" prompts the user would otherwise miss (e.g. the question
+/// card never rendered because the Mac was locked).
+#[tauri::command]
+pub async fn list_pending_questions(
+    state: State<'_, AppState>,
+) -> Result<Vec<PendingQuestionEntry>, AppError> {
+    collect_pending_questions(&state.pending_answers)
+}
+
+/// List every project with a pending manual-approval request, across the whole
+/// registry. The cross-project aggregate of `agent_pending_permission`, and the
+/// permission-side mirror of `list_pending_questions`.
+///
+/// Returns one `PendingPermissionEntry` per parked approval (path + request_id
+/// + tool_name + input). Empty when nothing is waiting anywhere. The frontend
+/// calls this on app launch, on window focus, and on manual refresh to surface
+/// "stuck" approvals the user would otherwise miss — parked while on another
+/// view or with the Mac locked, silently auto-denied 10 minutes later.
+#[tauri::command]
+pub async fn list_pending_permissions(
+    state: State<'_, AppState>,
+) -> Result<Vec<PendingPermissionEntry>, AppError> {
+    collect_pending_permissions(&state.pending_permissions)
 }
 
 // ── Loop-prompt builder ─────────────────────────────────────────────────────
@@ -736,9 +870,12 @@ async fn send_with_retry(
     permission_slot: &crate::claude_session::PermissionSlot,
     interrupt_slot: &crate::claude_session::InterruptSlot,
 ) -> Result<AgentResponse, AppError> {
-    // `attempt` is the 0-based index of the attempt that just ran. It doubles
-    // as the retry count via `retry::backoff_ms(attempt)`.
+    // `attempt` is the 0-based index of the attempt that just ran. `elapsed_ms`
+    // accumulates backoff sleeps so `retry::next_backoff` can enforce both the
+    // count bound (MAX_ATTEMPTS) and the wall-clock budget
+    // (BACKOFF_TOTAL_BUDGET_MS) in one place.
     let mut attempt: u32 = 0;
+    let mut elapsed_ms: u64 = 0;
     loop {
         let response = session
             .send_message(prompt, question_slot, permission_slot, interrupt_slot)
@@ -749,25 +886,29 @@ async fn send_with_retry(
             return Ok(response);
         }
 
-        // Overloaded — back off and retry if attempts remain.
-        match retry::backoff_ms(attempt) {
+        // Overloaded — back off and retry if attempts + budget remain.
+        match retry::next_backoff(attempt, elapsed_ms) {
             Some(delay) => {
                 warn!(
                     attempt = attempt + 1,
                     max_attempts = MAX_ATTEMPTS,
                     delay_ms = delay,
+                    elapsed_ms,
                     "provider overloaded; retrying in {} ms: {}",
                     delay,
                     response.result.trim(),
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                elapsed_ms = elapsed_ms.saturating_add(delay);
                 attempt += 1;
             }
             None => {
                 warn!(
                     max_attempts = MAX_ATTEMPTS,
-                    "provider overloaded; exhausted {} attempts, surfacing error: {}",
-                    MAX_ATTEMPTS,
+                    elapsed_ms,
+                    "provider overloaded; exhausted retries ({} attempts, ~{}ms backoff), surfacing error: {}",
+                    attempt + 1,
+                    elapsed_ms,
                     response.result.trim(),
                 );
                 return Ok(response);
@@ -792,6 +933,7 @@ async fn send_streaming_with_retry(
     interrupt_slot: &crate::claude_session::InterruptSlot,
 ) -> Result<AgentResponse, AppError> {
     let mut attempt: u32 = 0;
+    let mut elapsed_ms: u64 = 0;
     loop {
         let response = session
             .send_message_streaming(
@@ -807,12 +949,13 @@ async fn send_streaming_with_retry(
             return Ok(response);
         }
 
-        match retry::backoff_ms(attempt) {
+        match retry::next_backoff(attempt, elapsed_ms) {
             Some(delay) => {
                 warn!(
                     attempt = attempt + 1,
                     max_attempts = MAX_ATTEMPTS,
                     delay_ms = delay,
+                    elapsed_ms,
                     "provider overloaded [streaming]; retrying in {} ms: {}",
                     delay,
                     response.result.trim(),
@@ -826,13 +969,16 @@ async fn send_streaming_with_retry(
                     error: response.result.clone(),
                 });
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                elapsed_ms = elapsed_ms.saturating_add(delay);
                 attempt += 1;
             }
             None => {
                 warn!(
                     max_attempts = MAX_ATTEMPTS,
-                    "provider overloaded [streaming]; exhausted {} attempts, surfacing error: {}",
-                    MAX_ATTEMPTS,
+                    elapsed_ms,
+                    "provider overloaded [streaming]; exhausted retries ({} attempts, ~{}ms backoff), surfacing error: {}",
+                    attempt + 1,
+                    elapsed_ms,
                     response.result.trim(),
                 );
                 return Ok(response);
@@ -852,20 +998,42 @@ async fn send_streaming_with_retry(
 // Reconciling the orphan to a persisted `interrupted` marker keeps the
 // transcript truthful instead of leaving a hanging unanswered prompt.
 
-/// On a mid-turn send failure, mark the just-orphaned user turn `interrupted`.
+/// On a mid-turn send failure, mark the just-orphaned user turn with a
+/// reason-appropriate terminal marker.
 ///
-/// Best-effort wrapper over [`conversation::reconcile_interrupted`]: a write
-/// failure here is only logged, and the caller's original send error still
-/// propagates unchanged. Safe to call from the send-failure path because the
-/// failed send still holds the per-project lock — no concurrent send can be
-/// appending, so the trailing user turn is a genuine orphan, not an in-flight
-/// turn mid-window.
-fn mark_turn_interrupted(path: &Path) {
-    match conversation::reconcile_interrupted(path) {
-        Ok(true) => info!("marked interrupted turn in transcript: {}", path.display()),
+/// Routes on the **typed** `AppError` so the transcript records *why* the turn
+/// failed, not a blanket "process exited" — a parked approval that timed out
+/// (`ApprovalTimeout`) gets an "approval timed out" marker, a timed-out
+/// question (`QuestionTimeout`) gets a "question timed out" marker, and
+/// everything else (transport/child/spawn failure) keeps the generic
+/// process-exited marker. This is what stops the recurring "Interrupted — the
+/// agent process exited" bubbles from lying: most of them were auto-denied
+/// approvals, not process deaths.
+///
+/// Best-effort wrapper over [`conversation::append_terminal_if_orphan`]: a
+/// write failure here is only logged, and the caller's original send error
+/// still propagates unchanged. Safe to call from the send-failure path because
+/// the failed send still holds the per-project lock — no concurrent send can
+/// be appending, so the trailing user turn is a genuine orphan, not an
+/// in-flight turn mid-window.
+fn mark_turn_terminal(path: &Path, err: &AppError) {
+    let turn = match err {
+        AppError::ApprovalTimeout => ConversationTurn::interrupted_approval_timeout(),
+        AppError::QuestionTimeout => ConversationTurn::interrupted_question_timeout(),
+        // Transport failure, child exit, spawn failure, or anything else: the
+        // historical process-exited marker. Startup reconciliation uses the
+        // same kind via `reconcile_interrupted`.
+        _ => ConversationTurn::interrupted(),
+    };
+    match conversation::append_terminal_if_orphan(path, &turn) {
+        Ok(true) => info!(
+            "marked terminal turn in transcript ({}): {}",
+            turn.interrupt_kind.as_deref().unwrap_or("interrupted"),
+            path.display()
+        ),
         Ok(false) => {}
         Err(e) => warn!(
-            "failed to reconcile interrupted turn for {}: {e}",
+            "failed to reconcile terminal turn for {}: {e}",
             path.display()
         ),
     }
@@ -904,7 +1072,7 @@ async fn send_and_record(
     let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
         Ok(r) => r,
         Err(e) => {
-            mark_turn_interrupted(path);
+            mark_turn_terminal(path, &e);
             return Err(e);
         }
     };
@@ -983,7 +1151,7 @@ async fn send_and_record_streaming(
     {
         Ok(r) => r,
         Err(e) => {
-            mark_turn_interrupted(path);
+            mark_turn_terminal(path, &e);
             return Err(e);
         }
     };
@@ -1140,7 +1308,7 @@ async fn start_fresh_and_record(
     let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
         Ok(r) => r,
         Err(e) => {
-            mark_turn_interrupted(path);
+            mark_turn_terminal(path, &e);
             return Err(e);
         }
     };
@@ -1212,7 +1380,7 @@ async fn start_fresh_and_record_streaming(
     {
         Ok(r) => r,
         Err(e) => {
-            mark_turn_interrupted(path);
+            mark_turn_terminal(path, &e);
             return Err(e);
         }
     };
@@ -1309,5 +1477,55 @@ mod tests {
         assert!(!prompt.contains("next unchecked step is"));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `collect_pending_questions` is the pure core of the
+    /// `list_pending_questions` command. Plant a slot directly into a fresh
+    /// map (no AppState needed) and assert it round-trips path + payload, and
+    /// that an empty slot is skipped.
+    #[test]
+    fn collect_pending_questions_reports_planted_and_skips_empty() {
+        use crate::agents::{AskUserQuestionOption, AskUserQuestionSpec};
+        use crate::claude_session::{PendingQuestion, QuestionSlot};
+        use std::sync::{Arc, Mutex};
+
+        let path_a = PathBuf::from("/repo/a");
+        let path_b = PathBuf::from("/repo/b");
+        let slot_a: QuestionSlot = Arc::new(Mutex::new(Some(PendingQuestion {
+            request_id: "req-a".into(),
+            questions: vec![AskUserQuestionSpec {
+                question: "Which frontend?".into(),
+                header: "Frontend".into(),
+                options: vec![AskUserQuestionOption {
+                    label: "HTMX".into(),
+                    description: "Go-native".into(),
+                }],
+                multi_select: false,
+            }],
+            sender: None,
+        })));
+        // path_b's slot exists but is empty (no question parked) — must be skipped.
+        let slot_b: QuestionSlot = Arc::new(Mutex::new(None));
+
+        let mut map: HashMap<PathBuf, QuestionSlot> = HashMap::new();
+        map.insert(path_a.clone(), slot_a);
+        map.insert(path_b, slot_b);
+        let pending = Mutex::new(map);
+
+        let mut entries = collect_pending_questions(&pending).unwrap();
+        assert_eq!(entries.len(), 1, "only the planted slot should be reported");
+        let entry = entries.remove(0);
+        assert_eq!(entry.path, path_a.to_string_lossy());
+        assert_eq!(entry.request_id, "req-a");
+        assert_eq!(entry.questions.len(), 1);
+        assert_eq!(entry.questions[0].header, "Frontend");
+
+        // Clearing the planted slot yields an empty list.
+        {
+            let m = pending.lock().unwrap();
+            m.get(&path_a).unwrap().lock().unwrap().take();
+        }
+        let entries = collect_pending_questions(&pending).unwrap();
+        assert!(entries.is_empty(), "empty slots must not be reported");
     }
 }

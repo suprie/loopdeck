@@ -7,6 +7,8 @@ export interface DiscoveredRepo {
   markers: string[];
   has_readme: boolean;
   has_loopdeck: boolean;
+  /** Whether `graphify-out/graph.json` is present (Graphify already ran). */
+  has_graphify: boolean;
   /** Human-readable technology stack, e.g. "Rust, JavaScript/TypeScript". */
   detected_stack: string;
   /** Lightweight description preview generated from the detected stack. */
@@ -103,6 +105,43 @@ export interface ProjectMeta {
   created_at: string;
 }
 
+/** Per-confidence link counts for a Graphify knowledge graph. */
+export interface ConfidenceBreakdown {
+  /** Links extracted directly from source (AST-level certainty). */
+  extracted: number;
+  /** Links inferred by an LLM backend (plausible but not provable). */
+  inferred: number;
+  /** Links the extractor flagged as ambiguous. */
+  ambiguous: number;
+}
+
+/** Summary of a project's Graphify knowledge graph.
+ *  `present: false` means no readable `graphify-out/graph.json` was found —
+ *  the UI should hide the Graph tab rather than render empty stats. LoopDeck
+ *  only reads Graphify's output and never runs it. */
+export interface GraphifyStats {
+  /** `false` when `graphify-out/graph.json` is missing or unparseable. */
+  present: boolean;
+  /** Number of nodes in the graph. */
+  node_count: number;
+  /** Number of links (edges) in the graph. */
+  edge_count: number;
+  /** Number of distinct community partitions. */
+  community_count: number;
+  /** Labels of the highest-degree nodes (most connected first), capped at 10. */
+  god_nodes: string[];
+  /** Distribution of link confidence values. */
+  confidence: ConfidenceBreakdown;
+  /** Build date parsed from `GRAPH_REPORT.md` (`YYYY-MM-DD`), if present. */
+  built_at: string | null;
+  /** Absolute path to `graphify-out/graph.json`. */
+  graph_path: string;
+  /** Absolute path to `graphify-out/GRAPH_REPORT.md`, if it exists. */
+  report_path: string | null;
+  /** Absolute path to `graphify-out/graph.html`, if it exists. */
+  html_path: string | null;
+}
+
 /** Structured error returned from Rust AppError. */
 export interface AppError {
   message: string;
@@ -128,8 +167,8 @@ export interface AgentConfig {
   effort?: string;
   /**
    * Read-only signal from the backend: true when an auth token is stored in
-   * the OS keychain. The plaintext token itself is never sent over IPC, so the
-   * Settings UI uses this to show a "token stored" affordance.
+   * the local secrets file. The plaintext token itself is never sent over IPC,
+   * so the Settings UI uses this to show a "token stored" affordance.
    */
   has_auth_token?: boolean;
 }
@@ -217,7 +256,7 @@ export interface PrdLoop {
 }
 
 /** Tab navigation within ProjectDetail. */
-export type DetailTab = "overview" | "decisions" | "loops" | "epics" | "agent";
+export type DetailTab = "overview" | "decisions" | "loops" | "epics" | "agent" | "graph";
 
 /** Token usage + cost for an assistant turn (mirrors Rust UsageInfo). */
 export interface UsageInfo {
@@ -253,6 +292,17 @@ export type ClaudeEvent =
   | { type: "task_update"; task: TaskRecord }
   | { type: "permission_request" } & PermissionDecision
   | { type: "ask_user_question"; request_id: string; tool_name: string; questions: AskUserQuestionSpec[] }
+  | {
+      type: "retrying";
+      /** 1-based index of the attempt about to run (e.g. 2 for the first retry). */
+      attempt: number;
+      /** Configured maximum number of attempts (incl. the initial one). */
+      max_attempts: number;
+      /** Backoff in ms that was slept before this retry fires. */
+      backoff_ms: number;
+      /** The error text from the failed attempt that triggered the retry. */
+      error: string;
+    }
   | {
       type: "result";
       text: string;
@@ -305,6 +355,33 @@ export interface AskUserQuestionAnswer {
 
 /** Answers keyed by question text — the shape `agent_answer_question` expects. */
 export type AskUserQuestionAnswers = Record<string, AskUserQuestionAnswer>;
+
+/**
+ * One project's pending `AskUserQuestion`, surfaced across the whole registry
+ * by `listPendingQuestions`. Mirrors Rust `PendingQuestionEntry`. Carries the
+ * project `path` so the frontend can route the answer back to
+ * `agentAnswerQuestion`.
+ */
+export interface PendingQuestionEntry {
+  /** Canonical registered project path. */
+  path: string;
+  requestId: string;
+  questions: AskUserQuestionSpec[];
+}
+
+/**
+ * One project's pending manual-approval request, surfaced across the whole
+ * registry by `listPendingPermissions`. Mirrors Rust
+ * `PendingPermissionEntry`. Carries the project `path` so the frontend can
+ * route the Allow/Deny verdict back to `agentAnswerPermission`.
+ */
+export interface PendingPermissionEntry {
+  /** Canonical registered project path. */
+  path: string;
+  requestId: string;
+  toolName: string;
+  input: string;
+}
 
 /**
  * Narrowing helper: true if a `ClaudeEvent` is an `ask_user_question`.
@@ -436,6 +513,18 @@ export interface ConversationTurn {
   session_id?: string;
   /** Whether the assistant turn was an error. Always false for user turns. */
   is_error?: boolean;
+  /**
+   * Sub-classifier for an interrupted assistant turn (an `is_error` turn that
+   * never reached a terminal result). Tells the *reason* so the UI can render a
+   * truthful message instead of blaming every interruption on a process crash:
+   * - `"process_exited"`: the agent process exited before responding.
+   * - `"approval_timeout"`: a parked manual approval expired and was auto-denied.
+   * - `"question_timeout"`: a parked AskUserQuestion expired and was auto-denied.
+   * Undefined on normal turns and on legacy transcripts (written before the
+   * field existed) — the UI treats undefined as the historical generic
+   * interruption when `is_error`.
+   */
+  interrupt_kind?: "process_exited" | "approval_timeout" | "question_timeout";
   /** Token usage + cost (assistant turns only, when reported). */
   usage?: UsageInfo;
   /** Wall-clock duration in milliseconds (assistant turns only). */

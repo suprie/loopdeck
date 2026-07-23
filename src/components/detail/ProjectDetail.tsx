@@ -14,27 +14,34 @@ import {
   Repeat,
   Layers,
   Bot,
+  Network,
 } from "lucide-react";
 import { relativeTime } from "../../lib/time";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
+import { usePendingInteractions } from "../../store/pendingInteractions";
+import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { LoopsPanel } from "./LoopsPanel";
 import { EpicsPanel } from "./EpicsPanel";
+import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
+import { AskUserQuestionCard } from "./AskUserQuestionCard";
+import { PermissionApprovalCard, buildAllowRule } from "./Chat";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { StatusBadge } from "../shared/StatusBadge";
 import { PageHeader } from "../layout/AppShell";
 import { Section, IconButton, ActionButton } from "./Section";
 import { cn } from "../../lib/utils";
-import type { DetailTab } from "../../types";
+import type { AskUserQuestionAnswers, ApprovalDecision, DetailTab } from "../../types";
 
 const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
   { id: "decisions", label: "Decisions", icon: <Lightbulb size={14} /> },
   { id: "loops", label: "Loops", icon: <Repeat size={14} /> },
   { id: "epics", label: "Epics", icon: <Layers size={14} /> },
+  { id: "graph", label: "Graph", icon: <Network size={14} /> },
   { id: "agent", label: "Agent", icon: <Bot size={14} /> },
 ];
 
@@ -107,6 +114,14 @@ export function ProjectDetail() {
         actions={<StatusBadge status={project.status} />}
       />
 
+      {/* Stuck-question callout: tab-agnostic. Shown whenever a LoopDeck-spawned
+          agent has an AskUserQuestion parked for this project, regardless of
+          which tab is active — so the user can answer it from anywhere in the
+          detail view (not just the Agent tab). Mirrors the card the Agent tab
+          renders, reading from the same navigation-stable store. */}
+      <StuckQuestionCallout projectPath={project.path} />
+      <StuckPermissionCallout projectPath={project.path} />
+
       {/* Body: tab rail + content */}
       <div className="flex flex-1 min-h-0">
         {/* Sidebar nav */}
@@ -167,6 +182,10 @@ export function ProjectDetail() {
             {activeTab === "loops" && <LoopsPanel projectPath={project.path} />}
 
             {activeTab === "epics" && <EpicsPanel projectPath={project.path} />}
+
+            {activeTab === "graph" && (
+              <KnowledgeGraphPanel projectPath={project.path} />
+            )}
           </div>
         )}
       </div>
@@ -181,6 +200,103 @@ export function ProjectDetail() {
           danger
         />
       )}
+    </div>
+  );
+}
+
+// ── Stuck-question callout ───────────────────────────────────────────────────
+
+/**
+ * Tab-agnostic banner that surfaces a pending `AskUserQuestion` for this
+ * project, with the same interactive card the Agent tab's Chat renders.
+ *
+ * The per-project question payload is reconciled into `usePendingInteractions`
+ * globally (launch + focus) by `useStuckSessions`; the Agent tab ALSO renders
+ * the card when mounted. Both read the same store entry, so answering here
+ * clears it everywhere. On submit, the answer is delivered to the parked
+ * backend slot via `agentAnswerQuestion` (the same path the Agent tab uses),
+ * the local entry is cleared, and a re-reconcile drops it store-wide.
+ *
+ * Returns null when nothing is pending for this project.
+ */
+function StuckQuestionCallout({ projectPath }: { projectPath: string }) {
+  const pending = usePendingInteractions((s) => s.questions[projectPath] ?? null);
+  const clearQuestion = usePendingInteractions((s) => s.clearQuestion);
+  if (!pending) return null;
+
+  async function onSubmit(answers: AskUserQuestionAnswers) {
+    try {
+      await api.agentAnswerQuestion(projectPath, pending.requestId, answers);
+    } catch (err) {
+      // The turn may have ended while the user deliberated; the backend
+      // returns a "no pending question" error in that case. Either way the
+      // entry is stale — clear it locally so the banner doesn't linger.
+      console.warn("agentAnswerQuestion failed", err);
+    }
+    clearQuestion(projectPath);
+  }
+
+  return (
+    <div className="border-b border-amber-500/30 bg-amber-500/5 px-6 py-3">
+      <AskUserQuestionCard questions={pending.questions} onSubmit={onSubmit} />
+    </div>
+  );
+}
+
+/**
+ * Tab-agnostic banner that surfaces a pending manual tool-approval for this
+ * project — the permission-side mirror of `StuckQuestionCallout`. Renders the
+ * same `PermissionApprovalCard` the Agent tab's Chat uses, so the look is
+ * identical and answering here clears it everywhere (both read the same store
+ * entry).
+ *
+ * This closes the recurrence where an approval parked while the user was on
+ * another view (or with the Mac locked) was invisible until it silently
+ * auto-denied on the 10-min `PARKED_SLOT_TIMEOUT` and surfaced as a generic
+ * "Interrupted" bubble. `useStuckSessions` now reconciles permissions
+ * cross-project (launch + focus); this callout makes them actionable from any
+ * tab, not just Agent.
+ *
+ * Returns null when nothing is pending for this project.
+ */
+function StuckPermissionCallout({ projectPath }: { projectPath: string }) {
+  const pending = usePendingInteractions((s) => s.permissions[projectPath] ?? null);
+  const clearPermission = usePendingInteractions((s) => s.clearPermission);
+  if (!pending) return null;
+
+  async function onDecide(decision: ApprovalDecision) {
+    // On success, DON'T clear here — wait for the resolved permission_request
+    // event to arrive (the same flow the Agent tab uses, so the ⏳ marker
+    // becomes ✓/✗ consistently). On IPC error (the turn already ended, no
+    // pending approval), the entry is stale — clear it so the banner goes away.
+    try {
+      await api.agentAnswerPermission(projectPath, pending.requestId, decision);
+    } catch (err) {
+      console.warn("agentAnswerPermission failed", err);
+      clearPermission(projectPath);
+    }
+  }
+
+  async function onAlwaysAllow() {
+    try {
+      await api.agentAnswerPermission(projectPath, pending.requestId, {
+        allow: true,
+      });
+      const rule = buildAllowRule(pending.toolName, pending.input);
+      await api.agentAddAllowRule(projectPath, rule);
+    } catch (err) {
+      console.warn("always-allow failed", err);
+    }
+  }
+
+  return (
+    <div className="border-b border-rose-500/30 bg-rose-500/5 px-6 py-3">
+      <PermissionApprovalCard
+        toolName={pending.toolName}
+        input={pending.input}
+        onDecide={onDecide}
+        onAlwaysAllow={onAlwaysAllow}
+      />
     </div>
   );
 }

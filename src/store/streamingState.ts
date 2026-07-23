@@ -75,6 +75,25 @@ export interface StreamingState {
    * a live process.
    */
   tasks: Record<string, TaskRecord>;
+  /**
+   * Active transient-overload retry state for the in-flight turn, or `null`
+   * when no retry is pending.
+   *
+   * The backend emits a `retrying` ClaudeEvent between a failed attempt and
+   * its backoff-delayed retry (e.g. on a `529 overloaded` from the gateway).
+   * Without surfacing it the UI looks frozen during the retry window — the
+   * previous attempt's terminal `Result{is_error:true}` has already arrived
+   * and the next attempt hasn't started. This field carries the structured
+   * payload (attempt/max/backoff/error) so `Chat` can render an honest
+   * "Retrying 2/9 in 4s…" row. Cleared on turn begin, on the next non-retry
+   * result, and on `clear`.
+   */
+  retrying: {
+    attempt: number;
+    maxAttempts: number;
+    backoffMs: number;
+    error: string;
+  } | null;
 }
 
 interface StreamingStateMap {
@@ -111,6 +130,7 @@ const EMPTY: StreamingState = {
   pendingUserText: null,
   error: null,
   tasks: {},
+  retrying: null,
 };
 
 export const useStreamingState = create<StreamingStateMap>((set, get) => ({
@@ -130,6 +150,7 @@ export const useStreamingState = create<StreamingStateMap>((set, get) => ({
           error: null,
           // Fresh todo set each turn — a new turn's TodoWrite starts clean.
           tasks: {},
+          retrying: null,
         },
       },
     })),

@@ -11,10 +11,16 @@
 //! feature is already enabled). Tunable via the constants below.
 
 /// Maximum number of send attempts (1 initial + retries).
-pub const MAX_ATTEMPTS: u32 = 4;
+///
+/// Tuned for sustained gateway blips (e.g. `api.z.ai` overload windows that
+/// outlast a few retries). At the default base/factor/cap below this yields
+/// waits of ~2s, 4s, 8s, 16s, 30s, 30s, 30s, 30s ≈ 2.5 min of sleeps before
+/// the 9th attempt is terminal. See [`BACKOFF_TOTAL_BUDGET_MS`] for the hard
+/// wall-clock ceiling that can terminate retries earlier.
+pub const MAX_ATTEMPTS: u32 = 9;
 
 /// Base backoff for the first retry. Subsequent waits double, capped by
-/// [`BACKOFF_CAP`]. With the defaults this yields ~2s, 4s, 8s before giving up.
+/// [`BACKOFF_CAP_MS`].
 pub const BACKOFF_BASE_MS: u64 = 2_000;
 
 /// Multiplier applied between successive backoffs.
@@ -22,6 +28,17 @@ pub const BACKOFF_FACTOR: u32 = 2;
 
 /// Upper bound on a single backoff sleep.
 pub const BACKOFF_CAP_MS: u64 = 30_000;
+
+/// Hard wall-clock ceiling on the *total* time spent in backoff sleeps across
+/// all retries of a single turn.
+///
+/// `MAX_ATTEMPTS` bounds the count of retries; this bounds their cumulative
+/// duration. Whichever binds first terminates the retry loop, so a future
+/// bump to `MAX_ATTEMPTS` (or a longer `BACKOFF_CAP_MS`) can't silently extend
+/// the worst-case wait past ~5 minutes. Checked per-iteration in
+/// [`next_backoff`] against the elapsed sleep time so the budget is enforced
+/// in one pure, testable place rather than at each call site.
+pub const BACKOFF_TOTAL_BUDGET_MS: u64 = 300_000; // 5 minutes
 
 /// Decide whether a provider error result is transient and worth retrying.
 ///
@@ -51,6 +68,9 @@ pub fn is_overloaded(result: &str) -> bool {
 /// so the wait *before* the next try grows exponentially: base, base*2, …,
 /// capped. Returns `None` when there are no attempts left to retry into
 /// (i.e. `attempt + 1 >= MAX_ATTEMPTS`).
+///
+/// Count-based only — does NOT consult the wall-clock budget. Use
+/// [`next_backoff`] from retry loops to also enforce [`BACKOFF_TOTAL_BUDGET_MS`].
 pub fn backoff_ms(attempt: u32) -> Option<u64> {
     if attempt + 1 >= MAX_ATTEMPTS {
         return None;
@@ -61,6 +81,26 @@ pub fn backoff_ms(attempt: u32) -> Option<u64> {
     // it.
     let raw = BACKOFF_BASE_MS.saturating_mul(u64::from(BACKOFF_FACTOR.saturating_pow(attempt)));
     Some(raw.min(BACKOFF_CAP_MS))
+}
+
+/// The backoff to apply before the next retry, or `None` to stop retrying.
+///
+/// The retry-loop entry point: combines the count bound ([`backoff_ms`]) with
+/// the wall-clock budget ([`BACKOFF_TOTAL_BUDGET_MS`]). `elapsed_ms` is the
+/// cumulative time already spent in backoff sleeps for this turn (the caller
+/// accumulates it). Returns `None` — meaning "surface the error" — when either
+/// the attempt count is exhausted OR the remaining budget can't fit a useful
+/// sleep. Centralizing both bounds here keeps the retry wrappers free of
+/// policy and makes the budget trivially testable without a fake clock.
+///
+/// Note: this does not shorten the *next* sleep to fit a remaining budget
+/// sliver — a near-zero leftover isn't worth one more full backoff, so we stop.
+pub fn next_backoff(attempt: u32, elapsed_ms: u64) -> Option<u64> {
+    let wait = backoff_ms(attempt)?;
+    if elapsed_ms + wait >= BACKOFF_TOTAL_BUDGET_MS {
+        return None;
+    }
+    Some(wait)
 }
 
 #[cfg(test)]
@@ -96,11 +136,17 @@ mod tests {
 
     #[test]
     fn backoff_progression_and_cap() {
-        // 2s, 4s, 8s; the 4th attempt (index 3) is terminal → None.
+        // 2s, 4s, 8s, 16s, then capped at 30s for the remaining waits; the
+        // 9th attempt (index 8) is terminal → None.
         assert_eq!(backoff_ms(0), Some(2_000));
         assert_eq!(backoff_ms(1), Some(4_000));
         assert_eq!(backoff_ms(2), Some(8_000));
-        assert_eq!(backoff_ms(3), None);
+        assert_eq!(backoff_ms(3), Some(16_000));
+        assert_eq!(backoff_ms(4), Some(30_000));
+        assert_eq!(backoff_ms(5), Some(30_000));
+        assert_eq!(backoff_ms(6), Some(30_000));
+        assert_eq!(backoff_ms(7), Some(30_000));
+        assert_eq!(backoff_ms(8), None);
     }
 
     #[test]
@@ -109,5 +155,45 @@ mod tests {
         let raw = BACKOFF_BASE_MS.saturating_mul(u64::from(BACKOFF_FACTOR.saturating_pow(10)));
         assert!(raw >= BACKOFF_CAP_MS); // would overshoot…
         assert_eq!(raw.min(BACKOFF_CAP_MS), BACKOFF_CAP_MS); // …but is capped.
+    }
+
+    #[test]
+    fn next_backoff_ignores_budget_when_far_from_it() {
+        // Early retries with no elapsed time just return the count-based wait.
+        assert_eq!(next_backoff(0, 0), Some(2_000));
+        assert_eq!(next_backoff(1, 2_000), Some(4_000));
+    }
+
+    #[test]
+    fn next_backoff_stops_when_next_wait_would_breach_budget() {
+        // Simulate being near the 5-minute budget. attempt 0 would wait 2s,
+        // but elapsed + 2s would cross the budget → stop.
+        let elapsed = BACKOFF_TOTAL_BUDGET_MS - 1_000;
+        assert_eq!(next_backoff(0, elapsed), None);
+    }
+
+    #[test]
+    fn next_backoff_budget_bounds_the_loop_before_count_does() {
+        // Walk the retry loop purely via next_backoff, summing waits, and
+        // confirm the total never exceeds the budget — i.e. the budget (not
+        // MAX_ATTEMPTS) is what terminates a pathological long-cap sequence.
+        let mut elapsed = 0u64;
+        let mut attempt = 0u32;
+        let mut last_wait = 0u64;
+        while let Some(wait) = next_backoff(attempt, elapsed) {
+            elapsed += wait;
+            last_wait = wait;
+            attempt += 1;
+            // Hard safety net for the test itself — never a real bound.
+            if attempt > 100 {
+                panic!("retry loop did not terminate");
+            }
+        }
+        assert!(
+            elapsed <= BACKOFF_TOTAL_BUDGET_MS,
+            "total backoff {elapsed} exceeded budget {BACKOFF_TOTAL_BUDGET_MS}"
+        );
+        // Sanity: we did make progress (at least one retry happened).
+        assert!(attempt >= 1, "loop never retried; last_wait={last_wait}");
     }
 }

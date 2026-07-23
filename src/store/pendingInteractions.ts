@@ -1,5 +1,9 @@
 import { create } from "zustand";
-import type { AskUserQuestionSpec } from "../types";
+import type {
+  AskUserQuestionSpec,
+  PendingPermissionEntry,
+  PendingQuestionEntry,
+} from "../types";
 
 /**
  * The payload of a pending manual tool approval, surfaced as an Allow/Deny card.
@@ -62,6 +66,27 @@ interface PendingInteractionState {
   clearPermission: (path: string) => void;
   setQuestion: (path: string, pending: PendingQuestion) => void;
   clearQuestion: (path: string) => void;
+  /**
+   * Replace the entire `questions` map from a fresh backend snapshot
+   * (`listPendingQuestions`). Entries absent from the snapshot are stale (the
+   * turn ended or was answered elsewhere) and are dropped, so a prompt that
+   * resolved while the user was away doesn't linger. Returns the set of paths
+   * that are newly-pending (were absent before, now present) so the caller can
+   * fire a one-time toast per prompt rather than on every reconcile.
+   */
+  reconcileQuestions: (
+    entries: PendingQuestionEntry[],
+  ) => string[];
+  /**
+   * Replace the entire `permissions` map from a fresh backend snapshot
+   * (`listPendingPermissions`). The permission-side mirror of
+   * `reconcileQuestions`: entries absent from the snapshot are stale and
+   * dropped, and the set of newly-pending paths is returned so the caller can
+   * fire a one-time toast per approval rather than on every reconcile.
+   */
+  reconcilePermissions: (
+    entries: PendingPermissionEntry[],
+  ) => string[];
 }
 
 export const usePendingInteractions = create<PendingInteractionState>((set) => ({
@@ -89,4 +114,36 @@ export const usePendingInteractions = create<PendingInteractionState>((set) => (
       delete next[path];
       return { questions: next };
     }),
+
+  reconcileQuestions: (entries) => {
+    // Compute the fresh map and the newly-stuck paths BEFORE mutating, since
+    // Zustand's `set` returns void. Reading current state via `get()` (set up
+    // below) lets us diff without a second subscription.
+    const prev = usePendingInteractions.getState().questions;
+    const next: Record<string, PendingQuestion> = {};
+    const newlyStuck: string[] = [];
+    for (const e of entries) {
+      next[e.path] = { requestId: e.requestId, questions: e.questions };
+      if (!prev[e.path]) newlyStuck.push(e.path);
+    }
+    set({ questions: next });
+    return newlyStuck;
+  },
+  reconcilePermissions: (entries) => {
+    // Permission-side mirror of `reconcileQuestions`. Same diff-before-mutate
+    // shape: build the fresh map, record newly-pending paths, then swap.
+    const prev = usePendingInteractions.getState().permissions;
+    const next: Record<string, PendingPermission> = {};
+    const newlyStuck: string[] = [];
+    for (const e of entries) {
+      next[e.path] = {
+        requestId: e.requestId,
+        toolName: e.toolName,
+        input: e.input,
+      };
+      if (!prev[e.path]) newlyStuck.push(e.path);
+    }
+    set({ permissions: next });
+    return newlyStuck;
+  },
 }));

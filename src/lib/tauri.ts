@@ -5,6 +5,7 @@ import type {
   DiscoveredRepo,
   ProjectEntry,
   ProjectMeta,
+  GraphifyStats,
   Decision,
   Epic,
   LoopStatus,
@@ -15,6 +16,8 @@ import type {
   ApprovalDecision,
   AskUserQuestionAnswers,
   AskUserQuestionSpec,
+  PendingQuestionEntry,
+  PendingPermissionEntry,
   SkillEntry,
 } from "../types";
 
@@ -99,6 +102,15 @@ export async function rescanProject(path: string): Promise<ProjectEntry> {
  */
 export async function regenerateDescription(path: string): Promise<string> {
   return invoke<string>("regenerate_description", { path });
+}
+
+/**
+ * Summarize the Graphify knowledge graph for a project, if present.
+ * Returns `present: false` when no readable `graphify-out/graph.json` exists.
+ * Rust: get_graphify_stats(path: String) -> Result<GraphifyStats, AppError>
+ */
+export async function getGraphifyStats(path: string): Promise<GraphifyStats> {
+  return invoke<GraphifyStats>("get_graphify_stats", { path });
 }
 
 /**
@@ -229,7 +241,7 @@ export async function setAgentConfig(config: AgentConfig): Promise<AgentConfig> 
 }
 
 /**
- * Remove the stored auth token from the OS keychain.
+ * Remove the stored auth token from the local secrets file.
  * Rust: clear_auth_token() -> Result<(), AppError>
  */
 export async function clearAuthToken(): Promise<void> {
@@ -512,6 +524,37 @@ export async function agentPendingQuestion(
     "agent_pending_question",
     { path },
   );
+}
+
+/**
+ * List every project with a pending `AskUserQuestion`, across the whole
+ * registry. The cross-project aggregate of `agentPendingQuestion`.
+ *
+ * The frontend calls this on app launch, on window focus, and on manual
+ * refresh to surface "stuck" prompts — ones parked while the user was on
+ * another view or had the Mac locked, so the per-project question card never
+ * rendered.
+ *
+ * Rust: list_pending_questions() -> Result<Vec<PendingQuestionEntry>, AppError>
+ */
+export async function listPendingQuestions(): Promise<PendingQuestionEntry[]> {
+  return invoke<PendingQuestionEntry[]>("list_pending_questions");
+}
+
+/**
+ * List every project with a pending manual-approval request, across the whole
+ * registry. The cross-project aggregate of `agentPendingPermission`, and the
+ * permission-side mirror of `listPendingQuestions`.
+ *
+ * The frontend calls this on app launch, on window focus, and on manual
+ * refresh to surface "stuck" approvals — ones parked while the user was on
+ * another view or had the Mac locked, so the per-project approval card never
+ * rendered (and would otherwise auto-deny on the 10-min timeout).
+ *
+ * Rust: list_pending_permissions() -> Result<Vec<PendingPermissionEntry>, AppError>
+ */
+export async function listPendingPermissions(): Promise<PendingPermissionEntry[]> {
+  return invoke<PendingPermissionEntry[]>("list_pending_permissions");
 }
 
 /**

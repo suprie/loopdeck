@@ -7,6 +7,7 @@ mod conversation;
 mod epic;
 mod error;
 mod git;
+mod graphify;
 mod limits;
 mod logging;
 mod memory;
@@ -47,14 +48,16 @@ pub fn run() {
     };
 
     // One-time migration: move any plaintext auth token out of config.yaml into
-    // the OS keychain. Best-effort — if the keychain is unavailable we keep the
-    // token in memory and carry on; `save()` still applies the 0600 interim
-    // floor below so any plaintext copy that remains is owner-only.
-    match config.migrate_auth_token_to_keychain() {
-        Ok(true) => tracing::info!("migrated plaintext auth token from config.yaml to OS keychain"),
+    // the local secrets file. Best-effort — if the secrets file write fails we
+    // keep the token in memory and carry on; `save()` still applies the 0600
+    // interim floor below so any plaintext copy that remains is owner-only.
+    match config.migrate_auth_token_to_secrets_file() {
+        Ok(true) => tracing::info!(
+            "migrated plaintext auth token from config.yaml to local secrets file"
+        ),
         Ok(false) => {}
         Err(e) => tracing::warn!(
-            "keychain unavailable; keeping auth token in 0600 config.yaml as interim floor: {e}"
+            "secrets file write failed; keeping auth token in 0600 config.yaml as interim floor: {e}"
         ),
     }
     // Persist: scrubs the token from the file when migration succeeded, and
@@ -114,6 +117,7 @@ pub fn run() {
             commands::project::open_in_terminal,
             commands::project::regenerate_description,
             commands::project::rescan_project,
+            commands::project::get_graphify_stats,
             // Decisions / loops / epics / specs (epics.rs)
             commands::epics::get_decisions,
             commands::epics::get_loops,
@@ -145,6 +149,8 @@ pub fn run() {
             commands::agent::agent_is_busy,
             commands::agent::agent_pending_permission,
             commands::agent::agent_pending_question,
+            commands::agent::list_pending_questions,
+            commands::agent::list_pending_permissions,
         ])
         .run(tauri::generate_context!())
     {
