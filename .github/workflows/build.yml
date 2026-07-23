@@ -1,3 +1,13 @@
+# Release artifact pipeline — see docs/release-pipeline.md for the full
+# definition (version policy, stages, smoke-test handoff, signing, out-of-scope).
+# The install/upgrade/rollback contract those artifacts must satisfy is in
+# docs/alpha-distribution.md.
+#
+# Scope: only the macOS arm64 .dmg is a SUPPORTED release artifact (it is the
+# one smoke-tested, documented install path). The Linux and Windows matrix
+# entries are EXPERIMENTAL — the pipeline compiles+bundles them so cross-OS
+# regressions are visible, but they are NOT installation-tested, NOT signed,
+# and NOT covered by the install contract. See docs/release-pipeline.md §1.
 name: build
 
 on:
@@ -14,9 +24,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest      # Apple Silicon → .dmg
-          - platform: ubuntu-22.04      # → .AppImage + .deb
-          - platform: windows-latest    # → .exe (NSIS) + .msi
+          - platform: macos-latest      # SUPPORTED  → .dmg (arm64, Apple Silicon) — smoke-tested
+          - platform: ubuntu-22.04      # EXPERIMENTAL → .AppImage + .deb (not installation-tested)
+          - platform: windows-latest    # EXPERIMENTAL → .exe (NSIS) + .msi (not installation-tested)
     runs-on: ${{ matrix.platform }}
 
     steps:
