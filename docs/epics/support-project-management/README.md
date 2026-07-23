@@ -85,6 +85,7 @@ Out of scope (deferred to later milestones):
 | [prd-spec-layer.md](./prd-spec-layer.md) | `docs/epics/` layout, frontmatter spec, `epic.rs` parser, format contract with the authoring skill |
 | [prd-epics-view.md](./prd-epics-view.md) | Cross-project `/epics` view (grouped by milestone), Epics tab, promote-to-loop bridge |
 | [prd-skill-split.md](./prd-skill-split.md) | Orchestrator → runner + author + memory; managed-skills refresh; migration |
+| [prd-epic-author.md](./prd-epic-author.md) | `loopdeck-epic-author` skill detail: clarifying-question set, goal→epic→PRD→phase→loop decomposition, format contract, posture rules |
 
 ## Architecture Decisions
 
