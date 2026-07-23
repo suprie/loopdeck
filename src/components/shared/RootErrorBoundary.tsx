@@ -25,7 +25,7 @@ interface RootErrorBoundaryState {
  * Recovery is best-effort:
  * - **Reload app** — `window.location.reload()`; guaranteed recovery. LoopDeck
  *   is offline-first, so on-disk data (`.loopdeck/`, `config.yaml`, the
- *   keychain auth token) survives a full reload untouched.
+ *   local `agent_token` file) survives a full reload untouched.
  * - **Try again** — clears the boundary and remounts the subtree (the bumped
  *   `resetKey` is applied as a `Fragment` `key`). This drops transient React
  *   state and re-runs render; a *deterministic* crash will trip the boundary
