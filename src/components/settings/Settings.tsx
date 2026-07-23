@@ -87,7 +87,7 @@ export function Settings() {
     setSaved(false);
     try {
       // Strip empty strings to None on the Rust side. An empty auth_token is
-      // omitted entirely so the backend preserves the existing keychain token
+      // omitted entirely so the backend preserves the existing stored token
       // rather than clearing it.
       const toSave: AgentConfig = {};
       if (form.auth_token) toSave.auth_token = form.auth_token;
@@ -97,8 +97,9 @@ export function Settings() {
 
       const saved = await setAgentConfig(toSave);
       setHasToken(!!saved.has_auth_token);
-      // The token now lives in the keychain — clear the field so the masked
-      // "stored" affordance shows and the plaintext doesn't linger in state.
+      // The token now lives in the local secrets file — clear the field so the
+      // masked "stored" affordance shows and the plaintext doesn't linger in
+      // state.
       setForm((prev) => ({ ...prev, auth_token: "" }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -148,7 +149,7 @@ export function Settings() {
             {/* Auth Token */}
             <Field
               label="Auth Token"
-              hint="Your API key, stored in your OS keychain — never written to disk. Leave blank to keep the stored token; type a new value to replace it."
+              hint="Your API key, stored locally in an owner-only file — never written to the registry. Leave blank to keep the stored token; type a new value to replace it."
             >
               <div className="relative">
                 <Input
@@ -172,7 +173,7 @@ export function Settings() {
               {hasToken && !form.auth_token ? (
                 <div className="mt-2 flex items-center justify-between rounded-md border border-success/30 bg-success/5 px-2.5 py-1.5">
                   <span className="inline-flex items-center gap-1.5 text-[11px] text-success">
-                    <Check className="size-3.5" /> Token stored in OS keychain
+                    <Check className="size-3.5" /> Token stored locally
                   </span>
                   <button
                     type="button"

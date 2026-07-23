@@ -16,7 +16,8 @@ pub struct AgentConfig {
     pub auth_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// Presence flag for a token stored in the OS keychain (`secrets` module).
+    /// Presence flag for a token stored in the local secrets file (`secrets`
+    /// module).
     ///
     /// Populated *only* on the `get_agent_config` read path so the UI can show
     /// a "token stored" affordance without the plaintext ever crossing to the
@@ -24,7 +25,7 @@ pub struct AgentConfig {
     /// saves the config leaves it `false` (the default), so
     /// `skip_serializing_if = "is_false"` keeps it out of the file. It is also
     /// ignored on the `set_agent_config` write path, where presence is always
-    /// recomputed from the keychain.
+    /// recomputed from the secrets file.
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_auth_token: bool,
 }
@@ -145,7 +146,7 @@ fn is_run_state_idle(state: &RunState) -> bool {
 }
 
 /// serde `skip_serializing_if` predicate for `AgentConfig::has_auth_token`:
-/// omit the keychain-presence flag when false so it never clutters the
+/// omit the secrets-file-presence flag when false so it never clutters the
 /// persisted YAML — it is only ever `true` on the transient `get_agent_config`
 /// response clone, never on the config held in `Mutex<GlobalConfig>`.
 fn is_false(b: &bool) -> bool {
@@ -200,7 +201,9 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
-    /// Load global config from `~/.config/loopdeck/config.yaml`.
+    /// Load global config from the platform config dir —
+    /// `~/Library/Application Support/com.loopdeck.LoopDeck/config.yaml` on
+    /// macOS (`~/.config/loopdeck/config.yaml` is the headless/Linux fallback).
     ///
     /// Recovery order (PRD FR2):
     /// 1. Primary missing → fresh default (first launch).
@@ -264,7 +267,9 @@ impl GlobalConfig {
         }
     }
 
-    /// Save global config to `~/.config/loopdeck/config.yaml`.
+    /// Save global config to the platform config dir —
+    /// `~/Library/Application Support/com.loopdeck.LoopDeck/config.yaml` on
+    /// macOS (`~/.config/loopdeck/config.yaml` is the headless/Linux fallback).
     ///
     /// Crash-safe via [`persist::atomic_write`] (temp + fsync + same-dir
     /// rename). Before overwriting, copies the existing primary to
@@ -272,9 +277,9 @@ impl GlobalConfig {
     /// the backup.
     ///
     /// Also applies an owner-only permission floor (0600 on Unix) as
-    /// defense-in-depth: the auth token itself lives in the OS keychain now
-    /// (see `secrets`), but the file still holds provider config, so we don't
-    /// rely on the process umask to keep it private.
+    /// defense-in-depth: the auth token itself lives in the local secrets file
+    /// now (see `secrets`), but this file still holds provider config, so we
+    /// don't rely on the process umask to keep it private.
     pub fn save(&self) -> Result<(), AppError> {
         let config_path = Self::config_path()?;
         self.save_to_path(&config_path)
@@ -305,17 +310,18 @@ impl GlobalConfig {
     }
 
     /// Migrate any plaintext `agent.auth_token` still present in the loaded
-    /// config into the OS keychain, scrubbing it from the in-memory (and, on
-    /// the next `save()`, on-disk) config.
+    /// config into the local secrets file, scrubbing it from the in-memory
+    /// (and, on the next `save()`, on-disk) config.
     ///
     /// Returns:
     /// - `Ok(true)` — a token was moved; the caller should `save()` so the
     ///   plaintext copy is gone from disk.
     /// - `Ok(false)` — nothing to migrate (no agent block, or no/empty token).
-    /// - `Err` — a token was present but the keychain rejected it. The token is
-    ///   put back in place so it is not silently lost; the caller should keep
-    ///   it in the 0600 file as the interim floor rather than drop it.
-    pub fn migrate_auth_token_to_keychain(&mut self) -> Result<bool, AppError> {
+    /// - `Err` — a token was present but the secrets file write failed. The
+    ///   token is put back in place so it is not silently lost; the caller
+    ///   should keep it in the 0600 file as the interim floor rather than drop
+    ///   it.
+    pub fn migrate_auth_token_to_secrets_file(&mut self) -> Result<bool, AppError> {
         let Some(agent) = self.agent.as_mut() else {
             return Ok(false);
         };
@@ -329,12 +335,12 @@ impl GlobalConfig {
             return Ok(false);
         }
         let token = token.to_string();
-        // Scrub from config first, then store. If the keychain rejects it we
-        // restore the token so it is never silently lost.
+        // Scrub from config first, then store. If the secrets file rejects it
+        // we restore the token so it is never silently lost.
         agent.auth_token = None;
         match crate::secrets::store_auth_token(&token) {
             Ok(()) => {
-                debug!("migrated plaintext auth token from config.yaml to OS keychain");
+                debug!("migrated plaintext auth token from config.yaml to local secrets file");
                 Ok(true)
             }
             Err(e) => {
@@ -372,7 +378,10 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Path to the config directory: `~/.config/loopdeck/`
+    /// Path to the config directory. Platform-resolved via
+    /// `directories::ProjectDirs::config_dir()`: `~/Library/Application
+    /// Support/com.loopdeck.LoopDeck/` on macOS, `~/.config/loopdeck/` on
+    /// Linux / as the headless fallback.
     pub fn config_dir() -> Result<PathBuf, AppError> {
         let dir = directories::ProjectDirs::from("com", "loopdeck", "LoopDeck")
             .map(|dirs| dirs.config_dir().to_path_buf())
@@ -384,7 +393,7 @@ impl GlobalConfig {
         Ok(dir)
     }
 
-    /// Full path to the config file: `~/.config/loopdeck/config.yaml`
+    /// Full path to the config file: `<config_dir>/config.yaml`
     pub fn config_path() -> Result<PathBuf, AppError> {
         Ok(Self::config_dir()?.join("config.yaml"))
     }
@@ -392,7 +401,7 @@ impl GlobalConfig {
 
 /// Lock the config file down to owner-only. Best-effort: a failure here is
 /// logged but not fatal (the file's contents are no longer secret once the
-/// auth token has moved to the keychain; this is defense-in-depth).
+/// auth token has moved to the local secrets file; this is defense-in-depth).
 #[cfg(unix)]
 fn restrict_file_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -403,8 +412,7 @@ fn restrict_file_perms(path: &Path) {
 
 /// No-op on non-Unix: the config file lives under `%APPDATA%` / `~/Library`,
 /// which the OS already scopes to the current user via ACLs. There is no
-/// portable `chmod` equivalent, and the keychain backends handle their own
-/// access control.
+/// portable `chmod` equivalent.
 #[cfg(not(unix))]
 fn restrict_file_perms(_path: &Path) {}
 
@@ -848,16 +856,18 @@ agent:
         assert!(!cfg.agent.unwrap().has_auth_token);
     }
 
-    // ── migrate_auth_token_to_keychain (offline no-op paths) ──
+    // ── migrate_auth_token_to_secrets_file (offline no-op paths) ──
     //
-    // The "token present" branch writes to the real OS keychain, so it is
-    // covered by the `#[ignore]`d live test in `secrets.rs`. These exercise
-    // the early-return paths that never touch the keychain.
+    // The "token present" branch writes to the real secrets file
+    // (`<config_dir>/agent_token`), so it is not exercised here. The
+    // underlying store/load round-trip is covered hermetically by
+    // `secrets::tests::file_backend_roundtrip`. These tests exercise only the
+    // early-return paths that never touch the secrets file.
 
     #[test]
     fn migrate_noop_when_no_agent_block() {
         let mut config = GlobalConfig::default();
-        assert!(!config.migrate_auth_token_to_keychain().unwrap());
+        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
         assert!(config.agent.is_none());
     }
 
@@ -873,7 +883,7 @@ agent:
             }),
             ..Default::default()
         };
-        assert!(!config.migrate_auth_token_to_keychain().unwrap());
+        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
         assert!(config.agent.as_ref().unwrap().auth_token.is_none());
     }
 
@@ -889,8 +899,8 @@ agent:
             }),
             ..Default::default()
         };
-        // Empty string is treated as "no token" — must not call the keychain.
-        assert!(!config.migrate_auth_token_to_keychain().unwrap());
+        // Empty string is treated as "no token" — must not touch the secrets file.
+        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
         assert_eq!(
             config.agent.as_ref().unwrap().auth_token.as_deref(),
             Some("")

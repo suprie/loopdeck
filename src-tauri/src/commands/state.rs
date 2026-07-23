@@ -116,16 +116,18 @@ pub(crate) fn resolve_root(state: &AppState, path: &str) -> Result<PathBuf, AppE
 }
 
 /// Read the agent config from the registry and inject the auth token from the
-/// OS keychain.
+/// local secrets file.
 ///
-/// The token is never stored in `config.yaml` (it lives in the keychain — see
-/// `secrets`), so it must be resolved here, at spawn time. The returned value
-/// is a local owned `AgentConfig` passed by reference to `ClaudeSession::spawn`,
-/// which sets it as a child env var (`ANTHROPIC_AUTH_TOKEN`) and then drops it —
-/// the plaintext token is never held on the long-lived `Mutex<GlobalConfig>`.
+/// The token is never stored in `config.yaml` (it lives in a separate
+/// owner-only file — see `secrets`), so it must be resolved here, at spawn
+/// time. The returned value is a local owned `AgentConfig` passed by reference
+/// to `ClaudeSession::spawn`, which sets it as a child env var
+/// (`ANTHROPIC_AUTH_TOKEN`) and then drops it — the plaintext token is never
+/// held on the long-lived `Mutex<GlobalConfig>`.
 ///
-/// A missing keychain token resolves to `None`, preserving the prior behaviour
-/// where a user may rely on `ANTHROPIC_AUTH_TOKEN` inherited from their shell.
+/// A missing secrets-file token resolves to `None`, preserving the prior
+/// behaviour where a user may rely on `ANTHROPIC_AUTH_TOKEN` inherited from
+/// their shell.
 pub(crate) fn resolve_agent_config(state: &AppState) -> Result<AgentConfig, AppError> {
     let mut agent_config = state
         .config
