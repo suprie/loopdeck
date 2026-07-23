@@ -41,6 +41,20 @@ pub enum AppError {
 
     #[error("Resource limit exceeded: {0}")]
     Limit(String),
+
+    /// A parked manual tool-approval expired (the user didn't answer within
+    /// `PARKED_SLOT_TIMEOUT`). Distinct from `Agent` so the send pipeline can
+    /// record a truthful "approval timed out" terminal turn instead of the
+    /// generic "process exited" interruption — the common case behind the
+    /// recurring "Interrupted — this turn did not complete" bubbles.
+    #[error("manual approval timed out")]
+    ApprovalTimeout,
+
+    /// A parked `AskUserQuestion` expired (the user didn't answer within
+    /// `PARKED_SLOT_TIMEOUT`). The question-side counterpart of
+    /// `ApprovalTimeout`.
+    #[error("AskUserQuestion timed out")]
+    QuestionTimeout,
 }
 
 impl Serialize for AppError {
@@ -67,6 +81,8 @@ impl Serialize for AppError {
                 AppError::Agent(_) => "agent",
                 AppError::BlockingTask(_) => "blockingTask",
                 AppError::Limit(_) => "limit",
+                AppError::ApprovalTimeout => "approvalTimeout",
+                AppError::QuestionTimeout => "questionTimeout",
             },
         )?;
         state.end()

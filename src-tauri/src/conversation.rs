@@ -130,6 +130,25 @@ pub struct ConversationTurn {
     /// Whether the assistant turn was an error. Always `false` for user turns.
     #[serde(default)]
     pub is_error: bool,
+    /// Sub-classifier for an interrupted assistant turn (i.e. an `is_error`
+    /// turn that never reached a terminal result because the turn was
+    /// abandoned mid-flight). Tells the *reason* the turn didn't complete, so
+    /// the UI can render a truthful message instead of conflating every
+    /// interruption with "the process died":
+    /// - `"process_exited"`: the agent process exited before responding (app
+    ///   restart/crash, force-quit, or a child/transport failure before any
+    ///   `result` event arrived). The historical case — startup reconciliation
+    ///   genuinely can't distinguish, so it uses this default.
+    /// - `"approval_timeout"`: a parked manual tool-approval expired on
+    ///   `PARKED_SLOT_TIMEOUT` and was auto-denied. The recurring
+    ///   "Interrupted — this turn did not complete" bubbles the user saw were
+    ///   mostly these, not real process deaths.
+    /// - `"question_timeout"`: a parked `AskUserQuestion` expired the same way.
+    /// - `None` (default): not an interruption — normal turns and legacy
+    ///   transcripts (written before this field existed) load as `None` and the
+    ///   UI treats them as the historical generic interruption if `is_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt_kind: Option<String>,
     /// Token usage + cost from the assistant turn's `result` event.
     /// Absent on user turns and on assistant turns that didn't report usage.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,6 +192,8 @@ impl ConversationTurn {
             text: text.into(),
             session_id: None,
             is_error: false,
+            // User turns are never interruptions.
+            interrupt_kind: None,
             usage: None,
             duration_ms: 0,
             thinking: None,
@@ -194,6 +215,7 @@ impl ConversationTurn {
             text: text.into(),
             session_id: None,
             is_error: false,
+            interrupt_kind: None,
             usage: None,
             duration_ms: 0,
             thinking: None,
@@ -236,6 +258,8 @@ impl ConversationTurn {
             text: text.into(),
             session_id: Some(session_id).filter(|s| !s.is_empty()),
             is_error,
+            // Normal assistant turns are not interruptions.
+            interrupt_kind: None,
             usage,
             duration_ms,
             // Don't persist empty thinking — keeps the transcript tidy.
@@ -251,7 +275,7 @@ impl ConversationTurn {
     /// agent process exited mid-turn (app restart/crash, force-quit, or a
     /// child/transport failure before any `result` event arrived).
     ///
-    /// This is the terminal state [`reconcile_interrupted`] appends so the
+    /// This is the terminal state [`append_terminal_if_orphan`] appends so the
     /// transcript truthfully records incomplete work instead of leaving a
     /// hanging unanswered prompt. `is_error: true` so the UI renders it with
     /// the error styling (an interruption *is* a failure to produce a reply);
@@ -272,6 +296,65 @@ impl ConversationTurn {
             ),
             session_id: None,
             is_error: true,
+            interrupt_kind: Some(String::from("process_exited")),
+            usage: None,
+            duration_ms: 0,
+            thinking: None,
+            tool_calls: Vec::new(),
+            blocks: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Build a synthetic assistant turn marking the preceding user turn as
+    /// interrupted because a **parked manual tool-approval expired** on
+    /// `PARKED_SLOT_TIMEOUT` and was auto-denied.
+    ///
+    /// Permission-side counterpart of [`ConversationTurn::interrupted`]. Same
+    /// `is_error: true` + no `session_id` shape, but a distinct
+    /// `interrupt_kind: "approval_timeout"` and a body that tells the user the
+    /// real reason — the approval was needed and the time limit elapsed, NOT
+    /// that the process crashed. The recurring "Interrupted" bubbles the user
+    /// kept seeing (and typing `oke / ok / continue` into) were almost
+    /// entirely these auto-denied approvals, not process deaths.
+    pub fn interrupted_approval_timeout() -> Self {
+        Self {
+            ts: Utc::now().to_rfc3339(),
+            role: String::from("assistant"),
+            source: String::new(),
+            text: String::from(
+                "⏹ Interrupted — your approval was needed and the 10-minute \
+                 limit elapsed. The tool was auto-denied. Send a new message \
+                 to continue.",
+            ),
+            session_id: None,
+            is_error: true,
+            interrupt_kind: Some(String::from("approval_timeout")),
+            usage: None,
+            duration_ms: 0,
+            thinking: None,
+            tool_calls: Vec::new(),
+            blocks: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Build a synthetic assistant turn marking the preceding user turn as
+    /// interrupted because a **parked `AskUserQuestion` expired** on
+    /// `PARKED_SLOT_TIMEOUT` and was auto-denied. The question-side counterpart
+    /// of [`ConversationTurn::interrupted_approval_timeout`].
+    pub fn interrupted_question_timeout() -> Self {
+        Self {
+            ts: Utc::now().to_rfc3339(),
+            role: String::from("assistant"),
+            source: String::new(),
+            text: String::from(
+                "⏹ Interrupted — a question was asked and the 10-minute limit \
+                 elapsed before you answered. Send a new message to continue.",
+            ),
+            session_id: None,
+            is_error: true,
+            interrupt_kind: Some(String::from("question_timeout")),
             usage: None,
             duration_ms: 0,
             thinking: None,
@@ -573,15 +656,28 @@ pub fn archive_conversation(repo_path: &Path) -> Result<(), std::io::Error> {
 
 /// Mark a trailing orphaned user turn as `interrupted`.
 ///
-/// Reads the active transcript's last line; if it is a `user` turn (an
-/// unanswered prompt — incomplete work from a restart or child failure), appends
-/// a persisted synthetic [`ConversationTurn::interrupted`] assistant turn so the
-/// transcript ends in a truthful terminal state instead of a hanging question.
-/// After this runs the in-memory busy/waiting state is inherently clear (it is
-/// ephemeral — fresh and empty on restart; the per-project lock is released once
-/// the failed send returns), and a new turn is unblocked: nothing is left
-/// parked. Returns `true` when a marker was appended (for logging), `false` on a
-/// no-op.
+/// Thin wrapper over [`append_terminal_if_orphan`] that appends the generic
+/// [`ConversationTurn::interrupted`] (process-exited) marker. Startup
+/// reconciliation genuinely can't tell *why* the orphan exists (restart, crash,
+/// force-quit, or a prior-session kill), so it always uses the process-exited
+/// kind — the send-failure path uses [`append_terminal_if_orphan`] directly
+/// with a reason-specific turn (approval timeout, question timeout).
+///
+/// See [`append_terminal_if_orphan`] for the orphan-detection contract and
+/// call-site safety.
+pub fn reconcile_interrupted(repo_path: &Path) -> Result<bool, std::io::Error> {
+    append_terminal_if_orphan(repo_path, &ConversationTurn::interrupted())
+}
+
+/// If the active transcript ends in an orphaned `user` turn, append the given
+/// terminal `ConversationTurn` so the transcript ends in a truthful state
+/// instead of a hanging unanswered prompt.
+///
+/// Reads the active transcript's last line; if (and only if) it is a `user`
+/// turn (an unanswered prompt), appends `turn`. Returns `true` when a marker
+/// was appended (for logging), `false` on a no-op. The caller picks the turn —
+/// the reason the orphan exists is known at the send-failure call site but not
+/// at startup, hence the parameter.
 ///
 /// **Idempotent:** a no-op when the transcript is empty, missing, ends in an
 /// `assistant` turn (already terminal), or has a partial/corrupt tail (left to
@@ -594,7 +690,10 @@ pub fn archive_conversation(repo_path: &Path) -> Result<(), std::io::Error> {
 /// live turn interrupted. The two safe call sites are (1) startup — no turn is
 /// in flight on a fresh process, and (2) the send-failure path — the failed
 /// send still holds the per-project lock and the turn is definitively over.
-pub fn reconcile_interrupted(repo_path: &Path) -> Result<bool, std::io::Error> {
+pub(crate) fn append_terminal_if_orphan(
+    repo_path: &Path,
+    turn: &ConversationTurn,
+) -> Result<bool, std::io::Error> {
     // Read the raw transcript (NO orphan filtering — we need to SEE the orphan
     // to classify it). Bounded by `TRANSCRIPT_MAX_BYTES` per FR4; the extreme
     // edge of an orphan sitting beyond that bound in a >16 MB transcript is not
@@ -619,21 +718,21 @@ pub fn reconcile_interrupted(repo_path: &Path) -> Result<bool, std::io::Error> {
     let Some(line) = last_line else {
         return Ok(false); // empty transcript — nothing to reconcile
     };
-    let turn: ConversationTurn = match serde_json::from_str(line) {
+    let tail: ConversationTurn = match serde_json::from_str(line) {
         Ok(t) => t,
         Err(e) => {
             // Partial/corrupt tail (a crash mid-append). Leave it for the
             // load-time lenient parser rather than guessing — earlier valid
             // turns still load.
-            tracing::debug!("reconcile_interrupted: unparseable tail, skipping: {e}");
+            tracing::debug!("append_terminal_if_orphan: unparseable tail, skipping: {e}");
             return Ok(false);
         }
     };
-    if turn.role != "user" {
+    if tail.role != "user" {
         return Ok(false); // already terminal (assistant turn, or interrupted marker)
     }
 
-    append_turn(repo_path, &ConversationTurn::interrupted())?;
+    append_turn(repo_path, turn)?;
     Ok(true)
 }
 
@@ -1407,6 +1506,152 @@ mod tests {
             last_session_id(&dir).as_deref(),
             Some("sess-real"),
             "interrupted marker (no id) must not shadow the last real session id"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── append_terminal_if_orphan (reason-specific terminal turns) ──────
+
+    #[test]
+    fn append_terminal_writes_approval_timeout_kind() {
+        // The send-failure path appends a reason-specific terminal turn so the
+        // transcript records *why* the turn failed. An approval timeout must
+        // carry interrupt_kind = "approval_timeout", not the generic
+        // process-exited marker.
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
+        assert!(
+            append_terminal_if_orphan(&dir, &ConversationTurn::interrupted_approval_timeout())
+                .unwrap()
+        );
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns.len(), 2, "user turn + terminal marker");
+        assert_eq!(turns[1].role, "assistant");
+        assert!(turns[1].is_error, "terminal marker is an error");
+        assert_eq!(
+            turns[1].interrupt_kind.as_deref(),
+            Some("approval_timeout"),
+            "approval timeout carries its own kind"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_terminal_writes_question_timeout_kind() {
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
+        assert!(
+            append_terminal_if_orphan(&dir, &ConversationTurn::interrupted_question_timeout())
+                .unwrap()
+        );
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns[1].interrupt_kind.as_deref(), Some("question_timeout"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_terminal_writes_process_exited_kind() {
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
+        assert!(append_terminal_if_orphan(&dir, &ConversationTurn::interrupted()).unwrap());
+
+        let turns = load_conversation(&dir);
+        assert_eq!(
+            turns[1].interrupt_kind.as_deref(),
+            Some("process_exited"),
+            "the generic interrupted() marker is the process-exited kind"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_terminal_noop_when_already_terminal() {
+        // The orphan check is identical to reconcile_interrupted: a transcript
+        // already ending in an assistant turn must not get a second marker.
+        let dir = temp_repo();
+        append_turn(&dir, &ConversationTurn::user("q")).unwrap();
+        append_turn(
+            &dir,
+            &ConversationTurn::assistant(
+                "a",
+                "s1".into(),
+                false,
+                None,
+                1,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            !append_terminal_if_orphan(&dir, &ConversationTurn::interrupted_approval_timeout())
+                .unwrap(),
+            "no orphan to mark"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn interrupt_kind_serializes_and_skips_when_none() {
+        // Normal assistant turns have interrupt_kind = None and must NOT
+        // serialize the field (skip_serializing_if), so the wire shape stays
+        // tidy. Terminal turns DO serialize it.
+        let normal = serde_json::to_string(&ConversationTurn::assistant(
+            "ok",
+            "s1".into(),
+            false,
+            None,
+            1,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap();
+        assert!(
+            !normal.contains("interrupt_kind"),
+            "normal turn omits interrupt_kind: {normal}"
+        );
+
+        let timed_out =
+            serde_json::to_string(&ConversationTurn::interrupted_approval_timeout()).unwrap();
+        assert!(
+            timed_out.contains("\"interrupt_kind\":\"approval_timeout\""),
+            "terminal turn carries interrupt_kind: {timed_out}"
+        );
+    }
+
+    #[test]
+    fn legacy_transcript_without_interrupt_kind_loads_as_none() {
+        // Backward compat: a line written before `interrupt_kind` existed must
+        // load (default None), so old transcripts don't break and the UI treats
+        // them as the historical generic interruption when is_error.
+        let dir = temp_repo();
+        let dir_sessions = dir.join(".loopdeck").join("sessions");
+        std::fs::create_dir_all(&dir_sessions).unwrap();
+        std::fs::write(
+            active_file(&dir),
+            r#"{"ts":"2026-07-03T12:00:00Z","role":"assistant","text":"boom","is_error":true,"duration_ms":5}
+"#,
+        )
+        .unwrap();
+
+        let turns = load_conversation(&dir);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].is_error);
+        assert!(
+            turns[0].interrupt_kind.is_none(),
+            "legacy transcript: missing interrupt_kind defaults to None"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

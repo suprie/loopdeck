@@ -672,10 +672,11 @@ impl ClaudeSession {
                     "AskUserQuestion timed out waiting for a user answer",
                 )
                 .await?;
-                return Err(AppError::Agent(format!(
-                    "AskUserQuestion timed out after {}s",
-                    crate::limits::PARKED_SLOT_TIMEOUT.as_secs()
-                )));
+                // Typed `QuestionTimeout` (not a generic `Agent` string) so the
+                // send pipeline can record a truthful "question timed out"
+                // terminal turn instead of the generic "process exited"
+                // interruption.
+                return Err(AppError::QuestionTimeout);
             }
         };
 
@@ -837,10 +838,13 @@ impl ClaudeSession {
                 );
                 let reason = "approval timed out waiting for a user decision";
                 self.write_deny(request_id, reason).await?;
-                return Err(AppError::Agent(format!(
-                    "manual approval timed out after {}s",
-                    crate::limits::PARKED_SLOT_TIMEOUT.as_secs()
-                )));
+                // Typed `ApprovalTimeout` (not a generic `Agent` string) so the
+                // send pipeline can record a truthful "approval timed out"
+                // terminal turn instead of the generic "process exited"
+                // interruption — the recurring "Interrupted" bubbles the user
+                // saw were mostly these auto-denied approvals, not real
+                // process deaths.
+                return Err(AppError::ApprovalTimeout);
             }
         };
 
