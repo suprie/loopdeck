@@ -276,7 +276,12 @@ Run a cross-stack review:
 - `ios-code-review` — full client
 - Manual check: can the iOS app reasonably call the Go server as specified?
 
-After the final review pass, add changed file to commit
+After the final review pass, leave the working tree as-is. Staging, committing,
+and pushing are deferred to the ship step (`loopdeck:open-pr`): it stages the
+feature, commits any uncommitted work with a message authored from the verified
+scope, and groups the WIP coherently before push. The orchestrator does **not**
+`git add`, commit, or push — those are the auto-commit hook point owned by
+`open-pr`, gated by its PR-body confirmation.
 
 ## Phase 6: Decide Next Phase
 

@@ -364,3 +364,261 @@
   - **Accuracy fix surfaced while writing it:** the P5 backlog item phrased the model as "subprocess spawn, `acceptEdits`, allow-by-default + destructive floor" — but the spawn flag is `--permission-mode default` (flipped in the 2026-07-19 ConfirmChanges decision; `acceptEdits` is the removed prior, mentioned in the code comment only as what was avoided). SECURITY.md documents `default`; the P5 line was corrected in place when marking it `[x]`.
   - Vuln reporting uses GitHub's private advisory flow rather than a `security@` mailbox: it is encrypted, GitHub-native, CVE-eligible, and needs no separate email infra for a solo project. No invented contact address was added.
   - **Out of scope / deferred** (tracked, not shipped): signed/notarized artifacts (T7), an App Sandbox, a stronger destructive-command analyzer, and bounded log retention (a separate Gate B step).
+
+## 2026-07-23 — Bounded log retention + user-accessible diagnostics
+
+- **Status**: accepted
+- **Context**: Release Gate B's unchecked step "Provide user-accessible diagnostics and bounded log retention" (mirrors the P2 item "Cap log retention in `logging.rs` (daily rolling appender grows forever); confirm no `auth_token` is ever logged"). Two coupled gaps. (1) The rolling file appender was `tracing_appender::rolling::daily(&dir, "loopdeck.log")` — daily rotation, **never pruned**, so `~/Library/Logs/LoopDeck/` grew by one file per day forever. `logging::log_dir()` existed but was `#[allow(dead_code)]` ("surfaced for future UI; not yet wired up"), so a user could not find or open their logs from the app. (2) The "confirm no auth_token is logged" clause needed a tangible check, not just an assertion.
+- **Consequences**:
+  - **Retention is bounded, not manual.** Switched from the legacy `rolling::daily` helper to the `RollingFileAppender::builder()` API with `.max_log_files(MAX_LOG_FILES)` where `MAX_LOG_FILES = 14`. Verified in the `tracing-appender 0.2.5` source (`~/.cargo/registry/.../rolling.rs`) that `max_log_files` prunes **both at construction (startup)** *and* on each rollover (`Inner::new` and `refresh_writer` both call `prune_old_logs`) — so the bound holds even after a long offline gap, not only at midnight. The `filename_prefix("loopdeck.log")` keeps the existing `loopdeck.log.YYYY-MM-DD` naming, so the documented path in `docs/alpha-distribution.md` and any pre-existing log files stay valid. A unit test (`rolling_appender_max_log_files_caps_retention`) seeds 12 dated files, builds an appender with cap 7, and asserts ≤7 survive — proving the approach end-to-end with this crate version. No runtime knob by design (a config-driven cap is one more input to validate and is rarely changed); the constant is the contract.
+  - **Diagnostics are user-accessible.** Wired up the dead `log_dir()`: new `LogInfo`/`LogFileInfo` serde types + a pure `collect_log_info_in(dir)` helper (testable against a temp dir) wrapped by `collect_log_info()` (reads the process-global `LOG_DIR`). Two Tauri commands in `commands/config_cmds.rs` — `get_log_info` (folder path, retained files + sizes, total, cap) and `reveal_log_dir` (opens the folder via the OS file manager, same `open`/`xdg-open`/`explorer` argv-only fanout as `open_in_finder`, no shell interpolation). Registered in `lib.rs`. Frontend: `LogInfo` types, `getLogInfo`/`revealLogDir` IPC wrappers, and a new **Settings → Diagnostics** card showing the path, "N files · X KB · keeping the last 14 daily logs", and an "Open logs folder" button (with a stderr-only fallback message when `dir` is null). The reader enumerates file **names/sizes only — never contents** — so the diagnostics surface can't exfiltrate whatever a future log line might contain.
+  - **auth_token is never logged — now pinned by a test.** Grep confirmed no tracing macro anywhere interpolates a token value (the three hits — `lib.rs:67`, `config.rs:343`, `secrets.rs:113` — describe the token's *lifecycle*: migration message, save error, file-permission warning; none the value). The only structural path from a token to a log line is `tracing`'s `{:?}`/`?` field formatting, which uses `AgentConfig`'s manual `Debug` impl — already redacted (`***REDACTED***`, covered by `config.rs`'s `test_agent_config_debug_redacts_auth_token`). Added `logging::tests::agent_config_debug_never_renders_token` to pin the invariant from the *logger's* perspective: if someone replaces the manual `Debug` impl with a derived one, this breaks loudly. `docs/alpha-distribution.md` §8 updated: "kept across restarts; not auto-purged" / "not yet wired into the UI" were both stale and corrected.
+  - **Verified:** `cargo fmt --check` clean; `cargo clippy -- -D warnings` clean on lib/bin (the green gate); `cargo test --lib` → 344 passed incl. the 4 new logging tests; `tsc --noEmit` clean; `npm run build` clean. **Pre-existing, unrelated, not introduced here** (flagged, not fixed — out of scope): (a) `cargo clippy --all-targets -D warnings` has 7 errors in `agents.rs:1406-1408` test code (`ResponseAccumulator::ingest_event` `#[must_use]`); the green gate checks the lib target. (b) `epic::tests::test_dogfood_parses_this_repos_epic` expects 3 PRDs but this repo now has 4 (Gate C content drift) — confirmed failing on clean HEAD.
+  - **Out of scope / deferred:** a runtime-configurable retention cap (the constant suffices for the alpha), log *viewing* inside the app (the "open folder" affordance is enough for V0.1; an in-app tail is a P6 polish item), and fixing the two pre-existing failures above.
+
+## 2026-07-23 — Persist only the selected-project *path* in Zustand; derive the entry (incl. run_state) from Rust
+
+- **Status**: accepted
+- **Context**: Release Gate B's unchecked step "Persist only navigation identifiers/preferences in Zustand; reload project and run state from Rust" (mirrors the P6 item "Persist only `selectedProject.path` in Zustand (not the full `ProjectEntry`) to avoid schema drift"). The Zustand `loopdeck-nav` persisted slice stored the **full** `selectedProject: ProjectEntry` object — including its `run_state` (live, derived in Rust per `list_projects`), git metadata, and description. Two defects followed from persisting the object. (1) **Schema drift:** if `ProjectEntry`'s shape changes, a stale persisted object shadows the Rust-backed list until the next reconcile; `useProjects.loadProjects` carried explicit reconciliation code (clear the selection if the path vanished; refresh `last_commit_date`/`last_modified`/`description` if they drifted) purely to paper over this. (2) **Frozen run state:** `run_state` is derived at read time and the entry is `skip_serializing_if = "is_run_state_idle"`, so persisting the object froze whatever run state was live at last close — after a restart the selected project could show a stale "working"/"waiting" instead of the truthful "idle". The question was whether to keep a parallel persisted/reconciled `selectedProject` and just slim it, or stop persisting the object entirely and derive it.
+
+- **Consequences**: Chose to stop persisting the object entirely. (1) **Store** (`src/store/appStore.ts`): `selectedProject: ProjectEntry | null` → `selectedProjectPath: string | null` (an identifier), `setSelectedProject` → `setSelectedProjectPath`. `partialize` now persists only `{ selectedProjectPath, detailTab }` — the path (which project) + the tab (a preference); the full entry is excluded. (2) **Derivation:** a new exported `selectSelectedProject(state)` selector returns `state.projects.find(p => p.path === state.selectedProjectPath) ?? null`. It returns a **stable reference** (an element of the Rust-backed `projects` array, or `null` — never a fresh object literal), so it is safe as a Zustand selector under the default `Object.is` equality (no infinite re-render). `ProjectDetail` reads it via `useAppStore(selectSelectedProject)`. (3) **Dead code removed:** because the entry is always fresh from `projects`, the `loadProjects` reconcile block (removed-project clear + git-info refresh) and its `setSelectedProject`/`updateProjectInStore` bindings are dead — a removed project resolves to `null` and a changed one is automatically current, both straight from Rust. The store mutations (`addProject`/`removeProjectByPath`/`updateProject`/`updateProjectDescription`) now touch only `projects`; `removeProjectByPath` still nulls `selectedProjectPath` when it matches the removed path so the selection doesn't dangle. (4) **Consumers:** `Dashboard.handleSelect`/`handleStart` set the path (not the object; `handleStart` keeps a `projects.some(...)` existence check since it gates agent-start side effects); `ProjectDetail` syncs `selectedProjectPath` from the route param (the route is the source of truth for *which* project is open; the store identifier survives restarts where TanStack Router's memory history — `initialEntries: ["/"]`, in-memory only — does not), and the `OverviewTab` child prop type moved off `ReturnType<typeof useAppStore.getState>["selectedProject"]` to a plain `ProjectEntry | null`. (5) **Schema migration:** bumped the persisted-store `version` 0→1 with a `migrate` that extracts `selectedProjectPath` from the legacy `selectedProject.path`, so an existing user's last-opened project survives the one-time shape change instead of silently resetting. **No Rust change** — `list_projects` already returns project + run state; the frontend simply stopped persisting a parallel copy. Run state is now always live: the selected project's `run_state` reflects the most recent `list_projects`, never a frozen-at-close value. **Verified:** `npx tsc --noEmit` clean; `npm run build` clean (chunk-size warning is pre-existing/unrelated). **Out of scope:** the sibling P6 item "Move module-level mutable `lastSelectedPath` (`AgentRunner.tsx:30`) into the Zustand store" is a separate state-ownership concern (a module-local mutable, not a persisted field) and is not touched here.
+
+## 2026-07-23 — Remove the parked-slot timeout; approvals/questions wait indefinitely
+
+- **Status**: accepted
+- **Context**: A user saw an "Interrupted — your approval was needed and the 10-minute limit elapsed. The tool was auto-denied" bubble — the `PARKED_SLOT_TIMEOUT` (10 min, PRD FR4) had fired on a manual approval they never saw, killing the turn. The timeout was written (2026-07-22) as a safety bound *before* the cross-project visibility layer existed: at the time, a parked approval/question was genuinely invisible unless you were on the right Agent tab, so auto-denying after 10 min was the only way to avoid wedging the per-project turn lock forever. Since then the visibility layer landed (toast + ProjectCard pill + detail-view callout, reconciled on app launch + window focus + visibilitychange) and the user explicitly wanted the prompt to "just show the question until it answered" — no expiry. The user chose to remove the limit entirely (Option A: rip out the expiry machinery) rather than keep it as dead scaffolding (Option B), accepting that a genuinely-forgotten approval now holds the project's turn lock until answered or Stopped.
+- **Consequences**: Removed the entire expiry path. (1) `claude_session.rs`: deleted `park_or_expire` + the `ParkOutcome` enum (incl. `Expired`); both park sites (question + permission) now `rx.await` directly with only `Resolved`/`Closed` outcomes — no `select!` against a sleep. The only exits are the user answering, or the sender dropping (Stop / session dropped). (2) `error.rs`: removed `ApprovalTimeout` + `QuestionTimeout` variants and their serialize arms. (3) `conversation.rs`: removed `interrupted_approval_timeout()` + `interrupted_question_timeout()` constructors; the `interrupt_kind` field doc now documents `"approval_timeout"`/`"question_timeout"` as **legacy only** (kept so old transcripts still render their truthful "timed out" tag — the frontend `TurnBubble` still handles them). (4) `limits.rs`: removed `PARKED_SLOT_TIMEOUT`. (5) `commands/agent.rs`: `mark_turn_terminal` now emits only the generic `interrupted()` marker for all send failures (the only send failures that still reach it are transport/child/spawn failures, which are genuinely process-exited-shaped). Removed 6 obsolete tests (3 `park_or_expire` unit tests + 3 timeout-kind tests); rewrote the serialization + idempotency tests to use `interrupted()` / `"process_exited"`. **Tradeoff accepted:** a genuinely-forgotten approval now holds the per-project turn lock indefinitely; the only escapes are answering it, hitting Stop (which cancels the turn and drops the sender → the `Closed` path), or the per-project session being dropped. The visibility layer makes "forgotten" much less likely than when the timeout was introduced. **Frontend unchanged:** `interrupt_kind: "approval_timeout" | "question_timeout"` stays in the TS union + `TurnBubble` rendering so historical bubbles keep their tag; no new turn is written with those kinds. Builds clean, `clippy -D warnings` clean, 339 tests pass (the 1 failure is the pre-existing unrelated `epic::tests::test_dogfood_parses_this_repos_epic` PRD-count assertion), `tsc --noEmit` clean.
+
+## 2026-07-23 — `loopdeck:open-pr` skill: stack-agnostic PR shipping with a confirmation gate
+
+- **Status**: accepted
+- **Context**: Gate C (Auto-commit + Pull Request) closes the orchestrator's
+  build→verify→ship tail so an agent-led feature lands as a reviewable PR instead
+  of a pile of staged files. The orchestrator today ends at a `git add` nudge
+  (`loopdeck-orchestrator/SKILL.md` Phase 5) — it never commits, pushes, or opens
+  a PR. The first Gate C step is the `loopdeck:open-pr` skill. Three design
+  tensions had to be resolved up front. (1) **Stack coverage:** LoopDeck imports
+  Go, Android/Gradle, PHP, iOS, Ruby, Python, Java/Kotlin, Elixir, Node, and Rust
+  projects, so the PR body's Test plan must be *inferred* from the project, never
+  hardcoded to one stack — `scanner.rs` detects only 7 marker families, so the
+  skill reads markers directly via Bash rather than depending on it. (2) **Tool
+  surface:** the skill's only mutating side effects are writing the PR body to a
+  tmpfile and appending one line to `loops.md`. (3) **Outward-facing action:** the
+  only thing that escapes the local repo is `gh pr create`, which publishes — so
+  it must be gated behind an explicit human confirmation, and the explicit
+  instruction is `gh pr create --web`.
+- **Decision**: Shipped `.agents/skills/loopdeck-open-pr/SKILL.md`, a six-phase
+  skill (pre-flight → gather context → generate body → confirm → create →
+  record). (1) **`allowed-tools: [Read, Bash, Grep]`** — deliberately no
+  `Edit`/`Write`/`Agent`. The body tmpfile (`cat > "$(mktemp)" <<'BODY'`) and the
+  `loops.md` insert (portable `awk` + `mv`) are both Bash, making the skill
+  explicit about the two artifacts it touches; the skill runs synchronously and
+  confirms with the user directly rather than spawning sub-agents. Marker
+  detection uses `ls`/`test -f` (no `Glob` tool) so it stays within the declared
+  toolset. (2) **Pre-flight:** three read-only checks (`gh auth status`; `git
+  rev-parse --abbrev-ref HEAD` rejects `main`/`master`; `git rev-parse
+  --abbrev-ref --symbolic-full-name @{u}` rejects a missing upstream), each
+  aborting with a one-line remediation. (3) **Body template** (Summary / What
+  changed / PRD / Decisions / Test plan) is filled from `git log main..HEAD
+  --oneline`, `git diff --stat main...HEAD`, `.loopdeck/decisions.md`
+  (most-recent 3), and `loops.md ## Current`; it degrades gracefully
+  (commit-derived Summary, `N/A` PRD) when `.loopdeck/` is absent. (4) **Test plan
+  inferred from a 13-row marker → command table** (Go/Rust/Node/Android-JVM/
+  Maven/PHP/Swift/iOS/Ruby/Python/Elixir + Python-requirements-only + unknown
+  fallback); multiple markers emit one block per stack; no marker → the generic
+  "Run the project's test suite" line. (5) **Confirmation gate:** Phase 4 prints
+  the drafted body and asks proceed/edit/abort; `gh pr create` runs only after
+  proceed. (6) `gh pr create --title … --body-file … --web`, then append
+  `- [ ] Review & merge: <url>` to `loops.md ## Next Steps`.
+- **Consequences**:
+  - **`--web` honest about URL capture.** With `--web`, GitHub does not create
+    the PR until the human clicks *Create pull request* in the browser, and `gh`
+    prints the pre-filled compare URL rather than a final `…/pull/N` URL — so the
+    URL recorded in `loops.md` is the creation page (which becomes the PR on
+    submit). The skill honors the explicit `--web` instruction (it gives the
+    human a final review click and matches the PRD's "confirm, then `gh pr create
+    --web`" double-confirmation intent) and documents the headless alternative
+    (`gh pr create` without `--web` returns a real `…/pull/N` URL on stdout) for
+    when a concrete PR URL is wanted for the memory write.
+  - **The Test plan is a reviewer checklist, not a claim of what passed.** The
+    skill never *runs* the tests; it emits the stack-appropriate commands as
+    unchecked `- [ ]` items plus a Manual line. It cannot lie about test results.
+  - **Read-only context gathering; no commit/push.** The skill runs only `gh auth
+    status`, `git log`, `git diff`, `git rev-parse` — never `git add`/`commit`/
+    `push`/`reset`. Commit and push are owned by the orchestrator's earlier
+    phases; `open-pr` opens a PR on work already committed and pushed. The
+    "Auto-commit hook point" is the next, separate Gate C step.
+  - **Portable `awk` insert** for `loops.md` (inserts under the `## Next Steps`
+    heading; works on macOS/BSD and GNU) avoids the `sed -i` portability split;
+    falls back to appending a new `## Next Steps` section if absent, and skips
+    silently if `.loopdeck/` does not exist.
+  - **The skill is independently invocable** (`/loopdeck:open-pr` standalone) and
+    will also be wired into the orchestrator's future "Decide & Open PR" phase on
+    a green verify verdict — that wiring is a later Gate C step, not shipped here.
+
+## 2026-07-24 — Session heartbeat
+- **Status**: proposed
+- **Context**: AI session active on LoopDeck development.
+
+## 2026-07-24 — Auto-commit hook point: `open-pr` owns stage → commit → push → publish
+
+- **Status**: accepted
+
+- **Context**: Gate C (Auto-commit + Pull Request) step "Auto-commit hook point"
+  — decide where `git add` and `git commit` happen in the orchestrator → ship
+  tail. Three facts forced the decision. (1) The orchestrator today ends Phase 5
+  with a single `git add` nudge ("add changed file to commit") — it stages but
+  never commits, never pushes. (2) The `open-pr` skill shipped 2026-07-23 was
+  deliberately read-only about git mutation: its Important Rules said
+  "`git commit`/`git push`/`git add` … are out of scope for this skill: commit
+  and push are owned by the orchestrator's earlier phases," and its Phase 1c
+  pre-flight required the upstream to already be pushed (`@{u}`) — i.e. it opened
+  a PR on work someone *else* had committed and pushed. That left a gap: nobody
+  owns the commit. (3) The PRD's own lean
+  (`prd-verify-and-ship-skills.md` §"Orchestrator wiring", lines 350–353) was
+  "keep the `git add` [in the orchestrator], but defer `git commit` to `open-pr`"
+  — splitting staging (orchestrator) from commit (`open-pr`). The Gate C step's
+  lean refined that: **`open-pr` owns *both* `git add` and `git commit`**, for two
+  reasons — the commit message is authored from the verified scope and `open-pr`
+  is what produces that scope (the PR body); and `open-pr` is independently
+  invocable (`/loopdeck:open-pr` standalone), so a commit living only in the
+  orchestrator would strand a standalone invocation that has uncommitted work.
+
+- **Decision**: `open-pr` owns the entire stage → commit → push → publish tail.
+  - **Stage + commit** live in a new `open-pr` Phase 5 ("Commit Uncommitted Work
+    + Push"), gated by the existing Phase 4 body confirmation. `git add -A`
+    stages the feature; if the working tree is dirty, `git commit -m <title> -m
+    <Summary>` makes exactly **one** commit whose message is the **verified
+    scope** — the same PR title + Summary paragraph the user just confirmed in
+    the body — so the commit and the PR describe the feature identically. A clean
+    tree skips the commit (the branch tip is already what we want) and just
+    pushes.
+  - **Push** (`git push -u origin HEAD`) is the only outward-facing action before
+    `gh pr create` and runs only after the body confirmation — satisfying the
+    step's "no auto-push without the PR body confirmation" constraint. `-u origin
+    HEAD` sets the upstream on the first push and is a no-op for the binding
+    afterward, so it works whether or not the branch was pushed before.
+  - **Pre-flight 1c** changed from "upstream is pushed" (`@{u}`) to "remote
+    `origin` exists" (`git remote get-url origin`) — because `open-pr` is now the
+    pusher, requiring a pre-existing upstream would be self-contradictory.
+  - **Honesty:** Phase 2 captures `git status --porcelain`; Phase 4 discloses any
+    uncommitted files and the exact commit message at the gate, so the user sees
+    what gets committed before authorizing it. A nothing-to-ship guard (empty
+    `main..HEAD` + clean tree) aborts early.
+  - **No squash, no history rewrite, no force-push.** Existing WIP commits are
+    pushed as-is; the human picks the merge strategy at merge time — resolving
+    the PRD Open Question "auto-suggest squashing?" with the PRD's own lean
+    (suggest in the body, never execute). A rejected push stops the skill.
+  - **Orchestrator:** Phase 5's one-line commit nudge became a hand-off — the
+    orchestrator leaves the working tree ready and defers stage+commit+push to
+    `open-pr`; it no longer `git add`s. (The full orchestrator renumber — new
+    Phase 6 "Verify Against PRD", Phase 6→7, the ASCII diagram, the Phase 2
+    plan-template rows, the Memory Convention cross-refs — is the separate
+    "Orchestrator wiring" Gate C step and is untouched here.)
+
+- **Supersedes**: (a) The 2026-07-23 `open-pr` decision's "Read-only context
+  gathering; no commit/push … owned by the orchestrator's earlier phases" clause
+  and its Phase 1c "upstream is pushed" pre-flight — that deferral was always
+  marked "the 'Auto-commit hook point' is the next, separate Gate C step," and
+  this is that step. (b) The PRD `prd-verify-and-ship-skills.md` §"Orchestrator
+  wiring" lean "keep the `git add`, defer `git commit` to `open-pr`" — superseded
+  by "`open-pr` owns both." The PRD text is not rewritten (it is a committed
+  spec); the wiring step must apply *this* decision (drop the orchestrator's
+  `git add`), not the stale PRD lean, when it lands.
+
+- **Consequences**:
+  - The commit message is always the verified scope, never an invented or generic
+    "WIP" message. One authoring pass (the body) yields both the PR description
+    and the commit.
+  - `open-pr` is robust standalone: `/loopdeck:open-pr` on a branch with
+    uncommitted work commits + pushes + opens the PR in one confirmed action.
+  - A single gate (the body confirmation) authorizes commit + push + publish —
+    consistent with LoopDeck's confirm-first posture (ConfirmChanges, the body
+    gate). No second confirm is added; the body confirmation is the documented
+    gate for push.
+  - Tradeoff accepted: `git add -A` stages the entire working tree, so a
+    well-maintained `.gitignore` is assumed. The Phase 4 disclosure (uncommitted
+    files listed) is the honesty backstop — the user sees exactly what is staged
+    before authorizing the commit.
+  - **Verified:** both `SKILL.md` frontmatters parse; `open-pr` phases renumbered
+    1–7 with the new Phase 5; no stale "upstream pushed / out of scope / owned by
+    the orchestrator" references remain; the orchestrator's only commit reference
+    is the reframed Phase 5 hand-off. No Rust/frontend change (skill text only),
+    so `cargo`/`tsc` gates do not apply.
+
+## 2026-07-24 — `loopdeck:prd-verifier` skill: read-only per-criterion PRD verification
+
+- **Status**: accepted
+
+- **Context**: Gate C (Auto-commit + Pull Request) step "`loopdeck:prd-verifier`
+  skill." The orchestrator's existing Phase 5 "Final Review" runs stack-specific
+  code reviews (`go-code-review`, `ios-code-review`) — those judge code quality,
+  not whether the PRD's stated acceptance criteria are met. The PRD
+  (`prd-verify-and-ship-skills.md` §"`loopdeck:prd-verifier` skill", lines 121–187)
+  calls for a read-only, stack-agnostic skill that parses a PRD's acceptance
+  criteria, diffs the changed files, and returns a per-criterion PASS/PARTIAL/FAIL
+  table with `file:line` evidence plus a non-goals scope-creep audit, with a
+  roll-up verdict the orchestrator's new "Verify Against PRD" phase gates on
+  (FAIL → BLOCK, PARTIAL → WARN, all PASS → PASS). Four design points were not
+  fully pinned by the PRD and had to be settled in the skill.
+
+- **Decision**: Ship the skill at `.agents/skills/loopdeck-prd-verifier/SKILL.md`
+  with `allowed-tools: [Read, Glob, Grep, Bash]` (no Edit/Write/Agent — epic
+  ADR-4) and the five-phase parse → diff → check → audit → report flow. The four
+  judgment calls:
+  - **Diff base is the auto-detected default branch, three-dot merge base.** Not a
+    hardcoded `main`: resolve `git symbolic-ref refs/remotes/origin/HEAD` (fall
+    back to `main`), then `git diff --name-only <default>...HEAD`. The three-dot
+    `...` uses the merge base so only changes *unique to this branch* count. When
+    the skill is run *on* the default branch (no branch to diff against), fall
+    back to `git status --porcelain` (working tree). This generalizes the PRD's
+    `main...HEAD` to `master` repos without adding the optional second argument
+    the PRD deferred (Open Question on a diff-base arg — lean: always
+    `<default>...HEAD` in 0.3.0; honored).
+  - **Stack detection filters build artifacts only, composed per detected stack —
+    not a universal union.** The marker → ignore-set table mirrors the `open-pr`
+    skill's stack coverage (13 rows + .NET). The `grep -vE` filter is built from
+    **only the detected stacks'** ignore dirs (Rust + Node →
+    `target|node_modules|dist|build|.next`), so a Node repo's legit
+    `vendor/assets/` dir is not dropped merely for sharing Go's `vendor/` name.
+    Each name is anchored as a path component `(^|/)...(/|$)` so `src/target.rs`
+    survives while `target/debug/…` is filtered.
+  - **Evidence is searched in the changed-file set first; unchanged-only evidence
+    is flagged.** Every PASS/PARTIAL cites a real `file:line` at HEAD (no evidence
+    → FAIL). Integration criteria may legitimately cite unchanged files, but when
+    a criterion's only supporting code is unchanged the report flags it (usually
+    PARTIAL) — the change under review does not itself satisfy the criterion.
+  - **Behavioral criteria that need execution → PARTIAL with a "verify by running"
+    note, never a bare PASS.** The skill is read-only and does not build/test/hit
+    endpoints; "returns 200" / "handles the error" are judged from code structure.
+    If a criterion can only be proven by running it, it is PARTIAL with the
+    inferred command (reuses the `open-pr` marker → test-command table), not PASS.
+
+- **Consequences**:
+  - The orchestrator gets a single greppable verdict token. The report ends with a
+    `Roll-up: BLOCK | WARN | PASS — <N> FAIL, <N> PARTIAL, <N> PASS.` line so the
+    new Phase 6 verdict table can key off one token without re-parsing prose.
+  - Stack-agnostic by construction: the criteria are quoted verbatim from the PRD
+    and never rewritten to an assumed stack; the stack is detected only to filter
+    artifacts. A repo with no recognized marker still verifies (common-noise
+    filter only).
+  - Non-goals audit is a **flag, not a FAIL** — scope creep is surfaced for the
+    user to retract or amend the PRD, consistent with the orchestrator's "PRD gap
+    → flag to user, don't guess" posture.
+  - Tradeoff accepted: the verifier reasons over code structure, not runtime
+    behavior, so a structurally-plausible but actually-broken implementation can
+    PASS a behavioral criterion only up to PARTIAL. Mitigated by (a) requiring a
+    "verify by running" note on such criteria and (b) the orchestrator re-running
+    the verify on every rework loop (PRD Open Question lean: re-verify each loop,
+    not only at the end).
+  - **Verified:** frontmatter parses and matches the `loopdeck:`-prefix +
+    one-skill-per-directory convention; the read-only Bash snippets (default-branch
+    resolution, `git diff --name-only main...HEAD`, the per-stack `grep -vE`
+    filter) were exercised against this real Rust+Node repo — `git diff --name-only
+    main...HEAD` returns a real source set with no `target/`/`node_modules/` rows
+    (those are gitignored/untracked), confirming the skill's own note that the
+    per-stack filter is load-bearing mainly for the on-default-branch working-tree
+    fallback. Skill text only (no Rust/frontend change), so `cargo`/`tsc` gates do
+    not apply. End-to-end smoke (`/loopdeck:prd-verifier <prd>` producing a
+    rendered table) is the separate "End-to-end smoke" Gate C step.
+
