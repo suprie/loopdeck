@@ -47,6 +47,8 @@ pub struct DiscoveredRepo {
     pub has_readme: bool,
     /// Whether `.loopdeck/project.yaml` already exists.
     pub has_loopdeck: bool,
+    /// Whether `graphify-out/graph.json` exists (project already mapped by Graphify).
+    pub has_graphify: bool,
     /// Human-readable technology stack derived from marker files.
     /// e.g. "Rust, JavaScript/TypeScript"
     pub detected_stack: String,
@@ -221,6 +223,11 @@ fn scan_directory_bounded(
 
         let has_loopdeck = dir_path.join(".loopdeck").join("project.yaml").exists();
 
+        // Graphify is an optional, externally-managed producer — LoopDeck only
+        // reads its output. Check via the shared helper so the path layout
+        // lives in one place (`graphify::is_present`).
+        let has_graphify = crate::graphify::is_present(dir_path);
+
         // Detect technology stack and generate a lightweight description preview
         let detected_stack = detect_stack(&markers);
         let description_preview = if detected_stack != "Unknown" {
@@ -244,6 +251,7 @@ fn scan_directory_bounded(
             markers,
             has_readme,
             has_loopdeck,
+            has_graphify,
             detected_stack,
             description_preview,
             last_commit: git_info.last_commit_date,
@@ -446,6 +454,35 @@ mod tests {
         let repos = scan_directory(&dir, 5).unwrap();
         assert_eq!(repos.len(), 1);
         assert!(repos[0].has_loopdeck);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_detects_graphify() {
+        let dir = create_temp_dir();
+        let repo = dir.join("with-graphify");
+        fs::create_dir_all(repo.join("graphify-out")).unwrap();
+        fs::write(repo.join("graphify-out/graph.json"), "{}").unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]").unwrap();
+
+        let repos = scan_directory(&dir, 5).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert!(repos[0].has_graphify);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_graphify_absent_when_dir_missing() {
+        let dir = create_temp_dir();
+        let repo = dir.join("no-graphify");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]").unwrap();
+
+        let repos = scan_directory(&dir, 5).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert!(!repos[0].has_graphify);
 
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -4,6 +4,7 @@ use super::state::{blocking_task_failed, derive_run_states, resolve_root, AppSta
 use crate::config::{self, ProjectEntry, ProjectStatus, RunState};
 use crate::error::AppError;
 use crate::git;
+use crate::graphify;
 use crate::paths;
 use crate::project::{self, ProjectMeta};
 use crate::scanner;
@@ -499,4 +500,38 @@ pub async fn regenerate_description(
 
     info!("regenerate_description complete for: {path}");
     Ok(desc)
+}
+
+/// Summarize the Graphify knowledge graph for a project, if present.
+///
+/// Reads `graphify-out/graph.json` (and mines `graphify-out/GRAPH_REPORT.md`
+/// for the build date) without ever running Graphify itself. Returns
+/// `present: false` when the graph is missing or unparseable — the UI uses
+/// that flag to hide the Graph tab rather than render empty stats.
+///
+/// Infallible beyond the standard `resolve_root` failure modes (unregistered
+/// path, poisoned lock): a malformed `graph.json` is reported as
+/// `present: false`, never as an `AppError`. This mirrors `get_decisions` /
+/// `memory::parse_decisions` — on-disk-derived data degrades gracefully.
+#[tauri::command]
+pub async fn get_graphify_stats(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<graphify::GraphifyStats, AppError> {
+    debug!("get_graphify_stats called for path: {path}");
+
+    // Resolve the canonical, registered root (PRD FR3) so the graph path is
+    // constrained to a real project directory — no traversal outside it.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
+
+    // `read_stats` does file I/O (and on a real Graphify run the graph can be
+    // a few hundred KB). Run on the blocking pool to stay off the tokio worker.
+    let root_for_stats = root.clone();
+    let stats = tokio::task::spawn_blocking(move || graphify::read_stats(&root_for_stats))
+        .await
+        .map_err(blocking_task_failed)?;
+    Ok(stats)
 }
