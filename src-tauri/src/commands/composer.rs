@@ -92,8 +92,8 @@ pub async fn list_dir_entries(
 
     // Sort each bucket case-insensitively, directories first then files — the
     // conventional file-explorer ordering, and stable for arrow-key navigation.
-    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.sort_by_key(|a| a.name.to_lowercase());
+    files.sort_by_key(|a| a.name.to_lowercase());
     dirs.append(&mut files);
 
     Ok(dirs)

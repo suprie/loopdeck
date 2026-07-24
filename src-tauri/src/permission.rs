@@ -351,17 +351,16 @@ fn analyze_stage(argv: &[String]) -> Option<String> {
             }
         }
         // `git push` with any force variant.
-        "git" => {
+        "git"
             if args.iter().take(2).any(|a| *a == "push")
                 && (args.iter().any(|a| {
                     *a == "--force"
                         || *a == "-f"
                         || *a == "--force-with-lease"
                         || *a == "--no-verify"
-                }))
-            {
-                return Some("force push blocked by policy floor".into());
-            }
+                })) =>
+        {
+            return Some("force push blocked by policy floor".into());
         }
         _ => {}
     }

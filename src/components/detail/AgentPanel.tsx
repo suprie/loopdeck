@@ -1041,6 +1041,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         pendingUserText={isActiveView ? pendingUserText : null}
         busy={busy}
         retrying={isActiveView ? retrying : null}
+        autonomous={autonomous}
         error={error}
         onSend={runSendMessage}
         onClearError={() => setError(null)}

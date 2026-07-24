@@ -1122,7 +1122,7 @@ description: d
             });
 
         assert_eq!(epic.milestone, "0.2.0");
-        assert_eq!(epic.prds.len(), 3, "expected the three PRDs to parse");
+        assert_eq!(epic.prds.len(), 4, "expected the four PRDs to parse");
         for prd in &epic.prds {
             assert!(
                 !prd.phases.is_empty(),

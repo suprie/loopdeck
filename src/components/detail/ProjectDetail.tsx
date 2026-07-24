@@ -31,6 +31,7 @@ import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, buildAllowRule } from "./Chat";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { StatusBadge } from "../shared/StatusBadge";
+import { PermissionModeBadge } from "../shared/PermissionModeBadge";
 import { PageHeader } from "../layout/AppShell";
 import { Section, IconButton, ActionButton } from "./Section";
 import { cn } from "../../lib/utils";
@@ -54,7 +55,7 @@ export function ProjectDetail() {
   const project = useAppStore(selectSelectedProject);
   const activeTab = useAppStore((s) => s.detailTab);
   const setActiveTab = useAppStore((s) => s.setDetailTab);
-  const { openInFinder, openInTerminal, removeProject, rescanProject, regenerateDesc } =
+  const { openInFinder, openInTerminal, removeProject, rescanProject, regenerateDesc, setAutonomous } =
     useProjects();
 
   const [isEditing, setIsEditing] = useState(false);
@@ -88,6 +89,10 @@ export function ProjectDetail() {
 
   const handleRescan = async () => {
     await rescanProject(project.path);
+  };
+
+  const handleToggleAutonomous = (path: string, autonomous: boolean) => {
+    setAutonomous(path, autonomous);
   };
 
   return (
@@ -169,6 +174,7 @@ export function ProjectDetail() {
                 onCancelEdit={() => setIsEditing(false)}
                 onRegenerate={handleRegenerate}
                 onRescan={handleRescan}
+                onToggleAutonomous={handleToggleAutonomous}
                 onFinder={() => openInFinder(project.path)}
                 onTerminal={() => openInTerminal(project.path)}
                 onRemove={() => setShowRemoveConfirm(true)}
@@ -310,6 +316,7 @@ function OverviewTab({
   onCancelEdit,
   onRegenerate,
   onRescan,
+  onToggleAutonomous,
   onFinder,
   onTerminal,
   onRemove,
@@ -320,12 +327,18 @@ function OverviewTab({
   onCancelEdit: () => void;
   onRegenerate: () => void;
   onRescan: () => void;
+  /** Enable autonomous mode. The confirm dialog lives inside OverviewTab —
+   *  this fires only after the user confirms. Disabling (back to confirm) is
+   *  unconditional and doesn't need confirmation. */
+  onToggleAutonomous: (path: string, autonomous: boolean) => void;
   onFinder: () => void;
   onTerminal: () => void;
   onRemove: () => void;
 }) {
+  const [showAutonomousConfirm, setShowAutonomousConfirm] = useState(false);
   if (!project) return null;
   const hasChanges = project.uncommitted.files > 0;
+  const autonomous = project.autonomous ?? false;
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -422,6 +435,48 @@ function OverviewTab({
             </div>
           </div>
         </Section>
+
+        <Section label="Agent mode">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                {autonomous ? (
+                  <PermissionModeBadge mode="autonomous" />
+                ) : (
+                  <PermissionModeBadge mode="confirm" />
+                )}
+              </div>
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                {autonomous
+                  ? "The agent self-approves tool calls so loops run unattended. The destructive floor still applies. Review the resulting pull requests before merging."
+                  : "File edits, commands, and network calls require your approval. Read-only tools run automatically."}
+              </p>
+            </div>
+            {/* Disabling is unconditional; enabling shows the confirm dialog. */}
+            <button
+              type="button"
+              onClick={() => {
+                if (autonomous) {
+                  onToggleAutonomous(project.path, false);
+                } else {
+                  setShowAutonomousConfirm(true);
+                }
+              }}
+              role="switch"
+              aria-checked={autonomous}
+              aria-label="Toggle autonomous mode"
+              className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                autonomous ? "bg-amber-500" : "bg-muted"
+              }`}
+            >
+              <span
+                className={`inline-block size-4 transform rounded-full bg-white shadow transition-transform ${
+                  autonomous ? "translate-x-4" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </div>
+        </Section>
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-2">
@@ -430,6 +485,19 @@ function OverviewTab({
         <ActionButton icon={Terminal} label="Terminal" onClick={onTerminal} />
         <ActionButton icon={Trash2} label="Remove" onClick={onRemove} destructive />
       </div>
+
+      {showAutonomousConfirm && (
+        <ConfirmDialog
+          title="Enable autonomous mode?"
+          message={`The agent for "${project.name}" will self-approve tool calls — including file edits, commands, and MCP calls — so loops can run unattended. The destructive floor still applies (rm -rf, force-push, curl|sh, sudo, etc. are still denied). Review the resulting pull requests before merging.`}
+          confirmLabel="Enable"
+          onConfirm={() => {
+            onToggleAutonomous(project.path, true);
+            setShowAutonomousConfirm(false);
+          }}
+          onCancel={() => setShowAutonomousConfirm(false)}
+        />
+      )}
     </div>
   );
 }

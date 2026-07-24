@@ -78,6 +78,14 @@ export interface ChatProps {
   /** Whether a request is currently in flight (Start or Send). */
   busy: boolean;
   /**
+   * Whether this project is in autonomous mode. When true, mutating tool calls
+   * (Bash, Edit, Write, MCP) render an amber "auto-approved" tag — a per-turn
+   * audit cue so the morning review can see at a glance what the agent did
+   * without asking. Derived from the project flag (not per-event) so it's
+   * stable across a turn; precise per-event attribution is a follow-up.
+   */
+  autonomous?: boolean;
+  /**
    * Active transient-overload retry state for the in-flight turn, or `null`.
    * When set, renders an inline "Retrying 2/9 in 4s… (overloaded)" row so the
    * agent doesn't look frozen during a gateway 529 backoff window. Cleared by
@@ -381,12 +389,15 @@ function OverloadBanner({ onRetry }: { onRetry: () => void }) {
  * left-aligned card bubbles with optional error flag, duration, and token usage
  * meta.  This component is used for turns loaded from disk — it does not stream.
  */
-function TurnBubble({ turn, onRetryOverload }: {
+function TurnBubble({ turn, onRetryOverload, autonomous = false }: {
   turn: ConversationTurn;
   /** Re-send the last user prompt when the user clicks Retry on an overload
    *  error bubble. Optional — only TurnBubble needs it; absent in read-only
    *  contexts (the button is hidden). */
   onRetryOverload?: () => void;
+  /** When true, mutating tool calls render the "auto-approved" tag. Threaded
+   *  through to BlockList → ToolUseBlock. */
+  autonomous?: boolean;
 }) {
   const isUser = turn.role === "user";
   const isError = turn.is_error ?? false;
@@ -494,7 +505,7 @@ function TurnBubble({ turn, onRetryOverload }: {
             {sanitise(turn.text)}
           </p>
         ) : turn.blocks && turn.blocks.length > 0 ? (
-          <BlockList blocks={turn.blocks} />
+          <BlockList blocks={turn.blocks} autonomous={autonomous} />
         ) : (
           <>
             <ThinkingBlock thinking={turn.thinking ?? ""} />
@@ -584,13 +595,40 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
  * identical to the legacy `ToolList` entries so live and persisted turns look
  * the same.
  */
-function ToolUseBlock({ name, input }: { name: string; input: string }) {
+/** Tools that require manual approval under `ConfirmChanges` mode (mirrors the
+ *  backend `MANUAL_APPROVAL_TOOLS` + `mcp__*` prefix). Under autonomous mode
+ *  these are the calls that were self-approved — tagged "auto-approved" in the
+ *  transcript so the morning review can see what ran without asking. */
+function wouldRequireApproval(name: string): boolean {
+  const MANUAL = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch"];
+  return MANUAL.includes(name) || name.startsWith("mcp__");
+}
+
+function ToolUseBlock({
+  name,
+  input,
+  autoApproved = false,
+}: {
+  name: string;
+  input: string;
+  /** Show the amber "auto-approved" tag — set when the project is autonomous
+   *  AND this tool would normally require manual approval. */
+  autoApproved?: boolean;
+}) {
   return (
     <div className="mb-2 flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed">
       <span className="text-[var(--primary)] mt-0.5">›</span>
       <span className="font-mono break-all">
         {sanitise(describeTool(name, input))}
       </span>
+      {autoApproved && (
+        <span
+          title="Auto-approved by the autonomous-mode policy (no manual approval needed). The destructive floor still applied."
+          className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400"
+        >
+          auto
+        </span>
+      )}
     </div>
   );
 }
@@ -610,9 +648,12 @@ function ToolUseBlock({ name, input }: { name: string; input: string }) {
 function BlockList({
   blocks,
   streaming = false,
+  autonomous = false,
 }: {
   blocks: ContentBlock[];
   streaming?: boolean;
+  /** When true, mutating tool calls render the "auto-approved" tag. */
+  autonomous?: boolean;
 }) {
   // Index of the last text block, so the cursor attaches only there.
   let lastTextIndex = -1;
@@ -637,7 +678,14 @@ function BlockList({
           // nor a reloaded transcript shows the redundant
           // `› AskUserQuestion · {questions json}` line.
           if (block.name === "AskUserQuestion") return null;
-          return <ToolUseBlock key={i} name={block.name} input={block.input} />;
+          return (
+            <ToolUseBlock
+              key={i}
+              name={block.name}
+              input={block.input}
+              autoApproved={autonomous && wouldRequireApproval(block.name)}
+            />
+          );
         }
         const isTrailing = i === lastTextIndex;
         return (
@@ -667,9 +715,12 @@ function BlockList({
 function StreamingBubble({
   blocks,
   result,
+  autonomous = false,
 }: {
   blocks: ContentBlock[];
   result: (ClaudeEvent & { type: "result" }) | null;
+  /** When true, mutating tool calls render the "auto-approved" tag. */
+  autonomous?: boolean;
 }) {
   const isComplete = result !== null;
   const isError = result?.is_error ?? false;
@@ -738,7 +789,7 @@ function StreamingBubble({
 
         {/* Ordered content blocks — rendered exactly as they arrived. */}
         {hasContent ? (
-          <BlockList blocks={blocks} streaming={!isComplete} />
+          <BlockList blocks={blocks} streaming={!isComplete} autonomous={autonomous} />
         ) : (
           <p className="text-sm text-muted-foreground italic">
             {isComplete ? "(empty response)" : "Waiting for response…"}
@@ -888,6 +939,7 @@ export function Chat({
   streamingResult,
   pendingUserText,
   busy,
+  autonomous = false,
   retrying,
   error,
   onSend,
@@ -1082,6 +1134,7 @@ export function Chat({
             <TurnBubble
               key={i}
               turn={item.turn}
+              autonomous={autonomous}
               onRetryOverload={
                 // Re-send the most recent user prompt. Only meaningful for an
                 // overload error bubble (the button is hidden otherwise), and
@@ -1127,6 +1180,7 @@ export function Chat({
           <StreamingBubble
             blocks={streamingBlocks ?? []}
             result={streamingResult}
+            autonomous={autonomous}
           />
         )}
 

@@ -213,6 +213,7 @@ export function useProjects() {
     updateDescription,
     regenerateDesc,
     rescanProject,
+    setAutonomous,
     openInFinder,
     openInTerminal,
   };

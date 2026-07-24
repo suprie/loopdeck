@@ -273,7 +273,7 @@ fn scan_directory_bounded(
     }
 
     // Sort by name
-    repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    repos.sort_by_key(|a| a.name.to_lowercase());
 
     let elapsed = start.elapsed();
     if truncated {

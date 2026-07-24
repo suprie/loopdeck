@@ -656,8 +656,7 @@ pub(crate) fn append_terminal_if_orphan(
     let last_line = content
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back();
+        .rfind(|line| !line.is_empty());
     let Some(line) = last_line else {
         return Ok(false); // empty transcript — nothing to reconcile
     };
@@ -711,15 +710,14 @@ pub fn list_conversations(repo_path: &Path) -> Vec<ConversationSummary> {
             let name = name.to_string_lossy();
             let (id, kind) = if name == "active.jsonl" {
                 ("active".to_string(), "active")
-            } else if let Some(stem) = name
-                .strip_prefix("archive-")
-                .and_then(|s| s.strip_suffix(".jsonl"))
-            {
-                (format!("archive-{stem}"), "archived")
             } else {
-                // Not a transcript file — ignore (sessions dir may hold other
-                // files in the future; don't assume exclusivity).
-                return None;
+                // `archive-*.jsonl`. Anything else (the `?` below yields `None`)
+                // is not a transcript file and is ignored — the sessions dir may
+                // hold other files in the future; don't assume exclusivity.
+                let stem = name
+                    .strip_prefix("archive-")
+                    .and_then(|s| s.strip_suffix(".jsonl"))?;
+                (format!("archive-{stem}"), "archived")
             };
 
             let turns = parse_turns(
