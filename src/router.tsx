@@ -21,6 +21,7 @@ import { ActivityFeed } from "./components/activity/ActivityFeed";
 import { AgentRunner } from "./components/agent/AgentRunner";
 import { DecisionsView } from "./components/decisions/DecisionsView";
 import { LoopsView } from "./components/loops/LoopsView";
+import { EpicsView } from "./components/epics/EpicsView";
 import { ImportFlow } from "./components/import/ImportFlow";
 import { ProjectDetail } from "./components/detail/ProjectDetail";
 import { Settings } from "./components/settings/Settings";
@@ -161,6 +162,12 @@ const loopsRoute = createRoute({
   component: LoopsView,
 });
 
+const epicsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/epics",
+  component: EpicsView,
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -192,6 +199,7 @@ const routeTree = rootRoute.addChildren([
   agentRoute,
   decisionsRoute,
   loopsRoute,
+  epicsRoute,
   settingsRoute,
   importRoute,
   projectRoute,

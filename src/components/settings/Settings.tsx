@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Save, Loader2, Check, Settings2, Eye, EyeOff } from "lucide-react";
+import { Save, Loader2, Check, Settings2, Eye, EyeOff, FileText, FolderOpen } from "lucide-react";
 import { PageHeader } from "../layout/AppShell";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -11,8 +11,14 @@ import {
   SelectValue,
 } from "../ui/select";
 import { useAppStore } from "../../store/appStore";
-import { getAgentConfig, setAgentConfig } from "../../lib/tauri";
-import type { AgentConfig } from "../../types";
+import {
+  getAgentConfig,
+  setAgentConfig,
+  clearAuthToken,
+  getLogInfo,
+  revealLogDir,
+} from "../../lib/tauri";
+import type { AgentConfig, LogInfo } from "../../types";
 
 const EFFORT_OPTIONS = [
   { value: "low", label: "Low — fastest, least thorough" },
@@ -43,6 +49,8 @@ export function Settings() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [hasToken, setHasToken] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   // Load current config on mount
   useEffect(() => {
@@ -52,11 +60,14 @@ export function Settings() {
         const existing = await getAgentConfig();
         if (!cancelled && existing) {
           setForm({
-            auth_token: existing.auth_token ?? "",
+            // Never pre-fill the plaintext token — it isn't returned over IPC.
+            // The field stays empty; `hasToken` drives the "stored" affordance.
+            auth_token: "",
             base_url: existing.base_url ?? "",
             model: existing.model ?? "",
             effort: existing.effort ?? "high",
           });
+          setHasToken(!!existing.has_auth_token);
         }
       } catch {
         // Config doesn't exist yet — that's fine, use defaults
@@ -81,14 +92,21 @@ export function Settings() {
     setSaving(true);
     setSaved(false);
     try {
-      // Strip empty strings to None on the Rust side
+      // Strip empty strings to None on the Rust side. An empty auth_token is
+      // omitted entirely so the backend preserves the existing stored token
+      // rather than clearing it.
       const toSave: AgentConfig = {};
       if (form.auth_token) toSave.auth_token = form.auth_token;
       if (form.base_url) toSave.base_url = form.base_url;
       if (form.model) toSave.model = form.model;
       if (form.effort) toSave.effort = form.effort;
 
-      await setAgentConfig(toSave);
+      const saved = await setAgentConfig(toSave);
+      setHasToken(!!saved.has_auth_token);
+      // The token now lives in the local secrets file — clear the field so the
+      // masked "stored" affordance shows and the plaintext doesn't linger in
+      // state.
+      setForm((prev) => ({ ...prev, auth_token: "" }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (err) {
@@ -97,6 +115,21 @@ export function Settings() {
       setSaving(false);
     }
   }, [form, setError]);
+
+  const handleClearToken = useCallback(async () => {
+    setClearing(true);
+    try {
+      await clearAuthToken();
+      setHasToken(false);
+      setForm((prev) => ({ ...prev, auth_token: "" }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setClearing(false);
+    }
+  }, [setError]);
 
   if (!loaded) {
     return (
@@ -122,14 +155,16 @@ export function Settings() {
             {/* Auth Token */}
             <Field
               label="Auth Token"
-              hint="Your API key. Stored locally in ~/.config/loopdeck/config.yaml."
+              hint="Your API key, stored locally in an owner-only file — never written to the registry. Leave blank to keep the stored token; type a new value to replace it."
             >
               <div className="relative">
                 <Input
                   type={showKey ? "text" : "password"}
                   value={form.auth_token ?? ""}
                   onChange={(e) => handleChange("auth_token", e.target.value)}
-                  placeholder="sk-abc123..."
+                  placeholder={
+                    hasToken ? "•••••••• (stored — type to replace)" : "sk-abc123..."
+                  }
                   className="pr-9 font-mono"
                 />
                 <button
@@ -141,6 +176,22 @@ export function Settings() {
                   {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
                 </button>
               </div>
+              {hasToken && !form.auth_token ? (
+                <div className="mt-2 flex items-center justify-between rounded-md border border-success/30 bg-success/5 px-2.5 py-1.5">
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-success">
+                    <Check className="size-3.5" /> Token stored locally
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleClearToken}
+                    disabled={clearing}
+                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
+                  >
+                    {clearing ? <Loader2 className="size-3 animate-spin" /> : null}
+                    Clear stored token
+                  </button>
+                </div>
+              ) : null}
             </Field>
 
             {/* Base URL */}
@@ -232,9 +283,110 @@ export function Settings() {
               </span>
             )}
           </div>
+
+          {/* Diagnostics — where the logs live + bounded-retention summary.
+              Surfaces the user-accessible log folder and the retention cap so
+              "logs grow forever" is a visible, bounded quantity, not magic. */}
+          <Diagnostics />
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────────────
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+}
+
+function Diagnostics() {
+  const setError = useAppStore((s) => s.setError);
+  const [info, setInfo] = useState<LogInfo | null>(null);
+  const [opening, setOpening] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setInfo(await getLogInfo());
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleOpen = useCallback(async () => {
+    setOpening(true);
+    try {
+      await revealLogDir();
+      // Re-read after opening so the file list reflects any external changes
+      // (e.g. the user deletes a file from the now-open folder).
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpening(false);
+    }
+  }, [refresh, setError]);
+
+  const dir = info?.dir ?? null;
+  const fileCount = info?.files.length ?? 0;
+
+  return (
+    <>
+      <div className="mt-10 mb-4 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <FileText className="size-3.5" />
+        Diagnostics
+      </div>
+
+      <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-sm)]">
+        {!info ? (
+          <div className="flex items-center justify-center py-2">
+            <Loader2 className="size-4 animate-spin text-muted-foreground" />
+          </div>
+        ) : dir ? (
+          <div className="space-y-4">
+            <div>
+              <Label className="mb-1.5 block text-xs font-medium">Log folder</Label>
+              <p
+                className="truncate rounded-md bg-muted/40 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground"
+                title={dir}
+              >
+                {dir}
+              </p>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                {fileCount} {fileCount === 1 ? "file" : "files"} · {formatBytes(info.total_bytes)} ·
+                keeping the last {info.max_files} daily logs.
+              </p>
+            </div>
+
+            <button
+              onClick={handleOpen}
+              disabled={opening}
+              className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-md border border-border bg-background text-sm font-medium text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
+            >
+              {opening ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <FolderOpen className="size-4" />
+              )}
+              Open logs folder
+            </button>
+          </div>
+        ) : (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Logging is stderr-only — no log folder is available on disk. This is
+            unexpected outside of a misconfigured/headless environment.
+          </p>
+        )}
+      </div>
+    </>
   );
 }
 

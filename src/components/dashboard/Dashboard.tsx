@@ -11,25 +11,24 @@ export function Dashboard() {
   const navigate = useNavigate();
   const projects = useAppStore((s) => s.projects);
   const isLoading = useAppStore((s) => s.isLoading);
-  const setSelectedProject = useAppStore((s) => s.setSelectedProject);
+  const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
   const setDetailTab = useAppStore((s) => s.setDetailTab);
   const setPendingAgentStart = useAppStore((s) => s.setPendingAgentStart);
   const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } =
     useProjects();
 
-  /** Navigate to a project's detail view. */
+  /** Navigate to a project's detail view. The full entry is derived from
+   *  `projects` in ProjectDetail, so only the path identifier is stored. */
   const handleSelect = (path: string) => {
-    const project = projects.find((p) => p.path === path);
-    if (project) setSelectedProject(project);
+    setSelectedProjectPath(path);
     navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
   };
 
   /** Start the agent from the dashboard: navigate to the project on the Agent
    *  tab and signal AgentPanel to auto-fire `agent_start_loop` on mount. */
   const handleStart = (path: string) => {
-    const project = projects.find((p) => p.path === path);
-    if (!project) return;
-    setSelectedProject(project);
+    if (!projects.some((p) => p.path === path)) return;
+    setSelectedProjectPath(path);
     setDetailTab("agent");
     setPendingAgentStart(path);
     navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });

@@ -57,6 +57,98 @@ enum ReadOutcome {
     Interrupted,
 }
 
+/// Outcome of a single bounded line read — see [`read_bounded_line`].
+///
+/// Replaces the `usize` returned by `read_line` with three explicit states so
+/// the read loops can distinguish "got a line", "EOF", and "discarded an
+/// oversized line" without overloading a byte count.
+enum BoundedRead {
+    /// A complete line (including its trailing newline) is in the buffer.
+    Line,
+    /// EOF was reached before any bytes were read for this line.
+    Eof,
+    /// The line exceeded the byte cap and was discarded in full.
+    Oversized,
+}
+
+/// Read one newline-terminated line from `reader` into `buf`, bounding peak
+/// memory to `max_bytes` (PRD FR4).
+///
+/// Drop-in for `AsyncBufReadExt::read_line` that never buffers more than
+/// `max_bytes` for a single line: once a line exceeds the cap we drain it
+/// (discarding bytes up to and including its newline) and report
+/// [`BoundedRead::Oversized`], so a pathologically large NDJSON line from the
+/// `claude` CLI (a tool result embedding a huge file, a runaway `result`
+/// event) can't exhaust memory. On a normal line the full line — newline
+/// included — lands in `buf`.
+///
+/// **Cancel-safe:** the only `.await` is `fill_buf`, which leaves the reader
+/// consistent if the future is dropped mid-call (the internal buffer is
+/// untouched until the synchronous `consume`). Safe to race in a `select!`
+/// against an interrupt / a timeout, as the streaming loop does — a dropped
+/// partial line is simply re-read on the next turn.
+///
+/// Generic over `AsyncBufRead + Unpin` so it's unit-testable with a `Cursor`.
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<BoundedRead, std::io::Error>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    buf.clear();
+    let mut oversized = false;
+    loop {
+        // `fill_buf` borrows `reader` for the lifetime of `data`; we lift
+        // everything we need (lengths, whether to append) into locals below so
+        // the borrow ends before the `&mut self` `consume`.
+        let data = reader.fill_buf().await?;
+        if data.is_empty() {
+            // EOF. A pending oversized line with no terminating newline still
+            // counts as oversized; otherwise an empty buffer is a clean EOF.
+            return Ok(if oversized {
+                BoundedRead::Oversized
+            } else if buf.is_empty() {
+                BoundedRead::Eof
+            } else {
+                BoundedRead::Line
+            });
+        }
+        match data.iter().position(|&b| b == b'\n') {
+            Some(nl) => {
+                // The line ends within this chunk.
+                let consume = nl + 1;
+                if oversized || buf.len() + consume > max_bytes {
+                    // Whole line is oversized — discard it (consume through the
+                    // newline) and report. `consume` is a copy, so `data`'s
+                    // borrow has ended by the time we mutably borrow `reader`.
+                    reader.consume(consume);
+                    buf.clear();
+                    return Ok(BoundedRead::Oversized);
+                }
+                // Last use of `data` — the borrow ends here, so `consume` below
+                // can take `&mut reader`.
+                buf.extend_from_slice(&data[..consume]);
+                reader.consume(consume);
+                return Ok(BoundedRead::Line);
+            }
+            None => {
+                // No newline yet. Capture the length (a copy) so the `data`
+                // borrow ends before `consume`.
+                let len = data.len();
+                let over = oversized || buf.len() + len > max_bytes;
+                if over {
+                    oversized = true;
+                } else {
+                    buf.extend_from_slice(data);
+                }
+                reader.consume(len);
+            }
+        }
+    }
+}
+
 /// The user's answer to a single `AskUserQuestion` question.
 ///
 /// The user selects one or more canned option labels (radio/checkbox) and may
@@ -170,7 +262,10 @@ pub type InterruptSlot = Arc<StdMutex<Option<oneshot::Sender<()>>>>;
 /// Conversation context lives inside the process itself, so follow-up turns
 /// are just another line written to stdin — no `--resume`, no respawn.
 pub struct ClaudeSession {
-    child: Child,
+    // `Option` so `Drop` can `take()` the child and hand ownership to a
+    // fire-and-forget `spawn_blocking` reap task — it must not touch `self`
+    // (which is being torn down) or block the dropping thread.
+    child: Option<Child>,
     // `Option` so `Drop` can close stdin explicitly before reaping the child;
     // also doubles as a "still usable" flag.
     stdin: Option<ChildStdin>,
@@ -199,7 +294,14 @@ impl ClaudeSession {
         resume_session_id: Option<&str>,
         policy: PermissionPolicy,
     ) -> Result<Self, AppError> {
-        let mut cmd = Command::new("claude");
+        // Resolve `claude` to an absolute, vetted path ourselves rather than
+        // handing a bare name to the OS PATH search — defeats the cwd-hijack
+        // vector (a `.`/empty PATH entry resolving against `project_path`, which
+        // is a user-selected, untrusted directory) and pins the binary for the
+        // process lifetime. See `binary`.
+        let claude_path = crate::binary::claude()
+            .map_err(|e| AppError::Agent(format!("failed to resolve claude binary: {e}")))?;
+        let mut cmd = Command::new(claude_path);
         cmd.args([
             "--input-format",
             "stream-json",
@@ -215,13 +317,20 @@ impl ClaudeSession {
         if let Some(id) = resume_session_id {
             cmd.args(["--resume", id]);
         }
-        // Run in `default` permission mode so EVERY tool call that doesn't
-        // match an allow rule emits a `control_request` — that's the whole
-        // point of this PRD: LoopDeck gets to observe and decide each one.
-        // (Previously this used `acceptEdits`, which only auto-approves file
-        // edits and left every Bash call stalling — see
-        // docs/PRD-agent-permission-stall.md for the evidence.)
-        cmd.args(["--permission-mode", "acceptEdits"]);
+        // `default` permission mode: every tool call that doesn't match an
+        // allow rule in `.claude/settings.json` emits a `control_request`
+        // that LoopDeck decides (floor → manual approval → auto-policy).
+        // This is the honest single-source-of-truth: nothing is silently
+        // auto-approved by Claude itself. Earlier iterations used
+        // `acceptEdits`, which auto-approves Edit/Write/NotebookEdit inside
+        // Claude and made the `MANUAL_APPROVAL_TOOLS` entries for those tools
+        // dead code. See docs/PRD-trust-boundary-hardening.md FR1.
+        cmd.args(["--permission-mode", "default"]);
+
+        if let Some(model) = agent_config.model.clone() {
+            cmd.args(["--model", &model]);
+        }
+
         // Load user + project + local settings so the curated
         // `permissions.allow` list written by `skills::setup_hooks` (and any
         // user allow rules) short-circuit the control protocol for known-safe
@@ -237,6 +346,23 @@ impl ClaudeSession {
         // OS pipe buffer and deadlock. A drain task below keeps it empty and
         // surfaces the output via tracing.
         cmd.stderr(Stdio::piped());
+
+        // Log the resolved spawn config at INFO so a gateway error (e.g. 529
+        // overloaded, 401 bad token, wrong base URL) is diagnosable without
+        // guessing what model/endpoint the CLI actually used. The
+        // AgentConfig Debug impl redacts the auth token. The binary path is the
+        // vetted, absolute resolution from `binary::claude` — logging it makes a
+        // hostile `$PATH` (a different claude than the user expects) visible.
+        tracing::info!(
+            "spawning claude in {} | binary={} | model={} | base_url={} | auth_token={} | effort={} | resume={}",
+            project_path.display(),
+            claude_path.display(),
+            agent_config.model.as_deref().unwrap_or("<cli default>"),
+            agent_config.base_url.as_deref().unwrap_or("<cli default>"),
+            if agent_config.auth_token.is_some() { "set" } else { "<none>" },
+            agent_config.effort.as_deref().unwrap_or("<none>"),
+            resume_session_id.unwrap_or("none"),
+        );
 
         let mut child = cmd
             .spawn()
@@ -281,7 +407,7 @@ impl ClaudeSession {
         });
 
         Ok(Self {
-            child,
+            child: Some(child),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
@@ -350,7 +476,14 @@ impl ClaudeSession {
         // only when the floor didn't already deny. We check `policy_decision`
         // rather than calling `check_destructive_floor` directly so any future
         // hard-deny added to the policy is also exempt from prompting.
+        //
+        // **Autonomous mode skips this arm** (`is_autonomous()`): the project
+        // is opted into unattended operation, so floor-clearing mutating tools
+        // fall through to arm 4 and are auto-allowed. The floor in arm 2 still
+        // ran first, so `rm -rf` / force-push / `curl|sh` / `sudo` are denied
+        // regardless — this arm only governs whether *safe* mutations park.
         if policy_decision == Decision::Allow
+            && !self.policy.is_autonomous()
             && crate::permission::requires_manual_approval(&request.tool_name)
         {
             return self
@@ -358,13 +491,20 @@ impl ClaudeSession {
                 .await;
         }
 
-        // ── Arm 4: synchronous auto-policy (read-only tools, floor denies). ──
+        // ── Arm 4: synchronous auto-policy (read-only tools, floor denies,
+        //         autonomous-mode auto-allow for mutating tools). ──
         let decision = policy_decision;
+        // Under autonomous mode, distinguish "the policy auto-allowed this"
+        // from a read-only auto-allow or a user's manual Allow. The UI uses
+        // this discriminator to tag auto-approved calls in the transcript so
+        // the morning review can see what the agent did without asking.
+        let autonomous_auto_allow = self.policy.is_autonomous() && decision == Decision::Allow;
         tracing::info!(
             tool = %request.tool_name,
             input = %input_str,
             behavior = decision.behavior(),
             reason = decision.reason(),
+            autonomous = autonomous_auto_allow,
             "permission decision",
         );
 
@@ -395,7 +535,13 @@ impl ClaudeSession {
                 request_id: request_id.to_string(),
                 tool_name: request.tool_name.clone(),
                 input: input_str,
-                decision: decision.behavior().to_string(),
+                // `"allow"` for read-only / user-confirmed; `"auto-allow"` for
+                // autonomous-mode auto-approvals; `"deny"` for floor denies.
+                decision: if autonomous_auto_allow {
+                    String::from("auto-allow")
+                } else {
+                    decision.behavior().to_string()
+                },
                 reason: decision.reason().to_string(),
             });
         }
@@ -486,15 +632,19 @@ impl ClaudeSession {
                 .await;
         }
 
-        // Park until the user answers. The borrow of `self` is released at the
-        // `.await` boundary (no self ref held across it), so the subsequent
-        // `write_allow_with_updated_input` can take `&mut self` again.
+        // Park until the user answers. There is no expiry: the visibility
+        // layer (toast / ProjectCard pill / detail-view callout, reconciled on
+        // app launch + window focus + visibilitychange) surfaces the pending
+        // question so it isn't missed, and the user's only escapes are to
+        // answer it or hit Stop (which cancels the turn and drops the sender).
+        // `rx` is a `oneshot::Receiver`, so awaiting it is cancel-safe and
+        // resolves the moment the user's answer arrives.
         let answers = match rx.await {
             Ok(answers) => answers,
             Err(_) => {
                 // Sender dropped without sending — the turn was cancelled
-                // (e.g. session dropped, or timeout aborted the turn). Return
-                // an error so the caller stops reading.
+                // (e.g. session dropped or Stop was hit). Return an error so
+                // the caller stops reading.
                 return Err(AppError::Agent(
                     "AskUserQuestion cancelled — answer channel closed".into(),
                 ));
@@ -622,14 +772,19 @@ impl ClaudeSession {
             return Ok(());
         }
 
-        // Park until the user answers. Borrow of `self` is released at the
-        // `.await`, so the writes below can re-take `&mut self`.
+        // Park until the user decides. There is no expiry: the visibility
+        // layer surfaces pending approvals (toast / ProjectCard pill /
+        // detail-view callout, reconciled on app launch + window focus +
+        // visibilitychange) so the user can't miss one, and the only escapes
+        // are Allow/Deny or Stop (which cancels the turn and drops the
+        // sender). Borrow of `self` is released at the `.await`, so the writes
+        // below can re-take `&mut self`.
         let decision = match rx.await {
             Ok(d) => d,
             Err(_) => {
-                // Sender dropped without sending — the turn was cancelled or
-                // timed out. Return an error so the caller stops reading
-                // (mirrors the AskUserQuestion cancellation path).
+                // Sender dropped without sending — the turn was cancelled.
+                // Return an error so the caller stops reading (mirrors the
+                // AskUserQuestion cancellation path).
                 return Err(AppError::Agent(
                     "manual approval cancelled — answer channel closed".into(),
                 ));
@@ -817,35 +972,51 @@ impl ClaudeSession {
                 .map_err(|e| AppError::Agent(format!("flush failed: {}", e)))?;
             // ---- read stdout until the terminal `result` event ----
             let mut acc = ResponseAccumulator::new();
-            let mut line = String::new();
+            let mut line_bytes: Vec<u8> = Vec::new();
             loop {
-                line.clear();
-                // read_line returns 0 only on EOF. With a persistent process that
-                // means it died — treat as an error rather than a turn boundary.
-                // The per-read timeout catches a stuck peer (no stdout for
+                // Bounded line read (PRD FR4): a single NDJSON line is capped
+                // at STREAM_LINE_MAX_BYTES so a pathologically large line (a
+                // tool result embedding a huge file) can't exhaust memory. The
+                // per-read timeout catches a stuck peer (no stdout for
                 // READ_LINE_TIMEOUT seconds) without bounding the parked phase.
-                let n =
-                    match tokio::time::timeout(READ_LINE_TIMEOUT, self.stdout.read_line(&mut line))
-                        .await
-                    {
-                        Ok(Ok(n)) => n,
-                        Ok(Err(e)) => {
-                            return Err(AppError::Agent(format!("read failed: {}", e)));
-                        }
-                        Err(_) => {
-                            return Err(AppError::Agent(format!(
-                                "claude produced no stdout for {}s — assuming stuck",
-                                READ_LINE_TIMEOUT.as_secs()
-                            )));
-                        }
-                    };
+                let read = match tokio::time::timeout(
+                    READ_LINE_TIMEOUT,
+                    read_bounded_line(
+                        &mut self.stdout,
+                        &mut line_bytes,
+                        crate::limits::STREAM_LINE_MAX_BYTES,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(read)) => read,
+                    Ok(Err(e)) => {
+                        return Err(AppError::Agent(format!("read failed: {}", e)));
+                    }
+                    Err(_) => {
+                        return Err(AppError::Agent(format!(
+                            "claude produced no stdout for {}s — assuming stuck",
+                            READ_LINE_TIMEOUT.as_secs()
+                        )));
+                    }
+                };
 
-                if n == 0 {
-                    return Err(AppError::Agent(
-                        "claude closed stdout before sending a result event".into(),
-                    ));
+                match read {
+                    BoundedRead::Eof => {
+                        return Err(AppError::Agent(
+                            "claude closed stdout before sending a result event".into(),
+                        ));
+                    }
+                    BoundedRead::Oversized => {
+                        return Err(AppError::Limit(format!(
+                            "claude stream line exceeded {} bytes — discarded",
+                            crate::limits::STREAM_LINE_MAX_BYTES
+                        )));
+                    }
+                    BoundedRead::Line => {}
                 }
 
+                let line = String::from_utf8_lossy(&line_bytes);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -958,15 +1129,20 @@ impl ClaudeSession {
             }
 
             let mut acc = ResponseAccumulator::new();
-            let mut line = String::new();
+            let mut line_bytes: Vec<u8> = Vec::new();
             loop {
-                line.clear();
                 // Race the next stdout line against an interrupt. On
                 // interrupt we write the graceful control_request and end the
                 // turn — the live process survives, so the next send resumes
                 // the same conversation. (During a parked approval/question
-                // the loop is off `read_line`, so an interrupt there won't be
+                // the loop is off the read, so an interrupt there won't be
                 // observed this turn; the user should deny the card instead.)
+                //
+                // The read is bounded (PRD FR4): `read_bounded_line` caps a
+                // single NDJSON line at STREAM_LINE_MAX_BYTES. It is cancel-safe
+                // (only `fill_buf` is awaited), so dropping it mid-line on
+                // interrupt/timeout leaves the reader consistent for the next
+                // turn — no data lost or duplicated.
                 let read_or_interrupt = tokio::select! {
                     biased; // interrupt wins the race when both are ready
                     res = &mut interrupt_rx => match res {
@@ -983,8 +1159,19 @@ impl ClaudeSession {
                             READ_LINE_TIMEOUT.as_secs()
                         )));
                     },
-                    res = self.stdout.read_line(&mut line) => match res {
-                        Ok(n) => ReadOutcome::ReadResult(n),
+                    read = read_bounded_line(
+                        &mut self.stdout,
+                        &mut line_bytes,
+                        crate::limits::STREAM_LINE_MAX_BYTES,
+                    ) => match read {
+                        Ok(BoundedRead::Line) => ReadOutcome::ReadResult(1),
+                        Ok(BoundedRead::Eof) => ReadOutcome::ReadResult(0),
+                        Ok(BoundedRead::Oversized) => {
+                            return Err(AppError::Limit(format!(
+                                "claude stream line exceeded {} bytes — discarded",
+                                crate::limits::STREAM_LINE_MAX_BYTES
+                            )))
+                        }
                         Err(e) => return Err(AppError::Agent(format!("read failed: {}", e))),
                     },
                 };
@@ -1023,6 +1210,7 @@ impl ClaudeSession {
                     ));
                 }
 
+                let line = String::from_utf8_lossy(&line_bytes);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -1084,6 +1272,25 @@ impl ClaudeSession {
                                 if name == "AskUserQuestion" {
                                     continue;
                                 }
+
+                                // `TaskUpdate` carries its state change in the
+                                // call input, not the result. Emit a live
+                                // `task_update` from here (the dedicated
+                                // TaskPanel is the surface for it) and skip the
+                                // generic activity row — a `› TaskUpdate ·
+                                // {json}` line would be pure noise above the
+                                // panel, same reasoning as AskUserQuestion.
+                                // (Persisted copies land in the accumulator's
+                                // `tasks` via the same helper.)
+                                if name == "TaskUpdate" {
+                                    if let Some(task) =
+                                        crate::agents::extract_task_from_tool_use(name, input)
+                                    {
+                                        let _ = channel.send(ClaudeEvent::TaskUpdate { task });
+                                    }
+                                    continue;
+                                }
+
                                 let _ = channel.send(ClaudeEvent::ToolUse {
                                     name: name.clone(),
                                     input: input.to_string(),
@@ -1152,30 +1359,70 @@ impl Drop for ClaudeSession {
     fn drop(&mut self) {
         // Close stdin FIRST so claude sees EOF and exits on its own. We are
         // inside drop(), so struct fields have NOT dropped yet — without this
-        // explicit close, the reap loop below would wait on a process that's
-        // itself blocked reading more stdin.
+        // explicit close, the reap below would wait on a process that's itself
+        // blocked reading more stdin.
         self.stdin.take();
 
-        // Phase 1 — graceful: give claude a bounded window to exit on EOF.
-        let reaped = poll_reap(&mut self.child, Duration::from_secs(5));
+        // Move the child + stderr-drain handle out so the reap task can own
+        // them without touching `self` (being torn down). Both are `Option`
+        // precisely so Drop can take them here.
+        let child = self.child.take();
+        let stderr_drain = self.stderr_drain.take();
 
-        // Phase 2 — forceful: if still alive, SIGKILL and reap again. Must use
-        // `start_kill()` (synchronous — sends the signal now) rather than
-        // `kill()`, whose returned future can't be awaited from Drop. Using
-        // `let _ = kill()` here would silently leak the child instead of
-        // killing it (the bug this restructure fixes).
-        if !reaped {
-            tracing::debug!("claude session didn't exit on EOF; force-killing");
-            let _ = self.child.start_kill();
-            poll_reap(&mut self.child, Duration::from_secs(2));
-        }
+        let Some(child) = child else {
+            return; // already taken — nothing to reap
+        };
 
-        // Abort the stderr drain task. It usually ends on its own once the
-        // child above is reaped/killed (stderr EOFs), but abort defensively
-        // in case it's stuck on a read.
-        if let Some(handle) = self.stderr_drain.take() {
-            handle.abort();
+        // Reap the child OFF the tokio worker thread. `poll_reap` sleeps up to
+        // 7s (5s graceful EOF window + 2s after SIGKILL) using `thread::sleep`;
+        // running that on an async worker stalls every other task sharing it
+        // (and `ClaudeSession` is dropped from inside async Tauri commands). We
+        // fire-and-forget a `spawn_blocking` task that owns the child + drain,
+        // reaps the child, then aborts the drain. `tokio::spawn` + `child
+        // .wait().await` would also avoid blocking, but `spawn_blocking` lets
+        // us keep the bounded graceful-then-forceful reap (claude gets a chance
+        // to flush its `--resume` session state before SIGKILL).
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // Detach: `spawn_blocking` has already queued the closure on the
+                // blocking pool, so dropping the JoinHandle does NOT cancel it —
+                // it runs to completion and reaps the child. (Distinct from
+                // `Child::kill()`, whose future must be *awaited* to send the
+                // signal — dropping that one unawaited was the checkpoint-4 bug.)
+                drop(handle.spawn_blocking(move || reap_child(child, stderr_drain)));
+            }
+            Err(_) => {
+                // No runtime context (e.g. process teardown, or dropped from a
+                // non-runtime thread). Block here — there's no async worker to
+                // stall — so we still reap instead of leaking a zombie.
+                reap_child(child, stderr_drain);
+            }
         }
+    }
+}
+
+/// Graceful-then-forceful reap of a claude child, then abort the stderr drain.
+///
+/// Phase 1 gives the child a bounded window to exit on EOF (stdin was closed
+/// before this is called). Phase 2 SIGKILLs and reaps again. The stderr-drain
+/// task is kept alive *throughout* the reap so a verbose child can't fill its
+/// stderr pipe buffer and block on exit; it's aborted only after the child is
+/// gone (its stderr then EOFs and the drain would end on its own anyway — the
+/// abort is a defensive backstop for a stuck read). `start_kill()` is
+/// synchronous — the correct tokio API from a sync context; its `kill()`
+/// counterpart returns a future that can't be awaited here, and `let _ =
+/// kill()` would silently leak the child instead of killing it.
+fn reap_child(mut child: Child, stderr_drain: Option<JoinHandle<()>>) {
+    let reaped = poll_reap(&mut child, Duration::from_secs(5));
+
+    if !reaped {
+        tracing::debug!("claude session didn't exit on EOF; force-killing");
+        let _ = child.start_kill();
+        poll_reap(&mut child, Duration::from_secs(2));
+    }
+
+    if let Some(handle) = stderr_drain {
+        handle.abort();
     }
 }
 
@@ -1234,6 +1481,7 @@ mod tests {
                 .or_else(|| Some(String::from("deepseek-v4-pro[1m]"))),
             auth_token: std::env::var("LOOPDECK_TEST_AUTH_TOKEN").ok(),
             effort: Some(String::from("low")),
+            ..Default::default()
         }
     }
 
@@ -1269,6 +1517,81 @@ mod tests {
         Arc::new(StdMutex::new(None))
     }
 
+    // ── bounded line reader (PRD FR4) ───────────────────────────────────
+
+    /// Wrap raw bytes in the same `BufReader<Cursor>` shape `read_bounded_line`
+    /// is built for, so the unit tests exercise the real async path.
+    fn buf_reader(bytes: &'static [u8]) -> tokio::io::BufReader<std::io::Cursor<&'static [u8]>> {
+        tokio::io::BufReader::new(std::io::Cursor::new(bytes))
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_returns_normal_line() {
+        let mut reader = buf_reader(b"{\"type\":\"result\"}\nsecond\n");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"{\"type\":\"result\"}\n");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_eof_on_empty() {
+        let mut reader = buf_reader(b"");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, BoundedRead::Eof));
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_discards_oversized_line() {
+        // A 50-byte line (incl. newline) under a 10-byte cap → Oversized, the
+        // whole line consumed, buf empty, and the NEXT read resumes at the
+        // following line (no data lost across the discarded one).
+        let mut payload: Vec<u8> = vec![b'x'; 49];
+        payload.push(b'\n');
+        let mut stream: Vec<u8> = payload.clone();
+        stream.extend_from_slice(b"ok\n");
+        let mut cursor = std::io::Cursor::new(stream);
+        let mut reader = tokio::io::BufReader::new(&mut cursor);
+
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 10).await.unwrap();
+        assert!(matches!(read, BoundedRead::Oversized));
+        assert!(buf.is_empty(), "oversized line must not be buffered");
+
+        // Next read returns the following, normal line.
+        let read = read_bounded_line(&mut reader, &mut buf, 10).await.unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"ok\n");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_allows_line_at_exact_cap() {
+        // A line exactly at the cap (inclusive) is allowed — the bound is `>`.
+        let mut reader = buf_reader(b"abc\n");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 4).await.unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"abc\n");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_returns_final_line_without_newline() {
+        // A trailing line with no newline at EOF is still returned as a Line.
+        let mut reader = buf_reader(b"tail-no-newline");
+        let mut buf = Vec::new();
+        let read = read_bounded_line(&mut reader, &mut buf, 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, BoundedRead::Line));
+        assert_eq!(&buf, b"tail-no-newline");
+    }
+
     /// Smoke test: spawn one session, send one message, get a structured reply.
     ///
     /// Validates the full pipeline end-to-end: spawn (env vars, piped stdio)
@@ -1282,7 +1605,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
 
@@ -1320,7 +1643,7 @@ mod tests {
     async fn test_session_current_directory() {
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
 
-        let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::allow_by_default())
+        let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::confirm_changes())
             .expect("failed to spawn claude session");
 
         let response = session
@@ -1356,7 +1679,7 @@ mod tests {
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     async fn test_session_retains_context_across_turns() {
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::allow_by_default())
+            let mut session = ClaudeSession::spawn(&test_path(), &test_config(), None, PermissionPolicy::confirm_changes())
             .expect("failed to spawn claude session");
 
         // Turn 1 — plant a distinctive fact the model could only repeat by
@@ -1413,12 +1736,13 @@ mod tests {
                 model: None,
                 auth_token: None,
                 effort: None,
+                ..Default::default()
             };
             let mut session = ClaudeSession::spawn(
                 &test_path(),
                 &no_auth,
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
 
@@ -1465,7 +1789,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
             let first = session
@@ -1498,7 +1822,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 Some(&session_id),
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to re-spawn claude session with --resume");
 
@@ -1555,7 +1879,7 @@ mod tests {
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::allow_by_default(),
+                PermissionPolicy::confirm_changes(),
             )
             .expect("failed to spawn claude session");
 
@@ -1599,14 +1923,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "calls a real provider; run with `cargo test -- --ignored`"]
     async fn test_session_deny_path_is_graceful() {
-        use crate::permission::{PermissionPolicy, PolicyDefault};
+        use crate::permission::{PermissionMode, PermissionPolicy};
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
             let mut session = ClaudeSession::spawn(
                 &test_path(),
                 &test_config(),
                 None,
-                PermissionPolicy::with_default(PolicyDefault::Deny),
+                PermissionPolicy::with_mode(PermissionMode::Deny),
             )
             .expect("failed to spawn claude session");
 

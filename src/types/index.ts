@@ -7,6 +7,8 @@ export interface DiscoveredRepo {
   markers: string[];
   has_readme: boolean;
   has_loopdeck: boolean;
+  /** Whether `graphify-out/graph.json` is present (Graphify already ran). */
+  has_graphify: boolean;
   /** Human-readable technology stack, e.g. "Rust, JavaScript/TypeScript". */
   detected_stack: string;
   /** Lightweight description preview generated from the detected stack. */
@@ -93,6 +95,14 @@ export interface ProjectEntry {
   /** Live agent run state — derived at read time, not persisted. Older configs
    *  without this field load as `idle`. */
   run_state: RunState;
+  /**
+   * Per-project autonomous mode: when true, the agent self-approves
+   * floor-clearing tool calls (Edit/Write, safe Bash, MCP, WebFetch) so loops
+   * run unattended. The destructive floor still applies. Older configs without
+   * this field load as `false` (confirm-changes). Optional on the wire because
+   * the backend `skip_serializing_if`s it when false.
+   */
+  autonomous?: boolean;
 }
 
 /** Content of .loopdeck/project.yaml. */
@@ -101,6 +111,43 @@ export interface ProjectMeta {
   description: string;
   status: string;
   created_at: string;
+}
+
+/** Per-confidence link counts for a Graphify knowledge graph. */
+export interface ConfidenceBreakdown {
+  /** Links extracted directly from source (AST-level certainty). */
+  extracted: number;
+  /** Links inferred by an LLM backend (plausible but not provable). */
+  inferred: number;
+  /** Links the extractor flagged as ambiguous. */
+  ambiguous: number;
+}
+
+/** Summary of a project's Graphify knowledge graph.
+ *  `present: false` means no readable `graphify-out/graph.json` was found —
+ *  the UI should hide the Graph tab rather than render empty stats. LoopDeck
+ *  only reads Graphify's output and never runs it. */
+export interface GraphifyStats {
+  /** `false` when `graphify-out/graph.json` is missing or unparseable. */
+  present: boolean;
+  /** Number of nodes in the graph. */
+  node_count: number;
+  /** Number of links (edges) in the graph. */
+  edge_count: number;
+  /** Number of distinct community partitions. */
+  community_count: number;
+  /** Labels of the highest-degree nodes (most connected first), capped at 10. */
+  god_nodes: string[];
+  /** Distribution of link confidence values. */
+  confidence: ConfidenceBreakdown;
+  /** Build date parsed from `GRAPH_REPORT.md` (`YYYY-MM-DD`), if present. */
+  built_at: string | null;
+  /** Absolute path to `graphify-out/graph.json`. */
+  graph_path: string;
+  /** Absolute path to `graphify-out/GRAPH_REPORT.md`, if it exists. */
+  report_path: string | null;
+  /** Absolute path to `graphify-out/graph.html`, if it exists. */
+  html_path: string | null;
 }
 
 /** Structured error returned from Rust AppError. */
@@ -116,6 +163,7 @@ export interface AppError {
     | "config"
     | "lockError"
     | "projectAlreadyExists"
+    | "conflict"
     | "agent";
 }
 
@@ -125,6 +173,36 @@ export interface AgentConfig {
   base_url?: string;
   model?: string;
   effort?: string;
+  /**
+   * Read-only signal from the backend: true when an auth token is stored in
+   * the local secrets file. The plaintext token itself is never sent over IPC,
+   * so the Settings UI uses this to show a "token stored" affordance.
+   */
+  has_auth_token?: boolean;
+}
+
+/** One retained log file, surfaced in Settings → Diagnostics. Mirrors Rust `LogFileInfo`. */
+export interface LogFileInfo {
+  /** File name, e.g. `loopdeck.log.2026-07-23`. */
+  name: string;
+  /** Size in bytes. */
+  size_bytes: number;
+}
+
+/**
+ * Snapshot of the log directory for Settings → Diagnostics. Mirrors Rust
+ * `LogInfo`. The backend reads only file names/sizes — never contents — so
+ * this surface can't exfiltrate whatever a log line might contain.
+ */
+export interface LogInfo {
+  /** Absolute path to the log directory; `null` when logging is stderr-only. */
+  dir: string | null;
+  /** Retained `loopdeck.log*` files, newest-first. */
+  files: LogFileInfo[];
+  /** Total bytes across `files`. */
+  total_bytes: number;
+  /** Configured retention cap (max daily files kept on disk). */
+  max_files: number;
 }
 
 /** A single architectural decision record from .loopdeck/decisions.md. */
@@ -144,15 +222,73 @@ export interface Loop {
   completed?: string;
 }
 
+/** A single checklist item under `## Next Steps` in loops.md. Mirrors Rust `NextStep`. */
+export interface NextStep {
+  /** The step text (without the `- [ ]` / `- [x]` prefix). */
+  text: string;
+  /** Whether the box is checked (`- [x]`). */
+  checked: boolean;
+}
+
 /** Full loop status from .loopdeck/loops.md. */
 export interface LoopStatus {
   current: Loop | null;
-  next_steps: string[];
+  next_steps: NextStep[];
   history: Loop[];
 }
 
+/**
+ * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
+ * Mirrors Rust `Epic` in epic.rs.
+ */
+export interface Epic {
+  slug: string;
+  title: string;
+  milestone: string;
+  status: "proposed" | "in_progress" | "completed" | "abandoned";
+  description: string;
+  started?: string;
+  completed?: string;
+  owner?: string;
+  /** Path to the epic directory (back-reference for the promote action). */
+  dir: string;
+  prds: Prd[];
+}
+
+/** A parsed PRD, with its phase checklists attached. Mirrors Rust `Prd`. */
+export interface Prd {
+  /** PRD slug — the `prd:` frontmatter field (filename without `.md`). */
+  slug: string;
+  /** Parent epic slug. */
+  epic: string;
+  status: "proposed" | "accepted" | "completed";
+  description: string;
+  milestone?: string;
+  /** Filename of the PRD file (back-reference for the promote action). */
+  file: string;
+  phases: PrdPhase[];
+}
+
+/** A `### Phase N — Name` section within a PRD's `## Phases`. */
+export interface PrdPhase {
+  /** Full heading text, e.g. "Phase 1 — Core structs and parser". */
+  name: string;
+  loops: PrdLoop[];
+}
+
+/**
+ * A single checklist item inside a phase — the atomic unit the
+ * promote-to-loop action acts on.
+ */
+export interface PrdLoop {
+  title: string;
+  checked: boolean;
+  /** Read-only sync from loops.md History: true when a history goal matches. */
+  done_in_history: boolean;
+}
+
 /** Tab navigation within ProjectDetail. */
-export type DetailTab = "overview" | "decisions" | "loops" | "agent";
+export type DetailTab = "overview" | "decisions" | "loops" | "epics" | "agent" | "graph";
 
 /** Token usage + cost for an assistant turn (mirrors Rust UsageInfo). */
 export interface UsageInfo {
@@ -188,6 +324,17 @@ export type ClaudeEvent =
   | { type: "task_update"; task: TaskRecord }
   | { type: "permission_request" } & PermissionDecision
   | { type: "ask_user_question"; request_id: string; tool_name: string; questions: AskUserQuestionSpec[] }
+  | {
+      type: "retrying";
+      /** 1-based index of the attempt about to run (e.g. 2 for the first retry). */
+      attempt: number;
+      /** Configured maximum number of attempts (incl. the initial one). */
+      max_attempts: number;
+      /** Backoff in ms that was slept before this retry fires. */
+      backoff_ms: number;
+      /** The error text from the failed attempt that triggered the retry. */
+      error: string;
+    }
   | {
       type: "result";
       text: string;
@@ -240,6 +387,33 @@ export interface AskUserQuestionAnswer {
 
 /** Answers keyed by question text — the shape `agent_answer_question` expects. */
 export type AskUserQuestionAnswers = Record<string, AskUserQuestionAnswer>;
+
+/**
+ * One project's pending `AskUserQuestion`, surfaced across the whole registry
+ * by `listPendingQuestions`. Mirrors Rust `PendingQuestionEntry`. Carries the
+ * project `path` so the frontend can route the answer back to
+ * `agentAnswerQuestion`.
+ */
+export interface PendingQuestionEntry {
+  /** Canonical registered project path. */
+  path: string;
+  requestId: string;
+  questions: AskUserQuestionSpec[];
+}
+
+/**
+ * One project's pending manual-approval request, surfaced across the whole
+ * registry by `listPendingPermissions`. Mirrors Rust
+ * `PendingPermissionEntry`. Carries the project `path` so the frontend can
+ * route the Allow/Deny verdict back to `agentAnswerPermission`.
+ */
+export interface PendingPermissionEntry {
+  /** Canonical registered project path. */
+  path: string;
+  requestId: string;
+  toolName: string;
+  input: string;
+}
 
 /**
  * Narrowing helper: true if a `ClaudeEvent` is an `ask_user_question`.
@@ -371,6 +545,18 @@ export interface ConversationTurn {
   session_id?: string;
   /** Whether the assistant turn was an error. Always false for user turns. */
   is_error?: boolean;
+  /**
+   * Sub-classifier for an interrupted assistant turn (an `is_error` turn that
+   * never reached a terminal result). Tells the *reason* so the UI can render a
+   * truthful message instead of blaming every interruption on a process crash:
+   * - `"process_exited"`: the agent process exited before responding.
+   * - `"approval_timeout"`: a parked manual approval expired and was auto-denied.
+   * - `"question_timeout"`: a parked AskUserQuestion expired and was auto-denied.
+   * Undefined on normal turns and on legacy transcripts (written before the
+   * field existed) — the UI treats undefined as the historical generic
+   * interruption when `is_error`.
+   */
+  interrupt_kind?: "process_exited" | "approval_timeout" | "question_timeout";
   /** Token usage + cost (assistant turns only, when reported). */
   usage?: UsageInfo;
   /** Wall-clock duration in milliseconds (assistant turns only). */

@@ -16,6 +16,7 @@ import { usePendingInteractions } from "../../store/pendingInteractions";
 import { useStreamingState } from "../../store/streamingState";
 import { Chat, buildAllowRule } from "./Chat";
 import { TaskPanel } from "./TaskPanel";
+import { PermissionModeBadge } from "../shared/PermissionModeBadge";
 
 interface AgentPanelProps {
   projectPath: string;
@@ -103,7 +104,15 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   const pendingUserText = useStreamingState(
     (s) => s.byPath[projectPath]?.pendingUserText ?? null,
   );
+  const retrying = useStreamingState(
+    (s) => s.byPath[projectPath]?.retrying ?? null,
+  );
   const error = useStreamingState((s) => s.byPath[projectPath]?.error ?? null);
+  // Per-project autonomous flag — drives the PermissionModeBadge label so the
+  // user sees at a glance whether this project's agent self-approves tool calls.
+  const autonomous = useAppStore(
+    (s) => s.projects.find((p) => p.path === projectPath)?.autonomous ?? false,
+  );
 
   // ── Composer focus nonce — bumped to ask Chat to focus its composer. ──
   // Used by "New conversation": after archiving the transcript we want the
@@ -447,7 +456,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     // IPC, but defensive coding is cheap).
     let resultHandled = false;
 
-    channel.onmessage = (event: ClaudeEvent) => {
+    channel.onmessage = (event: ClaudeEvent ) => {
       // NOTE: we deliberately do NOT bail on `!mountedRef.current` here.
       // Streaming state lives in the navigation-stable store, so we keep
       // accumulating blocks / busy / result even when no panel is mounted —
@@ -497,6 +506,11 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // pinned AskUserQuestionCard) is the user-facing surface for this
           // interaction, so the raw tool-call row is dropped everywhere.
           if (event.name === "AskUserQuestion") break;
+          // Task lifecycle tools are surfaced via the dedicated `task_update`
+          // channel event (→ TaskPanel), not as transcript activity rows. The
+          // backend suppresses `TaskUpdate` tool_use blocks at the source too;
+          // this guard is belt-and-suspenders against drift between the two.
+          if (event.name === "TaskCreate" || event.name === "TaskUpdate") break;
           setStreamingBlocks((prev) => [
             ...(prev ?? []),
             { type: "tool_use", name: event.name, input: event.input },
@@ -553,6 +567,23 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           });
           break;
         }
+        case "retrying": {
+          // A transient gateway overload (e.g. 529) was hit and the backend is
+          // retrying after a backoff. Without surfacing this the UI looks frozen
+          // — the failed attempt's terminal Result has landed and the next
+          // attempt hasn't started. Stash the payload so Chat can render an
+          // honest "Retrying 2/9 in 4s…" row. Cleared by the next non-retry
+          // `result` (success, non-transient error, or exhausted retries).
+          useStreamingState.getState().patch(projectPath, {
+            retrying: {
+              attempt: event.attempt,
+              maxAttempts: event.max_attempts,
+              backoffMs: event.backoff_ms,
+              error: event.error,
+            },
+          });
+          break;
+        }
         case "result":
           resultHandled = true;
           setStreamingResult(event);
@@ -564,6 +595,10 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // Instead we keep the bubble mounted (now showing the Result meta)
           // and clear it only once reload() resolves, then drop busyRef.
           setBusy(false);
+          // A terminal result supersedes any retry indicator — the turn is over
+          // (success, non-transient error, or retries exhausted). Drop the
+          // payload so the "Retrying…" row disappears.
+          useStreamingState.getState().patch(projectPath, { retrying: null });
           // Turn ended — any pending question/approval is moot (e.g. the turn
           // errored or timed out while parked). Clear so the cards disappear.
           clearPendingQuestion(projectPath);
@@ -646,14 +681,16 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
 
   /** Start the next development loop (streaming). */
   async function runStartLoop() {
-    // Start always begins a fresh (active) conversation server-side, so make
-    // sure the view reflects it — otherwise the streaming bubble would render
-    // into a read-only archive view.
-    if (selectedIdRef.current !== "active") {
-      setSelectedId("active");
-      const data = await api.agentGetConversationById(projectPath, "active");
-      if (mountedRef.current) setTurns(data);
-    }
+    // Start always begins a FRESH conversation server-side: `spawn_fresh`
+    // archives the current `active.jsonl` (it becomes history) and spawns a
+    // new claude process without `--resume`. So the on-disk `active` transcript
+    // is now empty — we must reload from it unconditionally, even when already
+    // viewing `"active"`. The old code only reloaded when switching from an
+    // archive view, which left the previous loop's turns rendered while the
+    // new loop prompt streamed in on top of them.
+    setSelectedId("active");
+    const data = await api.agentGetConversationById(projectPath, "active");
+    if (mountedRef.current) setTurns(data);
     await runStreamingTurn(undefined);
   }
 
@@ -885,6 +922,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       <div className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-1 flex-col">
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-2 pb-3 mb-3 border-b border-border shrink-0">
+        <PermissionModeBadge mode={autonomous ? "autonomous" : "confirm"} />
         <button
           onClick={runStartLoop}
           disabled={busy}
@@ -1002,6 +1040,8 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         streamingResult={isActiveView ? streamingResult : null}
         pendingUserText={isActiveView ? pendingUserText : null}
         busy={busy}
+        retrying={isActiveView ? retrying : null}
+        autonomous={autonomous}
         error={error}
         onSend={runSendMessage}
         onClearError={() => setError(null)}

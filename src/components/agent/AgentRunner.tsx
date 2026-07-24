@@ -4,6 +4,7 @@ import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { AgentPanel } from "../detail/AgentPanel";
 import { PageHeader } from "../layout/AppShell";
+import { PermissionModeBadge } from "../shared/PermissionModeBadge";
 import { relativeTime } from "../../lib/time";
 import { cn } from "../../lib/utils";
 
@@ -80,14 +81,19 @@ export function AgentRunner() {
         title="Agent Runner"
         subtitle="Chat with the agent across any project"
         actions={
-          <button
-            type="button"
-            onClick={handleScan}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <Plus className="size-3.5" />
-            Import Repo
-          </button>
+          <>
+            <PermissionModeBadge
+              mode={selected?.autonomous ? "autonomous" : "confirm"}
+            />
+            <button
+              type="button"
+              onClick={handleScan}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <Plus className="size-3.5" />
+              Import Repo
+            </button>
+          </>
         }
       />
 

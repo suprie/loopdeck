@@ -14,7 +14,6 @@ import type { AppError } from "../types";
 export function useProjects() {
   const navigate = useNavigate();
   const setProjects = useAppStore((s) => s.setProjects);
-  const setSelectedProject = useAppStore((s) => s.setSelectedProject);
   const setScanning = useAppStore((s) => s.setScanning);
   const setLoading = useAppStore((s) => s.setLoading);
   const setDiscoveredRepos = useAppStore((s) => s.setDiscoveredRepos);
@@ -26,38 +25,23 @@ export function useProjects() {
 
   /** Load all projects from the global config on app startup.
    *
-   * After loading, reconciles the persisted `selectedProject` against the fresh
-   * list: if the selected project no longer exists (removed in another session,
-   * path moved/deleted), the selection is cleared. If it still exists, the
-   * stored copy is refreshed with current git info.
+   * No selection reconciliation is needed: the selected project is derived from
+   * this list (`selectSelectedProject` in `appStore`), so a project removed in
+   * another session resolves to `null` and a changed one is automatically fresh
+   * — both come straight from Rust, with no persisted copy to reconcile against.
    */
   const loadProjects = useCallback(async () => {
     setLoading(true);
     try {
       const projects = await api.listProjects();
       setProjects(projects);
-
-      // Reconcile persisted selection against the freshly-loaded list.
-      const selected = useAppStore.getState().selectedProject;
-      if (selected) {
-        const fresh = projects.find((p) => p.path === selected.path);
-        if (!fresh) {
-          setSelectedProject(null);
-        } else if (
-          fresh.last_commit_date !== selected.last_commit_date ||
-          fresh.last_modified !== selected.last_modified ||
-          fresh.description !== selected.description
-        ) {
-          updateProjectInStore(fresh);
-        }
-      }
     } catch (err) {
       const appErr = err as AppError;
       setError(appErr.message ?? String(err));
     } finally {
       setLoading(false);
     }
-  }, [setProjects, setSelectedProject, setLoading, setError, updateProjectInStore]);
+  }, [setProjects, setLoading, setError]);
 
   /** Scan a directory for discoverable repositories. */
   const scanFolder = useCallback(
@@ -183,6 +167,31 @@ export function useProjects() {
     [setError, updateProjectInStore],
   );
 
+  /** Toggle per-project autonomous mode and reflect it in the store.
+   *  Takes effect on the next spawned session (the live one keeps its policy
+   *  until reset). The caller (ProjectDetail) gates the enable path behind a
+   *  confirm dialog spelling out the risk. */
+  const setAutonomous = useCallback(
+    async (path: string, autonomous: boolean) => {
+      setError(null);
+      try {
+        await api.setProjectAutonomous(path, autonomous);
+        // Patch the store entry in place — the backend only persists the flag,
+        // it doesn't return the full ProjectEntry.
+        const existing = useAppStore
+          .getState()
+          .projects.find((p) => p.path === path);
+        if (existing) {
+          updateProjectInStore({ ...existing, autonomous });
+        }
+      } catch (err) {
+        const appErr = err as AppError;
+        setError(appErr.message ?? String(err));
+      }
+    },
+    [setError, updateProjectInStore],
+  );
+
   /** Open a path in the system terminal. */
   const openInTerminal = useCallback(
     async (path: string) => {
@@ -204,6 +213,7 @@ export function useProjects() {
     updateDescription,
     regenerateDesc,
     rescanProject,
+    setAutonomous,
     openInFinder,
     openInTerminal,
   };

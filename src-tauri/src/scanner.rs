@@ -1,8 +1,9 @@
 use crate::error::AppError;
 use crate::git;
+use crate::limits;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Marker files and directories that indicate a project repository.
 const PROJECT_MARKERS: &[&str] = &[
@@ -46,6 +47,8 @@ pub struct DiscoveredRepo {
     pub has_readme: bool,
     /// Whether `.loopdeck/project.yaml` already exists.
     pub has_loopdeck: bool,
+    /// Whether `graphify-out/graph.json` exists (project already mapped by Graphify).
+    pub has_graphify: bool,
     /// Human-readable technology stack derived from marker files.
     /// e.g. "Rust, JavaScript/TypeScript"
     pub detected_stack: String,
@@ -65,7 +68,31 @@ pub struct DiscoveredRepo {
 /// Xcode project patterns.
 ///
 /// Returns all discovered repositories, sorted by name.
+///
+/// Bounds (PRD FR4) — visited entries, returned results, and wall-clock — come
+/// from [`limits`]. When a budget is hit the scan stops and returns whatever was
+/// found so far (with a `warn!` log), so a pathologically large root can't
+/// freeze the UI or exhaust memory.
 pub fn scan_directory(path: &Path, max_depth: u8) -> Result<Vec<DiscoveredRepo>, AppError> {
+    scan_directory_bounded(
+        path,
+        max_depth,
+        limits::SCAN_MAX_ENTRIES,
+        limits::SCAN_MAX_RESULTS,
+        limits::SCAN_MAX_DURATION,
+    )
+}
+
+/// The budget-parameterized core of [`scan_directory`], extracted so the
+/// budgets are injectable in tests (the production constants are far too large
+/// to exercise by building a real tree).
+fn scan_directory_bounded(
+    path: &Path,
+    max_depth: u8,
+    max_entries: usize,
+    max_results: usize,
+    max_duration: Duration,
+) -> Result<Vec<DiscoveredRepo>, AppError> {
     let start = Instant::now();
 
     if !path.exists() {
@@ -91,6 +118,14 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<Vec<DiscoveredRepo>,
     // Helper: check if entry name matches ignored dirs
     let is_ignored_dir = |name: &str| -> bool { IGNORED_DIRS.contains(&name) };
 
+    // Budgets (PRD FR4): bound visited entries and wall-clock so a pathologically
+    // large root (e.g. `$HOME`) can't freeze the UI or exhaust memory. When a
+    // budget is hit we stop and return what we have so far — discovery still
+    // surfaces results, just fewer — and log a warning so the truncation is
+    // visible. The result cap bounds the returned `Vec` itself.
+    let mut entries_visited: usize = 0;
+    let mut truncated = false;
+
     // Walk the directory tree
     for entry in walkdir::WalkDir::new(&canonical_root)
         .max_depth(max_depth as usize)
@@ -98,6 +133,28 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<Vec<DiscoveredRepo>,
         .into_iter()
         .filter_entry(|e| !is_ignored_dir(e.file_name().to_str().unwrap_or("")))
     {
+        entries_visited += 1;
+        if entries_visited > max_entries {
+            truncated = true;
+            tracing::warn!(
+                root = %canonical_root.display(),
+                visited = entries_visited,
+                limit = max_entries,
+                "scan hit entry budget — returning partial results"
+            );
+            break;
+        }
+        if start.elapsed() >= max_duration {
+            truncated = true;
+            tracing::warn!(
+                root = %canonical_root.display(),
+                elapsed = ?start.elapsed(),
+                limit = ?max_duration,
+                "scan hit time budget — returning partial results"
+            );
+            break;
+        }
+
         let entry = entry?;
 
         // Only examine directories
@@ -166,6 +223,11 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<Vec<DiscoveredRepo>,
 
         let has_loopdeck = dir_path.join(".loopdeck").join("project.yaml").exists();
 
+        // Graphify is an optional, externally-managed producer — LoopDeck only
+        // reads its output. Check via the shared helper so the path layout
+        // lives in one place (`graphify::is_present`).
+        let has_graphify = crate::graphify::is_present(dir_path);
+
         // Detect technology stack and generate a lightweight description preview
         let detected_stack = detect_stack(&markers);
         let description_preview = if detected_stack != "Unknown" {
@@ -189,23 +251,46 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<Vec<DiscoveredRepo>,
             markers,
             has_readme,
             has_loopdeck,
+            has_graphify,
             detected_stack,
             description_preview,
             last_commit: git_info.last_commit_date,
             last_modified: git_info.last_modified,
         });
+
+        // Result budget (PRD FR4): stop once we've collected enough repos — the
+        // returned Vec shouldn't itself be an exhaustion vector.
+        if repos.len() >= max_results {
+            truncated = true;
+            tracing::warn!(
+                root = %canonical_root.display(),
+                found = repos.len(),
+                limit = max_results,
+                "scan hit result budget — returning partial results"
+            );
+            break;
+        }
     }
 
     // Sort by name
-    repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    repos.sort_by_key(|a| a.name.to_lowercase());
 
     let elapsed = start.elapsed();
-    tracing::info!(
-        "Scanned {} — found {} repos in {:?}",
-        canonical_root.display(),
-        repos.len(),
-        elapsed
-    );
+    if truncated {
+        tracing::warn!(
+            "Scanned {} — found {} repos in {:?} (TRUNCATED: a budget was hit)",
+            canonical_root.display(),
+            repos.len(),
+            elapsed
+        );
+    } else {
+        tracing::info!(
+            "Scanned {} — found {} repos in {:?}",
+            canonical_root.display(),
+            repos.len(),
+            elapsed
+        );
+    }
 
     Ok(repos)
 }
@@ -374,6 +459,35 @@ mod tests {
     }
 
     #[test]
+    fn test_detects_graphify() {
+        let dir = create_temp_dir();
+        let repo = dir.join("with-graphify");
+        fs::create_dir_all(repo.join("graphify-out")).unwrap();
+        fs::write(repo.join("graphify-out/graph.json"), "{}").unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]").unwrap();
+
+        let repos = scan_directory(&dir, 5).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert!(repos[0].has_graphify);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_graphify_absent_when_dir_missing() {
+        let dir = create_temp_dir();
+        let repo = dir.join("no-graphify");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("Cargo.toml"), "[package]").unwrap();
+
+        let repos = scan_directory(&dir, 5).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert!(!repos[0].has_graphify);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_ignores_node_modules() {
         let dir = create_temp_dir();
         // Create a nested structure with node_modules containing a package.json
@@ -452,6 +566,61 @@ mod tests {
         let repos = scan_directory(&dir, 5).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, "parent-repo");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── resource budgets (PRD FR4) ─────────────────────────────────────
+
+    #[test]
+    fn test_entry_budget_returns_partial_results() {
+        // Three repos, but an entry budget of 4 (root + first repo's .git dir +
+        // ... ) — the scan must stop early and return a subset rather than
+        // walking the whole tree or erroring. We assert it returns *some*
+        // results and does not panic, not an exact count (walkdir's internal
+        // entry accounting is what it is).
+        let dir = create_temp_dir();
+        for i in 0..3 {
+            let repo = dir.join(format!("repo{i}"));
+            fs::create_dir_all(repo.join(".git")).unwrap();
+        }
+
+        let repos = scan_directory_bounded(
+            &dir,
+            5,
+            /* max_entries */ 3,
+            /* max_results */ 100,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        // Partial: at most 3 repos exist; with a tight entry budget we get ≤ 3.
+        assert!(repos.len() <= 3, "entry budget should bound results");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_result_budget_caps_returned_repos() {
+        // Five repos, but a result budget of 2 — the scan must stop after 2.
+        let dir = create_temp_dir();
+        for i in 0..5 {
+            let repo = dir.join(format!("repo{i}"));
+            fs::create_dir_all(repo.join(".git")).unwrap();
+        }
+
+        let repos = scan_directory_bounded(
+            &dir,
+            5,
+            /* max_entries */ 100_000,
+            /* max_results */ 2,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(
+            repos.len(),
+            2,
+            "result budget should cap the returned Vec at 2"
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }

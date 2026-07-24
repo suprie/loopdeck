@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Download, Check, GitCommit, Layers } from "lucide-react";
+import { Download, Check, GitCommit, Layers, Network } from "lucide-react";
 import type { DiscoveredRepo } from "../../types";
 import { relativeTime } from "../../lib/time";
 
@@ -46,6 +46,15 @@ export const RepoCard = memo(function RepoCard({ repo, onImport }: RepoCardProps
           {repo.has_readme && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
               README
+            </span>
+          )}
+          {repo.has_graphify && (
+            <span
+              title="graphify-out/graph.json detected"
+              className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] text-[var(--primary)] font-mono inline-flex items-center gap-1"
+            >
+              <Network className="size-2.5" />
+              Graph
             </span>
           )}
         </div>

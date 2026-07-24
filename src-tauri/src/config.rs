@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::persist;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,18 @@ pub struct AgentConfig {
     pub auth_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Presence flag for a token stored in the local secrets file (`secrets`
+    /// module).
+    ///
+    /// Populated *only* on the `get_agent_config` read path so the UI can show
+    /// a "token stored" affordance without the plaintext ever crossing to the
+    /// renderer. It is **never** persisted to `config.yaml`: every path that
+    /// saves the config leaves it `false` (the default), so
+    /// `skip_serializing_if = "is_false"` keeps it out of the file. It is also
+    /// ignored on the `set_agent_config` write path, where presence is always
+    /// recomputed from the secrets file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_auth_token: bool,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -31,6 +44,7 @@ impl std::fmt::Debug for AgentConfig {
                 },
             )
             .field("effort", &self.effort)
+            .field("has_auth_token", &self.has_auth_token)
             .finish()
     }
 }
@@ -123,12 +137,27 @@ pub struct ProjectEntry {
     /// Older configs without this field deserialize to `Idle`.
     #[serde(default, skip_serializing_if = "is_run_state_idle")]
     pub run_state: RunState,
+    /// Per-project autonomous mode: when true, the agent self-approves
+    /// floor-clearing tool calls (Edit/Write, safe Bash, MCP, WebFetch) so
+    /// loops run unattended. The destructive floor still applies. Older
+    /// configs without this field deserialize to `false` (confirm-changes).
+    /// `skip_serializing_if` keeps the registry tidy for the common case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autonomous: bool,
 }
 
 /// serde `skip_serializing_if` predicate: omit `run_state` when `Idle` so the
 /// ephemeral field doesn't clutter the persisted YAML.
 fn is_run_state_idle(state: &RunState) -> bool {
     matches!(state, RunState::Idle)
+}
+
+/// serde `skip_serializing_if` predicate for `AgentConfig::has_auth_token`:
+/// omit the secrets-file-presence flag when false so it never clutters the
+/// persisted YAML — it is only ever `true` on the transient `get_agent_config`
+/// response clone, never on the config held in `Mutex<GlobalConfig>`.
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 impl Default for ProjectEntry {
@@ -146,6 +175,7 @@ impl Default for ProjectEntry {
             last_modified: None,
             uncommitted: UncommittedStats::default(),
             run_state: RunState::Idle,
+            autonomous: false,
         }
     }
 }
@@ -179,33 +209,153 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
-    /// Load global config from `~/.config/loopdeck/config.yaml`.
-    /// Returns a fresh default if the file does not exist.
+    /// Load global config from the platform config dir —
+    /// `~/Library/Application Support/com.loopdeck.LoopDeck/config.yaml` on
+    /// macOS (`~/.config/loopdeck/config.yaml` is the headless/Linux fallback).
+    ///
+    /// Recovery order (PRD FR2):
+    /// 1. Primary missing → fresh default (first launch).
+    /// 2. Primary parses → load it.
+    /// 3. Primary malformed → try the `.bak`. If it parses, load it and warn.
+    ///    The malformed primary is NOT overwritten.
+    /// 4. Both malformed/missing → `Err`. The caller MUST NOT silently
+    ///    overwrite the malformed primary with a fresh default — the file is
+    ///    preserved for manual recovery.
     pub fn load() -> Result<Self, AppError> {
         let config_path = Self::config_path()?;
+        Self::load_from_path(&config_path)
+    }
 
+    /// Test-friendly inner: same recovery logic as [`load`] but takes an
+    /// explicit primary path. The backup path is derived via [`backup_path`].
+    pub(crate) fn load_from_path(config_path: &Path) -> Result<Self, AppError> {
+        let backup = backup_path(config_path);
+
+        // Primary missing entirely → first launch.
         if !config_path.exists() {
             return Ok(Self::default());
         }
 
-        let contents = std::fs::read_to_string(&config_path)?;
-        let config: GlobalConfig = serde_yaml::from_str(&contents)?;
-        Ok(config)
+        // Primary exists — try to parse it.
+        let contents = std::fs::read_to_string(config_path)?;
+        match serde_yaml::from_str::<GlobalConfig>(&contents) {
+            Ok(config) => Ok(config),
+            Err(primary_err) => {
+                // Primary is malformed. Do NOT overwrite it. Try the backup.
+                tracing::warn!(
+                    "malformed registry at {}: {primary_err}",
+                    config_path.display()
+                );
+                if backup.exists() {
+                    let backup_contents = std::fs::read_to_string(&backup)?;
+                    match serde_yaml::from_str::<GlobalConfig>(&backup_contents) {
+                        Ok(config) => {
+                            tracing::warn!(
+                                "recovered registry from backup at {}",
+                                backup.display()
+                            );
+                            return Ok(config);
+                        }
+                        Err(backup_err) => {
+                            tracing::warn!(
+                                "backup at {} also malformed: {backup_err}",
+                                backup.display()
+                            );
+                        }
+                    }
+                }
+                // Both missing/malformed — surface the error, preserve the
+                // primary for manual recovery.
+                Err(AppError::Config(format!(
+                    "registry at {} is malformed and no valid backup was found; \
+                     the file has been preserved for manual recovery. Parse error: {primary_err}",
+                    config_path.display()
+                )))
+            }
+        }
     }
 
-    /// Save global config to `~/.config/loopdeck/config.yaml`.
-    /// Creates parent directories if needed.
+    /// Save global config to the platform config dir —
+    /// `~/Library/Application Support/com.loopdeck.LoopDeck/config.yaml` on
+    /// macOS (`~/.config/loopdeck/config.yaml` is the headless/Linux fallback).
+    ///
+    /// Crash-safe via [`persist::atomic_write`] (temp + fsync + same-dir
+    /// rename). Before overwriting, copies the existing primary to
+    /// `config.yaml.bak` so a malformed future primary can be recovered from
+    /// the backup.
+    ///
+    /// Also applies an owner-only permission floor (0600 on Unix) as
+    /// defense-in-depth: the auth token itself lives in the local secrets file
+    /// now (see `secrets`), but this file still holds provider config, so we
+    /// don't rely on the process umask to keep it private.
     pub fn save(&self) -> Result<(), AppError> {
         let config_path = Self::config_path()?;
+        self.save_to_path(&config_path)
+    }
 
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Test-friendly inner: same atomic-write + backup logic as [`save`] but
+    /// takes an explicit primary path.
+    pub(crate) fn save_to_path(&self, config_path: &Path) -> Result<(), AppError> {
+        // Preserve the current primary as last-known-good before overwriting.
+        // Best-effort: a missing primary (first launch) or a backup failure
+        // is logged but doesn't abort the save — the primary is the source of
+        // truth, the backup is a recovery floor.
+        if config_path.exists() {
+            let backup = backup_path(config_path);
+            if let Err(e) = std::fs::copy(config_path, &backup) {
+                tracing::warn!(
+                    "failed to update registry backup at {}: {e}",
+                    backup.display()
+                );
+            }
         }
 
         let contents = serde_yaml::to_string(self)?;
-        std::fs::write(&config_path, contents)?;
+        persist::atomic_write(config_path, &contents)?;
+        restrict_file_perms(config_path);
 
         Ok(())
+    }
+
+    /// Migrate any plaintext `agent.auth_token` still present in the loaded
+    /// config into the local secrets file, scrubbing it from the in-memory
+    /// (and, on the next `save()`, on-disk) config.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — a token was moved; the caller should `save()` so the
+    ///   plaintext copy is gone from disk.
+    /// - `Ok(false)` — nothing to migrate (no agent block, or no/empty token).
+    /// - `Err` — a token was present but the secrets file write failed. The
+    ///   token is put back in place so it is not silently lost; the caller
+    ///   should keep it in the 0600 file as the interim floor rather than drop
+    ///   it.
+    pub fn migrate_auth_token_to_secrets_file(&mut self) -> Result<bool, AppError> {
+        let Some(agent) = self.agent.as_mut() else {
+            return Ok(false);
+        };
+        // Only a non-empty token is a real credential worth moving. `None` and
+        // an empty string are left untouched — checked *before* mutating so an
+        // empty value isn't silently cleared.
+        let Some(token) = agent.auth_token.as_deref() else {
+            return Ok(false);
+        };
+        if token.is_empty() {
+            return Ok(false);
+        }
+        let token = token.to_string();
+        // Scrub from config first, then store. If the secrets file rejects it
+        // we restore the token so it is never silently lost.
+        agent.auth_token = None;
+        match crate::secrets::store_auth_token(&token) {
+            Ok(()) => {
+                debug!("migrated plaintext auth token from config.yaml to local secrets file");
+                Ok(true)
+            }
+            Err(e) => {
+                agent.auth_token = Some(token);
+                Err(e)
+            }
+        }
     }
 
     /// Find a project entry by path.
@@ -236,7 +386,10 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Path to the config directory: `~/.config/loopdeck/`
+    /// Path to the config directory. Platform-resolved via
+    /// `directories::ProjectDirs::config_dir()`: `~/Library/Application
+    /// Support/com.loopdeck.LoopDeck/` on macOS, `~/.config/loopdeck/` on
+    /// Linux / as the headless fallback.
     pub fn config_dir() -> Result<PathBuf, AppError> {
         let dir = directories::ProjectDirs::from("com", "loopdeck", "LoopDeck")
             .map(|dirs| dirs.config_dir().to_path_buf())
@@ -248,10 +401,38 @@ impl GlobalConfig {
         Ok(dir)
     }
 
-    /// Full path to the config file: `~/.config/loopdeck/config.yaml`
+    /// Full path to the config file: `<config_dir>/config.yaml`
     pub fn config_path() -> Result<PathBuf, AppError> {
         Ok(Self::config_dir()?.join("config.yaml"))
     }
+}
+
+/// Lock the config file down to owner-only. Best-effort: a failure here is
+/// logged but not fatal (the file's contents are no longer secret once the
+/// auth token has moved to the local secrets file; this is defense-in-depth).
+#[cfg(unix)]
+fn restrict_file_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("failed to set 0600 on {}: {e}", path.display());
+    }
+}
+
+/// No-op on non-Unix: the config file lives under `%APPDATA%` / `~/Library`,
+/// which the OS already scopes to the current user via ACLs. There is no
+/// portable `chmod` equivalent.
+#[cfg(not(unix))]
+fn restrict_file_perms(_path: &Path) {}
+
+/// Sibling `.bak` path for a registry primary: `config.yaml` → `config.yaml.bak`.
+/// Lives in the same directory so a cross-device rename can never be an issue.
+fn backup_path(primary: &Path) -> PathBuf {
+    let mut name = primary
+        .file_name()
+        .expect("registry path has a file name")
+        .to_os_string();
+    name.push(".bak");
+    primary.with_file_name(name)
 }
 
 /// Fallback to `~/.config/loopdeck` using the `dirs` crate (part of `directories`).
@@ -560,6 +741,7 @@ projects:
             base_url: Some("https://api.example.com/v1".into()),
             model: Some("claude-opus-4-8".into()),
             effort: Some("max".into()),
+            ..Default::default()
         };
 
         let config = GlobalConfig {
@@ -586,6 +768,7 @@ projects:
             base_url: None,
             model: Some("claude-haiku-4-5".into()),
             effort: None,
+            ..Default::default()
         };
 
         let config = GlobalConfig {
@@ -612,6 +795,7 @@ projects:
             base_url: Some("https://api.anthropic.com".into()),
             model: None,
             effort: None,
+            ..Default::default()
         };
 
         let debug_str = format!("{:?}", agent);
@@ -627,9 +811,108 @@ projects:
             base_url: None,
             model: None,
             effort: None,
+            ..Default::default()
         };
         let debug_no_token = format!("{:?}", agent_no_token);
         assert!(debug_no_token.contains("None"));
+    }
+
+    #[test]
+    fn test_has_auth_token_not_persisted_to_yaml() {
+        // The presence flag must never reach config.yaml. With `skip_serializing_if
+        // = "is_false"` it is omitted when false — and every save path leaves it
+        // false. Verify a saved config carries no `has_auth_token` key.
+        let agent = AgentConfig {
+            auth_token: None,
+            base_url: Some("https://api.anthropic.com".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            effort: None,
+            has_auth_token: false,
+        };
+        let config = GlobalConfig {
+            agent: Some(agent),
+            projects: vec![],
+            settings: Settings::default(),
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(!yaml.contains("has_auth_token"));
+    }
+
+    #[test]
+    fn test_has_auth_token_round_trips_on_wire_but_not_from_yaml() {
+        // On the IPC wire (serde_json) the flag CAN be true so the frontend
+        // learns a token is stored. It deserializes back faithfully here.
+        let agent = AgentConfig {
+            auth_token: None,
+            base_url: None,
+            model: Some("claude-sonnet-4-5".into()),
+            effort: None,
+            has_auth_token: true,
+        };
+        let json = serde_json::to_string(&agent).unwrap();
+        assert!(json.contains("has_auth_token"));
+        let back: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.has_auth_token);
+
+        // But a YAML config file that never wrote the flag deserializes to
+        // the default (false) — old configs keep working.
+        let yaml = r#"
+agent:
+  model: claude-sonnet-4-5
+"#;
+        let cfg: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.agent.unwrap().has_auth_token);
+    }
+
+    // ── migrate_auth_token_to_secrets_file (offline no-op paths) ──
+    //
+    // The "token present" branch writes to the real secrets file
+    // (`<config_dir>/agent_token`), so it is not exercised here. The
+    // underlying store/load round-trip is covered hermetically by
+    // `secrets::tests::file_backend_roundtrip`. These tests exercise only the
+    // early-return paths that never touch the secrets file.
+
+    #[test]
+    fn migrate_noop_when_no_agent_block() {
+        let mut config = GlobalConfig::default();
+        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
+        assert!(config.agent.is_none());
+    }
+
+    #[test]
+    fn migrate_noop_when_token_none() {
+        let mut config = GlobalConfig {
+            agent: Some(AgentConfig {
+                auth_token: None,
+                base_url: Some("https://api.anthropic.com".into()),
+                model: Some("claude-sonnet-4-5".into()),
+                effort: None,
+                has_auth_token: false,
+            }),
+            ..Default::default()
+        };
+        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
+        assert!(config.agent.as_ref().unwrap().auth_token.is_none());
+    }
+
+    #[test]
+    fn migrate_noop_when_token_empty() {
+        let mut config = GlobalConfig {
+            agent: Some(AgentConfig {
+                auth_token: Some(String::new()),
+                base_url: None,
+                model: None,
+                effort: None,
+                has_auth_token: false,
+            }),
+            ..Default::default()
+        };
+        // Empty string is treated as "no token" — must not touch the secrets file.
+        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
+        assert_eq!(
+            config.agent.as_ref().unwrap().auth_token.as_deref(),
+            Some("")
+        );
     }
 
     // ── RunState / UncommittedStats tests ──
@@ -673,5 +956,164 @@ created_at: "2025-01-01T00:00:00Z"
         let entry: ProjectEntry = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(entry.uncommitted, UncommittedStats::default());
         assert_eq!(entry.run_state, RunState::Idle);
+    }
+
+    // ── Phase 2: atomic-write + backup recovery ──────────────────────────
+
+    /// Unique test dir keyed by name + PID + nanos so parallel tests can't
+    /// race on shared parents.
+    fn phase2_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "loopdeck-config-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_returns_default_when_primary_missing() {
+        // First-launch case: no primary, no backup → fresh default, no error.
+        let dir = phase2_dir("missing_primary");
+        let primary = dir.join("config.yaml");
+        let config = GlobalConfig::load_from_path(&primary).unwrap();
+        assert!(config.projects.is_empty());
+        assert!(config.agent.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_recovers_from_backup_when_primary_malformed() {
+        // PRD FR2: a malformed primary MUST NOT be silently overwritten. The
+        // backup is loaded instead, and the malformed primary is preserved
+        // on disk for manual inspection.
+        let dir = phase2_dir("recover_from_bak");
+        let primary = dir.join("config.yaml");
+        let backup = dir.join("config.yaml.bak");
+
+        // Seed a valid backup carrying an identifiable model value, then a
+        // genuinely malformed primary (an unclosed flow sequence —
+        // `:::not yaml:::` parses as an empty document under serde_yaml's
+        // lenient scalar rules, so use something it actually rejects).
+        std::fs::write(&backup, "agent:\n  model: backup-model\n").unwrap();
+        std::fs::write(&primary, "agent: [unclosed").unwrap();
+
+        let config = GlobalConfig::load_from_path(&primary).unwrap();
+        assert_eq!(
+            config.agent.and_then(|a| a.model),
+            Some("backup-model".into()),
+            "should recover the backup's contents"
+        );
+
+        // The malformed primary must still be on disk, unchanged — not
+        // overwritten by the recovery.
+        assert_eq!(
+            std::fs::read_to_string(&primary).unwrap(),
+            "agent: [unclosed",
+            "malformed primary must be preserved for manual recovery"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_errors_when_both_primary_and_backup_malformed() {
+        // If neither primary nor backup parses, surface an error rather than
+        // silently defaulting. lib.rs startup turns this into a visible exit.
+        let dir = phase2_dir("both_bad");
+        let primary = dir.join("config.yaml");
+        let backup = dir.join("config.yaml.bak");
+
+        std::fs::write(&primary, "agent: [unclosed").unwrap();
+        std::fs::write(&backup, "{ invalid: ").unwrap();
+
+        let result = GlobalConfig::load_from_path(&primary);
+        assert!(
+            result.is_err(),
+            "should error when neither primary nor backup parses"
+        );
+
+        // Both files must still be on disk, unchanged.
+        assert_eq!(
+            std::fs::read_to_string(&primary).unwrap(),
+            "agent: [unclosed"
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{ invalid: ");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_creates_backup_before_overwriting() {
+        // Every save must preserve the previous primary as .bak, so a future
+        // malformed primary can be recovered.
+        let dir = phase2_dir("save_makes_bak");
+        let primary = dir.join("config.yaml");
+        let backup = dir.join("config.yaml.bak");
+
+        // Initial state: a primary with an identifiable model, no backup.
+        std::fs::write(&primary, "agent:\n  model: old-model\n").unwrap();
+
+        let mut config = GlobalConfig::load_from_path(&primary).unwrap();
+        // Mutate + save.
+        config.agent = Some(AgentConfig {
+            base_url: None,
+            model: Some("new-model".into()),
+            auth_token: None,
+            effort: None,
+            has_auth_token: false,
+        });
+        config.save_to_path(&primary).unwrap();
+
+        // The backup should now hold the OLD primary contents.
+        assert!(backup.exists(), "save must create a .bak sibling");
+        let backup_contents = std::fs::read_to_string(&backup).unwrap();
+        assert!(
+            backup_contents.contains("old-model"),
+            "backup should hold the pre-save primary, got: {backup_contents}"
+        );
+
+        // The primary should hold the NEW contents.
+        let primary_contents = std::fs::read_to_string(&primary).unwrap();
+        assert!(
+            primary_contents.contains("new-model"),
+            "primary should hold the new save, got: {primary_contents}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_is_atomic_no_truncated_primary_on_temp_left_behind() {
+        // If a prior crashed write left a stale temp in the target's dir, a
+        // subsequent save must still produce a complete primary. (Reassoc
+        // check: the temp-suffix includes the PID, so a stale temp from a
+        // different PID never conflicts.)
+        let dir = phase2_dir("stale_temp");
+        let primary = dir.join("config.yaml");
+        let stale_temp = dir.join("config.yaml.999999.tmp");
+
+        std::fs::write(&primary, "agent:\n  model: original\n").unwrap();
+        std::fs::write(&stale_temp, "stale temp from a crashed prior run").unwrap();
+
+        let config = GlobalConfig::default();
+        config.save_to_path(&primary).unwrap();
+
+        // Primary must be valid YAML (the save succeeded atomically) — and
+        // the stale temp from the other PID must be untouched (not renamed
+        // over by mistake).
+        GlobalConfig::load_from_path(&primary)
+            .unwrap_or_else(|e| panic!("primary should parse after save despite stale temp: {e}"));
+        assert_eq!(
+            std::fs::read_to_string(&stale_temp).unwrap(),
+            "stale temp from a crashed prior run",
+            "stale temp from another PID must not be touched"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

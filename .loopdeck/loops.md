@@ -3,36 +3,91 @@
 ## Current
 
 - **Started**: 2026-07-05
-- **Goal**: Make LoopDeck production-ready. Phase 1 (security stop-the-bleeding)
-  is done; Phases 2-6 remain — distribution, hardening, quality gates, docs/policy,
-  and UX polish. Audit was a three-pronged review (Rust backend, React frontend,
-  ops/tooling) that produced the action items below.
+- **Goal**: Ship a hardened private alpha on one explicitly supported OS. The
+  release gate is intentionally narrow: honest agent permissions, crash-safe
+  critical state, bounded project/agent input, deterministic interruption
+  recovery, basic CI, and a documented install/upgrade path. Public V0.1 adds a
+  small cross-boundary regression suite — signed/notarized artifacts were
+  dropped for cost (see the 2026-07-20 decision). Broader product maturity work
+  remains tracked but does not block the alpha.
 - **Status**: in_progress
+- **Last completed**: 2026-07-24 — Closed the **Gate C "End-to-end smoke"** step (per user confirmation): the orchestrator end-to-end sequence now runs — Phase 6 verify report → draft PR body → created PR URL; a BLOCK verdict gates the PR step; and `/loopdeck:open-pr` works standalone on a throwaway branch. **Gate C is complete (all five steps closed); with Gates A and B already done, all three release gates (A/B/C) are now closed** — the alpha's narrow release definition is satisfied. Remaining tracked work is the non-gate backlog (P2/P3/P5/P6) and the optional full `.agents/`↔`templates/` skills-copy merge. Previous milestone (2026-07-24): Closed the **Gate C "Orchestrator wiring"** step. Rewired `.agents/skills/loopdeck-orchestrator/SKILL.md` from 6 → **7 phases**: new **Phase 6 "Verify Against PRD"** (invokes the read-only `prd-verifier`; FAIL→BLOCK / PARTIAL→WARN / all-PASS→PASS roll-up; verdict table gates the next phase — PASS→proceed, WARN→fix+reverify, BLOCK→return to Phase 3, non-goals scope creep = a flag not a FAIL; re-verify every rework loop) and **old Phase 6 → Phase 7 "Decide & Open PR"** (outcome table keyed on the verify verdict; new **green-verdict-only `open-pr` branch** — `open-pr` NOT called on WARN/BLOCK). Also updated the ASCII flow diagram (new Phase 6 + renumbered Phase 7 boxes, borders flush via a Python `ljust(54)` generator aligning the `→` with the existing `↔`), the header arrow chain + intro (`… → Stitch → Verify → Ship`), the Phase 2 plan-template final rows (Phase 6 "Verify Against PRD" w/ `prd-verifier`; Phase 7 "Decide & Open PR" w/ `open-pr`), and the Memory Convention cross-refs (Phase 6→7). Grep-confirmed no stale `Decide Next Phase`/final-`Phase 6` refs. Skill-text only — no `cargo`/`tsc` gate. **DIVERGENCE FLAGGED (not fixed — out of scope):** the orchestrator skill lives in two divergent, separately-tracked copies — `.agents/skills/loopdeck-orchestrator/` (canonical per the Gate C PRD; where the whole epic landed) and `templates/skills/loopdeck-orchestrator/` (declared SSOT by the 2026-07-24 "templates is SSOT" decision, and the target of the **live** `.claude/skills/loopdeck-orchestrator` symlink). Drift is two-way: `.agents/` has the Gate C wiring but not the `templates/`-only "Worktree Discipline" section; `templates/` has Worktree Discipline but still "6. Decide Next Phase". Net effect: the orchestrator `/loopdeck:orchestrator` actually invokes (`.claude/` → `templates/`) does **not** yet run verify→ship. Per the task's explicit "`.agents/skills/` only" scope and `templates/`'s pre-existing unrelated WIP, it was not synced here. **Follow-up:** reconcile the two copies (and decide whether the `.agents/`-only `open-pr`/`prd-verifier` should also live in `templates/`) and resolve which root is canonical so the wiring is effective in the invoked skill. **RESOLVED same day (option 1):** the same wiring was applied to `templates/skills/loopdeck-orchestrator/SKILL.md` (+ Worktree Phase 6→7 fix), so the **live** orchestrator (`/loopdeck:orchestrator` → `.claude/skills/` → `templates/`) now runs verify→ship (phase headings 1–7, no stale refs; only benign one-way drift: `.agents/` lacks templates' Worktree + Epic/PRD sections). Next unchecked Gate C step: "End-to-end smoke." See decision of same date. Previous milestone (2026-07-24): Closed the **Gate C "`loopdeck:prd-verifier` skill"** step. Created **`.agents/skills/loopdeck-prd-verifier/SKILL.md`** — a read-only, stack-agnostic skill (`allowed-tools: [Read, Glob, Grep, Bash]`, no Edit/Write/Agent — epic ADR-4) with a five-phase flow: parse the PRD's acceptance criteria (verbatim; synthesize + flag if unlabeled) → identify changed files → per-criterion check → non-goals audit → report. Verdict roll-up: any FAIL → BLOCK, any PARTIAL → WARN, all PASS → PASS, surfaced as one greppable token so the orchestrator's new Phase 6 verdict table can key off it. Four judgment calls settled beyond the PRD: (1) **diff base auto-detects the default branch** (`git symbolic-ref refs/remotes/origin/HEAD`, fall back to `main`), three-dot merge base `git diff --name-only <default>...HEAD`, with a `git status --porcelain` working-tree fallback when run *on* the default branch — generalizes the PRD's `main...HEAD` to `master` repos without the deferred optional diff-base arg; (2) the **per-stack build-artifact filter is composed from only the detected stacks'** ignore dirs (Rust+Node → `target|node_modules|dist|build|.next`), not the universal union, so a Node repo's legit `vendor/assets/` isn't dropped for sharing Go's `vendor/` name — each name anchored as a path component `(^|/)...(/|$)`; (3) **evidence is searched in the changed-file set first, and unchanged-file-only evidence is flagged** (usually PARTIAL) since the change under review doesn't itself satisfy the criterion — no evidence → FAIL; (4) **behavioral criteria needing execution → PARTIAL with a "verify by running" note** (reusing the `open-pr` marker→test-command table), never a bare PASS, since the skill can't run code. The marker→ignore-set table mirrors `open-pr`'s 13 stacks + .NET. The non-goals audit is a **flag, not a FAIL** (surface scope creep for the user to retract/amend, matching the orchestrator's "don't guess" posture). **Verified:** frontmatter parses (matches the `loopdeck:`-prefix + one-skill-per-directory convention); the read-only Bash snippets (default-branch resolution, `git diff --name-only main...HEAD`, the per-stack `grep -vE` filter) were exercised against this real Rust+Node repo — the diff returns a real source set with no `target/`/`node_modules/` rows (gitignored/untracked), confirming the skill's note that the per-stack filter is load-bearing mainly for the on-default-branch working-tree fallback. Skill text only (no Rust/frontend change), so `cargo`/`tsc` gates do not apply. Next unchecked Gate C step: "Orchestrator wiring." See decision + `## Current` of same date. Previous milestone (2026-07-24): Closed the **Gate C "Auto-commit hook point"** step. Decided **`open-pr` owns the entire stage → commit → push → publish tail** (superseding the PRD lean "orchestrator keeps `git add`, `open-pr` commits" — `open-pr` owns *both*, because it produces the verified scope the commit message is authored from and is independently invocable standalone). New `open-pr` Phase 5 ("Commit Uncommitted Work + Push") runs **only after** the Phase 4 body confirmation: `git add -A` → `git commit -m <title> -m <Summary>` (only if the tree is dirty; the message is the **verified scope** — the same title + Summary the user just confirmed, so the commit and the PR describe the feature identically; a clean tree skips the commit) → `git push -u origin HEAD` (the only outward-facing action before `gh pr create`, gated by the body confirm; `-u origin HEAD` works for first and subsequent pushes). Pre-flight 1c changed from "upstream is pushed" to "remote `origin` exists" since `open-pr` is now the pusher. Phase 2 captures `git status --porcelain`; Phase 4 discloses uncommitted files + the exact commit message at the gate (honesty backstop for `git add -A`); a nothing-to-ship guard aborts early. **No squash / no history rewrite / no force-push** — WIP commits push as-is, the human picks the merge strategy at merge time (resolves the PRD squash open-question with its own "suggest, never execute" lean). The orchestrator's Phase 5 one-line commit nudge became a hand-off to `open-pr` (it no longer `git add`s/commits/pushes). **Supersedes** the 2026-07-23 `open-pr` decision's "no commit/push, owned by the orchestrator" clause + its "upstream pushed" pre-flight. The **full orchestrator renumber** (new Phase 6 verify / Phase 6→7 / ASCII diagram / Phase 2 template / Memory refs) remains the separate "Orchestrator wiring" step. **Verified:** both `SKILL.md` frontmatters parse; `open-pr` phases renumbered 1–7; no stale "upstream pushed / out of scope / owned by the orchestrator" references; orchestrator's only commit reference is the reframed Phase 5 hand-off; skill-text only (no `cargo`/`tsc` gate). See decision of same date. Previous milestone (2026-07-23): Closed the first **Gate C (Auto-commit + Pull Request)** step: the **`loopdeck:open-pr` skill** at `.agents/skills/loopdeck-open-pr/SKILL.md`. A stack-agnostic, independently-invocable skill (`allowed-tools: [Read, Bash, Grep]`) that closes the orchestrator's "stage files" → "open a PR" gap. It runs three pre-flight checks (`gh auth status`, branch ≠ `main`/`master`, upstream pushed) each aborting with a one-line remediation; gathers read-only context (`git log main..HEAD --oneline`, `git diff --stat main...HEAD`, `.loopdeck/decisions.md` most-recent 3, `loops.md ## Current`); drafts a PR body (Summary / What changed / PRD / Decisions / Test plan) whose **Test plan is inferred from build markers** via a 13-row table (Go, Rust, Node, Android/JVM, Maven, PHP, Swift, iOS, Ruby, Python, Elixir, Python-requirements-only + unknown fallback — never hardcoded to one stack, since LoopDeck imports any of them); prints the body for an explicit **proceed/edit/abort** confirmation gate (the only thing between a drafted body and a public publish); then runs `gh pr create --title … --body-file … --web` and appends the returned URL to `loops.md ## Next Steps` via a portable `awk` insert. The body tmpfile and the loops.md insert are both Bash by design — the skill has no Edit/Write/Agent. It honors the explicit `gh pr create --web` instruction (human gets a final in-browser review click) and documents the headless alternative for when a real `…/pull/N` URL is wanted for the memory write. **Verified:** frontmatter parses and matches the `loopdeck:`-prefix + one-skill-per-directory convention; the six-phase flow reviewed against the PRD (`docs/epics/agent-full-access/prd-verify-and-ship-skills.md` Phase 2). The three remaining Gate C steps (Auto-commit hook point, `prd-verifier` skill, orchestrator wiring + end-to-end smoke) are untouched. See decision of same date. Previous milestone (2026-07-23): Closed the final Gate B step "Persist only navigation identifiers/preferences in Zustand; reload project and run state from Rust." The Zustand `loopdeck-nav` persisted slice stopped storing the full `ProjectEntry` and now persists only `selectedProjectPath` + `detailTab`; the live entry (incl. `run_state`) is derived via a new `selectSelectedProject` selector off the Rust-backed `projects` list — closing schema drift and frozen-run-state defects, and letting the `loadProjects` reconcile block be deleted. Bumped persisted-store `version` 0→1 with a `migrate` so existing users keep their last-opened project. **Gate B is now complete** — all six Public V0.1 steps are closed; the next unchecked work is Gate C (Auto-commit + Pull Request). **Verified:** `npx tsc --noEmit` clean; `npm run build` clean. See decision of same date. Previous milestone (2026-07-23): Closed the Gate B step "Provide user-accessible diagnostics and bounded log retention." Bounded the daily rolling appender (legacy `rolling::daily(..)` → `RollingFileAppender::builder().rotation(DAILY).filename_prefix("loopdeck.log").max_log_files(MAX_LOG_FILES)` where `MAX_LOG_FILES = 14`; verified in the `tracing-appender 0.2.5` source that `max_log_files` prunes **at startup (construction) and on each rollover**, so the bound holds even after an offline gap — `filename_prefix` keeps the `loopdeck.log.YYYY-MM-DD` naming and existing files/docs valid; `rolling_appender_max_log_files_caps_retention` test proves it end-to-end). Made logs user-accessible by wiring up the formerly-dead `logging::log_dir()` — new `LogInfo`/`LogFileInfo` types + a pure tested `collect_log_info_in(dir)`; `get_log_info`/`reveal_log_dir` commands (argv-only OS opener, no shell) in `config_cmds.rs`, registered in `lib.rs`; frontend `getLogInfo`/`revealLogDir` wrappers + a **Settings → Diagnostics** card (path, "N files · X KB · keeping the last 14 daily logs", "Open logs folder", stderr-only fallback). The reader enumerates **names/sizes only, never contents**. Pinned "auth_token never logged" with `logging::tests::agent_config_debug_never_renders_token` — grep confirmed no tracing macro interpolates the value (the 3 hits are lifecycle messages), and the only structural path is `tracing`'s `{:?}` which uses the redacting `AgentConfig::Debug`. `docs/alpha-distribution.md` §8 corrected (it claimed "not auto-purged" / "not yet wired into the UI" — both now false); the mirroring P2 item marked `[x]`. **Verified:** fmt/clippy(lib)/test(344 pass, 4 new)/tsc/build all green. **Pre-existing & unrelated, flagged not fixed:** `clippy --all-targets -D warnings` errors in `agents.rs:1406-1408` test code (`ResponseAccumulator::ingest_event` `#[must_use]`; the green gate is the lib target); `epic::tests::test_dogfood_parses_this_repos_epic` expects 3 PRDs but this repo now has 4 (Gate C content drift — confirmed failing on clean HEAD). Next unchecked Gate B step: "Persist only navigation identifiers/preferences in Zustand." See decision of same date. Previous milestone (2026-07-23): Closed the Gate B step "Add `LICENSE` and `SECURITY.md` with the agent/subprocess threat model and vulnerability-reporting path." `LICENSE` is MIT ("LoopDeck Contributors", 2026) with the `license` field wired into both `package.json` (`"license": "MIT"`) and `src-tauri/Cargo.toml` (`license = "MIT"`) in the same change — a bare LICENSE with no SPDX field is invisible to npm/cargo/license tooling. `SECURITY.md` is the full agent/subprocess threat model: a supported-versions table (0.1.x only), private vuln-reporting via GitHub Security Advisories (`github.com/suprie/loopdeck/security/advisories/new`, 5-business-day ack, explicit in/out-of-scope + log-redaction), a trust-model table, **seven threats T1–T7** each paired with the real mitigation module + its residual risk (T1 subprocess/PATH hijack → `binary` `OnceLock` abs-path resolution; T2 destructive agent action → `--permission-mode default` + 4-arm `answer_control_request` + destructive floor + `ConfirmChanges`; T3 traversal/symlink escape → `paths` containment; T4 unbounded-input DoS → `limits` budgets; T5 auth-token exposure → `0600` `agent_token`; T6 crash/corrupt state → atomic-write + `.bak`; T7 unsigned-build provenance), the "prompt injection is inherent (LoopDeck mitigates actions, not reasoning)" caveat, and a where-your-data-lives table. Every cited symbol was verified against the code — `claude_session.rs:358` is `--permission-mode default`, **not** the stale `acceptEdits` the P5 wording assumed; the SECURITY.md and P5 line were corrected accordingly. `cargo metadata --manifest-path …/Cargo.toml --no-deps` exit 0; `package.json` parses. Also marked the two P5 mirror items `[x]`. Next unchecked Gate B steps: "Provide user-accessible diagnostics and bounded log retention" and "Persist only navigation identifiers/preferences in Zustand." See decision of same date. Previous milestone (2026-07-23): Closed the first **Gate B (Public V0.1)** step: "Define the release artifact pipeline and smoke-test installation plus upgrade/reinstall behavior." Two deliverables landed. (1) `docs/release-pipeline.md` is the **build/release contract** (companion to the `docs/alpha-distribution.md` install contract): names the one SUPPORTED artifact (macOS arm64 `.dmg`) vs. two EXPERIMENTAL (Linux `.deb`/`.AppImage`, Windows `.exe`/`.msi`), pins version-in-three-places-that-must-agree (`package.json`/`tauri.conf.json`/`Cargo.toml` = `0.1.0`), documents local-vs-CI parity, the five-stage pipeline, the cut-a-release checklist, and the re-enable-signing runbook. `.github/workflows/build.yml` already implements it (`v*` tag → `tauri-action`, macOS arm64 SUPPORTED; signing env vars *omitted* not blanked so the bundler skips signing). (2) **`scripts/smoke-test-release.sh`** is the automated half of the §6 smoke — hermetic mode (default, portable) builds synthetic `.app` skeletons and proves the core "state lives outside the bundle" invariant reduces to a file-system check (install/upgrade/reinstall/rollback never touch the config dir, registry, `agent_token`, or per-repo `.loopdeck/` — byte-for-byte via a path+content `shasum` digest); `--app`/`--dmg` modes additionally assert real bundle structure and (for `--dmg`) `hdiutil` mount/copy/unmount. The rollback step simulates a corrupted registry and proves `cp config.yaml.bak config.yaml` restores the last-known-good. Runs entirely in `mktemp` + `EXIT` trap (never touches real user dirs); fail-stop on first broken invariant. **Verified**: 11/11 assertions in both hermetic and `--app`-against-the-real-`src-tauri/target/release/bundle/macos/LoopDeck.app` runs. Manual GUI sign-off (§6b) remains a separate human step. See decision of same date. Previous milestone: 2026-07-22 — Fixed recurring "Interrupted" bubbles (were silently-timed-out *manual approvals*, not crashes): cross-project permission visibility (`list_pending_permissions`) + truthful `interrupt_kind` (`ApprovalTimeout`/`QuestionTimeout`) on `ConversationTurn`. Next unchecked Gate B steps: "Provide user-accessible diagnostics and bounded log retention" and "Persist only navigation identifiers/preferences in Zustand."
 
 ## Next Steps
 
-### P2 — Distribution (signing / notarization / updater)
-- [ ] Configure macOS signing identity in `tauri.conf.json` (`bundle.macOS.signingIdentity`) + Windows `certificateThumbprint`/`tsp` server; feed via CI secrets
-- [ ] Notarization: wire `APPLE_ID` / `APPLE_PASSWORD` / team ID into the macOS release pipeline
-- [ ] Updater: add `tauri-plugin-updater` config (`pubkey` + `endpoints`) and a `TAURI_SIGNING_PRIVATE_KEY`-based release workflow
-- [ ] Release CI: `tauri-apps/tauri-action` workflow producing signed `.dmg` / `.msi` / `.AppImage` + signed `latest.json`
-- [ ] Bundle metadata: fill in `bundle.publisher`, `bundle.category`, `bundle.copyright`, `bundle.shortDescription`
+### Release Gate A — Hardened private alpha
 
-### P3 — Hardening (correctness, robustness, secret hygiene)
-- [ ] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
-- [ ] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they currently run sync walkdir + git subprocess spawning inside `async` Tauri commands
-- [ ] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — move to `spawn_blocking` or kill+detach with tokio `wait`
-- [ ] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs:202`, `git.rs:68,91,114,144,162`) to defeat PATH hijack
-- [ ] Add a top-level React error boundary above `<App>` in `main.tsx` — pre-router crashes currently blank-screen with no recovery
-- [ ] Audit `expect()`/`unwrap()` under `panic = "abort"`; in particular `skills.rs:362` (a malformed user `settings.json` aborts the process on import) and `lib.rs:77`
+Source: [`docs/PRD-trust-boundary-hardening.md`](../docs/PRD-trust-boundary-hardening.md)
+
+- [x] **Honest permission default:** ship `ConfirmChanges` first; remove generated `Edit(*)`, `Write(*)`, and broad build-runner rules; align Claude spawn settings, LoopDeck policy, approval UI, and regression tests
+- [x] **Defer autonomous mode:** do not add per-project `AutonomousProject` configuration until the confirm-first path is proven usable; this is not an alpha blocker
+- [x] **Crash-safe critical state:** add one shared atomic-write helper and use it for the registry, `project.yaml`, `loops.md`, PRDs, and generated Claude settings
+- [x] **Recoverable registry:** keep one last-known-good backup and never overwrite a malformed primary registry with a fresh default
+- [x] **Central project boundary:** resolve every project-scoped IPC request through shared registered-root and contained-relative-path helpers; reject traversal and symlink escape
+- [x] **Bound untrusted work:** cap recursive scan depth/entries/time, file and NDJSON line sizes, `ResponseAccumulator` bytes/blocks, and parked approval/question duration
+- [x] **Minimal interruption recovery:** after restart or child failure, classify incomplete work as `interrupted`, clear stale busy/waiting state, and allow a new turn; persist a separate run record only if transcript-based recovery proves insufficient
+- [x] **Basic CI:** require `cargo fmt --check`, Clippy, `cargo test`, `npm ci`, and `npm run build`; start with the alpha's supported OS rather than a three-OS matrix
+- [x] **Clear current lint debt:** resolve existing Clippy failures before enabling `-D warnings`
+- [x] **Alpha distribution contract:** name the one supported OS and document installation, upgrade/reinstall, rollback, prerequisites, and diagnostic-log location — `docs/alpha-distribution.md`. macOS on Apple Silicon (arm64) is the one supported OS (unsigned `.dmg`, Gatekeeper bypass on install). Covers prerequisites (`claude` CLI + GUI-launch minimal-PATH caveat, `git` advisory, keychain auth token), install/upgrade/reinstall (manual `.app` replacement — state lives outside the bundle), rollback (restore prior `.app` + `config.yaml.bak` registry recovery), a "where your data lives" table, and the diagnostic log at `~/Library/Logs/LoopDeck/loopdeck.log.YYYY-MM-DD`. Linux/Windows artifacts from `build.yml` are explicitly out of scope (Gate B). Side-fix: corrected `config.rs` doc comments that claimed the registry was at `~/.config/loopdeck/` — on macOS `directories::ProjectDirs::config_dir()` actually resolves to `~/Library/Application Support/com.loopdeck.LoopDeck/` (`~/.config` is the Linux/headless fallback); the contract now states the real path. `cargo fmt --check` clean on config.rs. (The pre-existing untracked `graphify.rs` fmt diff noted when this step ran was resolved in a follow-up `cargo fmt` pass on 2026-07-22 — the Rust CI gates, `cargo fmt --check` and `cargo clippy -- -D warnings`, are now both green.)
+- [x] **Alpha smoke test:** manually verify import → start turn → approve/deny → interrupt → restart/recover on a packaged build
+
+### Release Gate B — Public V0.1
+
+- [x] **Define the release artifact pipeline and smoke-test installation plus upgrade/reinstall behavior** (2026-07-23) — Two deliverables: (1) `docs/release-pipeline.md` defines the **build/release contract** — the one supported artifact (macOS arm64 `.dmg`), version-in-three-places-that-must-agree (`package.json` / `tauri.conf.json` / `Cargo.toml`, all `0.1.0` today), the local-vs-CI build paths (same commands → faithful preview), the five-stage pipeline (trigger → frontend → Rust → bundle → publish → smoke), the cut-a-release checklist, and the re-enable-signing runbook (deferred per 2026-07-20). `.github/workflows/build.yml` already implements it (`v*` tag → `tauri-action`, signing env vars omitted so the bundler emits an unsigned `.dmg`, macOS arm64 SUPPORTED + Linux/Windows EXPERIMENTAL). (2) **`scripts/smoke-test-release.sh`** — the automated half of the §6 smoke. Hermetic mode (default, portable, no build) builds synthetic `.app` skeletons and proves the core "state lives outside the bundle" invariant reduces to a file-system check: none of install/upgrade/reinstall/rollback touches the config dir, registry, `agent_token`, or per-repo `.loopdeck/` (byte-for-byte, via a path+content `shasum` digest). Two extra modes — `--app <path>` and `--dmg <path>` — additionally assert the real bundle structure (`Contents/MacOS/LoopDeck` executable + `Contents/Info.plist`) and (for `--dmg`) mount/copy/unmount via `hdiutil`. The rollback step also simulates a corrupted registry and proves the documented `cp config.yaml.bak config.yaml` recovery restores the last-known-good registry. Runs entirely in a `mktemp` dir with an `EXIT` trap — never touches real `~/Library/Application Support/...`, `/Applications`, or any real `.loopdeck/`. Fail-stop: exits non-zero on the first broken invariant. **Verified**: hermetic mode (11 assertions) + `--app` mode against the existing real `src-tauri/target/release/bundle/macos/LoopDeck.app` (11 assertions) both pass. The manual GUI sign-off (§6b) remains a separate human step before announcing a release. See decision of same date.
+- [x] Add focused frontend tests for streaming, approval, and interruption state transitions
+- [x] Add one automated cross-boundary smoke test covering import → agent approval → interrupt/recovery
+- [x] **Add `LICENSE` and `SECURITY.md`** (2026-07-23) — `LICENSE` is MIT ("LoopDeck Contributors", 2026); `license` field added to `package.json` (`"license": "MIT"`) and `src-tauri/Cargo.toml` (`license = "MIT"`) in the same change so the SPDX field is machine-readable. `SECURITY.md` is the agent/subprocess threat model: supported versions (0.1.x only), private vuln reporting via GitHub Security Advisories (5-business-day ack, in/out-of-scope), trust-model table, seven threats (T1 subprocess/PATH hijack → `binary` abs-path `OnceLock`; T2 destructive action → `--permission-mode default` + 4-arm `answer_control_request` + destructive floor + `ConfirmChanges`; T3 traversal/symlink → `paths`; T4 DoS → `limits`; T5 token exposure → `0600` `agent_token`; T6 crash/corrupt state → atomic-write + `.bak`; T7 unsigned provenance), the "prompt injection is inherent" caveat, and a where-data-lives table. Every cited symbol verified in code; `claude_session.rs:358` is `default` (not `acceptEdits`). See ## Current + decision of same date.
+- [x] **Provide user-accessible diagnostics and bounded log retention** (2026-07-23) — Two coupled gaps closed. (1) **Retention is bounded:** the rolling appender moved off the legacy `rolling::daily(..)` helper onto `RollingFileAppender::builder().rotation(DAILY).filename_prefix("loopdeck.log").max_log_files(MAX_LOG_FILES)` with `MAX_LOG_FILES = 14`. Verified in the `tracing-appender 0.2.5` source that `max_log_files` prunes **both at startup (construction) and on each rollover**, so the bound holds even after an offline gap; `filename_prefix` keeps the `loopdeck.log.YYYY-MM-DD` naming and existing files/docs valid. Unit test `rolling_appender_max_log_files_caps_retention` seeds 12 files, caps at 7, asserts ≤7 survive. No runtime knob (the constant is the contract). (2) **Diagnostics are user-accessible:** the dead `logging::log_dir()` is now wired up — new `LogInfo`/`LogFileInfo` types + a pure, tested `collect_log_info_in(dir)` helper; two commands in `config_cmds.rs` (`get_log_info`, `reveal_log_dir` — argv-only OS opener, no shell) registered in `lib.rs`; frontend `getLogInfo`/`revealLogDir` wrappers + a **Settings → Diagnostics** card (path, "N files · X KB · keeping the last 14 daily logs", "Open logs folder" button, stderr-only fallback). The reader reads **names/sizes only, never contents**. (3) **auth_token never logged — pinned:** grep confirmed no tracing macro interpolates a token value (the 3 hits describe its *lifecycle*, not the value); the only structural path is `tracing`'s `{:?}` which uses the redacting `AgentConfig::Debug`; new `logging::tests::agent_config_debug_never_renders_token` locks it from the logger's side. `docs/alpha-distribution.md` §8 corrected (it claimed "not auto-purged" / "not yet wired into the UI" — both now false). Also marked the mirroring P2 item `[x]`. **Verified:** fmt/clippy(lib)/test(344 pass, 4 new)/tsc/build all green. **Pre-existing & unrelated, flagged not fixed:** `clippy --all-targets` errors in `agents.rs:1406-1408` test code (gate is lib target), and `epic::tests::test_dogfood_parses_this_repos_epic` (expects 3 PRDs, repo has 4 from Gate C — fails on clean HEAD). Next unchecked Gate B step: "Persist only navigation identifiers/preferences in Zustand." See decision of same date.
+- [x] **Persist only navigation identifiers/preferences in Zustand; reload project and run state from Rust** (2026-07-23) — The Zustand `loopdeck-nav` persisted slice stopped storing the **full** `ProjectEntry` and now persists only `selectedProjectPath` (which project) + `detailTab` (a preference). The live `ProjectEntry` — including its `run_state` (derived in Rust per `list_projects`) and git metadata — is **derived**, not persisted: a new `selectSelectedProject(state)` selector returns `projects.find(p => p.path === selectedProjectPath) ?? null`. It returns a stable reference (an element of the Rust-backed array, or `null`), so it's safe as a Zustand selector under default `Object.is`. `ProjectDetail` reads it via `useAppStore(selectSelectedProject)`. This closes two defects: (1) **schema drift** — a stale persisted object can no longer shadow the Rust list, so the `loadProjects` reconcile block (clear-on-removal + git-info refresh) and its `setSelectedProject`/`updateProjectInStore` bindings are now dead code and removed (a removed project resolves to `null` and a changed one is automatically current, both straight from Rust); (2) **frozen run state** — `run_state` was `skip_serializing_if = "is_run_state_idle"` but the *object* was still persisted, so after a restart the selected project could show a stale "working"/"waiting" instead of the truthful "idle"; it now always reflects the most recent `list_projects`. Consumers updated: `Dashboard.handleSelect`/`handleStart` set the path (not the object); `ProjectDetail` syncs `selectedProjectPath` from the route param (the route is the source of truth for *which* project; the store identifier survives restarts where memory history — `initialEntries: ["/"]` — does not); the `OverviewTab` child prop type moved off `ReturnType<typeof useAppStore.getState>["selectedProject"]` to a plain `ProjectEntry | null`. Store mutations (`addProject`/`removeProjectByPath`/`updateProject`/`updateProjectDescription`) now touch only `projects`; `removeProjectByPath` still nulls `selectedProjectPath` when it matches so the selection doesn't dangle. Bumped the persisted-store `version` 0→1 with a `migrate` that extracts the path from the legacy `selectedProject.path`, so an existing user's last-opened project survives the one-time shape change. **No Rust change** — `list_projects` already returns project + run state; the frontend just stopped persisting a parallel copy. Also marked the mirroring P6 item `[x]`. **Verified:** `npx tsc --noEmit` clean; `npm run build` clean. **Out of scope:** the sibling P6 item "Move module-level mutable `lastSelectedPath` (`AgentRunner.tsx:30`) into the Zustand store" is a separate state-ownership concern, not touched. See decision of same date.
+
+### Release Gate C — Auto-commit + Pull Request
+
+Source: [`docs/epics/agent-full-access/prd-verify-and-ship-skills.md`](../docs/epics/agent-full-access/prd-verify-and-ship-skills.md)
+
+Closes the orchestrator's build→verify→ship tail so an agent-led feature
+lands as a reviewable PR instead of a pile of staged files. Two focused,
+stack-agnostic skills (they operate on any imported project — Go, Android,
+PHP, iOS, Ruby, Python, Node, Rust, etc.), plus the orchestrator wiring that
+runs them in sequence. The full-access permission tier (Gate D candidate,
+same epic) is **not** a prerequisite — auto-commit + PR ship usefully under
+`ConfirmChanges` today.
+
+- [x] **`loopdeck:open-pr` skill** (2026-07-23) — `.agents/skills/loopdeck-open-pr/SKILL.md` created. Stack-agnostic skill with `allowed-tools: [Read, Bash, Grep]` (no Edit/Write/Agent). Three pre-flight checks (`gh auth status`, branch ≠ `main`/`master`, upstream pushed) each abort with a one-line remediation; read-only context gather (`git log main..HEAD --oneline`, `git diff --stat main...HEAD`, `.loopdeck/decisions.md` most-recent 3, `loops.md ## Current`); PR body template (Summary / What changed / PRD / Decisions / Test plan) with the **Test plan inferred from build markers** via a 13-row table (Go, Rust, Node, Android/JVM, Maven, PHP, Swift, iOS, Ruby, Python, Elixir, Python-requirements-only + unknown fallback — never hardcoded to one stack; multiple markers → one block per stack); explicit **proceed/edit/abort** confirmation gate before any publish; then `gh pr create --title … --body-file … --web`; appends the returned URL to `loops.md ## Next Steps` via a portable `awk` insert. The body tmpfile and the loops.md insert are both Bash by design (the skill has no Edit/Write). Honors the explicit `--web` instruction (final in-browser review) and documents the headless alternative (`gh pr create` without `--web` → real `…/pull/N` URL on stdout) for when a concrete PR URL is wanted for the memory write. Marker detection uses `ls`/`test -f` (no `Glob` tool). **Verified:** `SKILL.md` frontmatter parses (matches the `loopdeck:`-prefix + directory convention); pre-flight / title / body-template / marker-table / confirmation / create / memory-write logic reviewed against the PRD (`docs/epics/agent-full-access/prd-verify-and-ship-skills.md` Phase 2). Next unchecked Gate C step: "Auto-commit hook point." See ## Current + decision of same date.
+- [x] **Auto-commit hook point** (2026-07-24) — Decided **`open-pr` owns the entire stage → commit → push → publish tail** (superseding the PRD §"Orchestrator wiring" lean of "orchestrator keeps `git add`, `open-pr` commits" — `open-pr` owns **both**, because it produces the verified scope the commit message is authored from and is independently invocable standalone). New `open-pr` Phase 5 ("Commit Uncommitted Work + Push") runs **only after** the Phase 4 body confirmation: `git add -A` → `git commit -m <title> -m <Summary>` (only if the tree is dirty; the message is the **verified scope** — the same title + Summary the user just confirmed, so the commit and the PR describe the feature identically; a clean tree skips the commit) → `git push -u origin HEAD` (the only outward-facing action before `gh pr create`, gated by the body confirm — `-u origin HEAD` works for first and subsequent pushes). Pre-flight 1c changed from "upstream is pushed" (`@{u}`) to "remote `origin` exists" (`git remote get-url origin`) since `open-pr` is now the pusher. Phase 2 captures `git status --porcelain`; Phase 4 discloses any uncommitted files + the exact commit message at the gate (the honesty backstop for `git add -A`); a nothing-to-ship guard (empty `main..HEAD` + clean tree) aborts early. **No squash, no history rewrite, no force-push** — existing WIP commits push as-is, the human picks the merge strategy at merge time (resolves the PRD "auto-suggest squashing?" open-question with its own "suggest, never execute" lean); a rejected push stops the skill. The orchestrator's Phase 5 one-line commit nudge became a hand-off to `open-pr` (it no longer `git add`s/commits/pushes). **Supersedes** the 2026-07-23 `open-pr` decision's "no commit/push, owned by the orchestrator's earlier phases" clause + its Phase 1c "upstream pushed" pre-flight (that deferral always pointed at this step). The **full orchestrator renumber** (new Phase 6 "Verify Against PRD", Phase 6→7, ASCII diagram, Phase 2 plan-template rows, Memory Convention cross-refs) is the separate **"Orchestrator wiring"** Gate C step, untouched here. **Verified:** both `SKILL.md` frontmatters parse; `open-pr` phases renumbered 1–7 with the new Phase 5; no stale "upstream pushed / out of scope / owned by the orchestrator" references remain; the orchestrator's only commit reference is the reframed Phase 5 hand-off. Skill-text only (no Rust/frontend change), so `cargo`/`tsc` gates do not apply. See decision + `## Current` of same date. Next unchecked Gate C step: "`loopdeck:prd-verifier` skill."
+- [x] **`loopdeck:prd-verifier` skill** (2026-07-24) — `.agents/skills/loopdeck-prd-verifier/SKILL.md` created. Read-only, stack-agnostic skill (`allowed-tools: [Read, Glob, Grep, Bash]`, no Edit/Write/Agent — epic ADR-4) with a five-phase flow: parse the PRD's acceptance criteria (verbatim; synthesize + flag if unlabeled) → identify changed files (`git diff --name-only <default>...HEAD` on a feature branch, `git status --porcelain` on the default branch; per-stack build-artifact filter composed from the **detected** stacks only — Rust+Node → `target|node_modules|dist|build|.next` — plus a common-noise set; prefer `.gitignore`) → per-criterion PASS/PARTIAL/FAIL with `file:line` evidence (no evidence → FAIL; unchanged-only evidence flagged, usually PARTIAL; behavioral criteria needing execution → PARTIAL with a "verify by running" note, never a bare PASS) → non-goals scope-creep audit (a **flag, not a FAIL**) → report with a greppable roll-up token (FAIL→BLOCK, any PARTIAL→WARN, all PASS→PASS). Four judgment calls settled beyond the PRD: the diff base **auto-detects** the default branch (`main`/`master`/`origin/HEAD`) rather than hardcoding `main` (three-dot merge base; working-tree fallback when run *on* the default branch); the per-stack ignore filter is **composed from detected stacks only** (not the universal union) so a Node repo's legit `vendor/assets/` isn't dropped for sharing Go's `vendor/` name — each name anchored as a path component `(^|/)...(/|$)`; **evidence searched in the changed set first** with unchanged-only evidence flagged; **behavioral criteria → PARTIAL** (read-only skill can't run code). The marker→ignore-set table mirrors `open-pr`'s 13 stacks + .NET; the "verify by running" command reuses `open-pr`'s marker→test-command table. **Verified:** frontmatter parses (matches the `loopdeck:`-prefix + one-skill-per-directory convention); the read-only Bash snippets (default-branch resolution, `git diff --name-only main...HEAD`, the per-stack `grep -vE` filter) were exercised against this real Rust+Node repo — the diff returns a real source set with no `target/`/`node_modules/` rows (gitignored/untracked), confirming the skill's note that the per-stack filter is load-bearing mainly for the on-default-branch working-tree fallback. Skill text only, so `cargo`/`tsc` gates do not apply. Next unchecked Gate C step: "Orchestrator wiring." See decision + `## Current` of same date.
+- [x] **Orchestrator wiring** (2026-07-24) — Rewired `.agents/skills/loopdeck-orchestrator/SKILL.md` from a 6-phase to a **7-phase** flow: inserted **new Phase 6 "Verify Against PRD"** (invokes the read-only `prd-verifier`; documents the FAIL→BLOCK / PARTIAL→WARN / all-PASS→PASS roll-up; verdict table gates the next phase — PASS→proceed, WARN→fix+reverify, BLOCK→return to Phase 3, non-goals scope creep surfaced as a flag not a FAIL; re-verify every rework loop) and **renumbered the old Phase 6 → Phase 7 "Decide & Open PR"** (outcome table now keyed on the verify verdict; adds a **green-verdict-only `open-pr` branch** — PASS + integration green → invoke `open-pr`; `open-pr` explicitly NOT called on WARN/BLOCK). Also updated the **ASCII flow diagram** (new Phase 6 box + renumbered Phase 7 box; borders kept flush via a Python `ljust(54)` generator so the single-column `→` aligns with the existing `↔`), the **header arrow chain + intro** (`… → Stitch → Iterate` → `… → Stitch → Verify → Ship`), the **Phase 2 plan-template final rows** (Phase 6 "Stitch & Verify" → "Verify Against PRD" — stitch/test rows kept as lead-in + a `prd-verifier` row; new Phase 7 "Decide & Open PR" → `open-pr`), and the **Memory Convention cross-refs** ("Phase 6 Decide Next Phase" → "Phase 7 Decide & Open PR"; "Integration with Phase 6" → "… Phase 7"; "(Phase 6 or equivalent)" → "… Phase 7 …"). Grep-confirmed: no stale `Decide Next Phase`/final-`Phase 6` refs remain. Skill-text only — no Rust/frontend change, so `cargo`/`tsc` gates don't apply. **DIVERGENCE FLAGGED (not fixed — out of scope):** the orchestrator skill exists in two divergent, separately-tracked copies — `.agents/skills/loopdeck-orchestrator/` (canonical per the Gate C PRD; where this whole epic landed — `open-pr`, `prd-verifier`, and now this wiring) and `templates/skills/loopdeck-orchestrator/` (declared SSOT by the 2026-07-24 "templates is SSOT" decision, and the target of the **live** `.claude/skills/loopdeck-orchestrator` symlink). They've drifted both ways: `.agents/` has the Gate C wiring but not the `templates/`-only "Worktree Discipline" section; `templates/` has Worktree Discipline but still "6. Decide Next Phase". Net effect: the orchestrator `/loopdeck:orchestrator` actually invokes (`.claude/` → `templates/`) does **not** yet run verify→ship. Per the task's explicit "`.agents/skills/` only" scope and because `templates/` carried pre-existing unrelated WIP, it was not synced here. **Follow-up:** reconcile the two copies (and decide whether the `.agents/`-only `open-pr`/`prd-verifier` should also live in `templates/`) and resolve which root is canonical so the wiring is effective in the invoked skill. **DONE same day (option 1):** the identical wiring was applied to `templates/skills/loopdeck-orchestrator/SKILL.md` (+ the Worktree section's Phase 6→7 fix), so the **live** skill (`/loopdeck:orchestrator` → `.claude/skills/` → `templates/`) now runs verify→ship — phase headings 1–7, no stale refs; only benign one-way drift left is `.agents/` lacking templates' Worktree + Epic/PRD sections. Next unchecked Gate C step: "End-to-end smoke." See decision + `## Current` of same date.
+- [x] **End-to-end smoke** (2026-07-24, per user confirmation) — The orchestrator end-to-end sequence now runs: Phase 6 verify report → draft PR body → created PR URL; a BLOCK verdict gates the PR step; and `/loopdeck:open-pr` works standalone on a throwaway branch. **Gate C is complete (all five steps closed); with Gates A and B already done, all three release gates are now closed.**
+
+### Supporting backlog — not an alpha release gate
+
+The detailed P2/P3/P5/P6 items below remain useful implementation notes. They
+only block the private alpha when they directly satisfy a Gate A item above.
+Do not expand the release definition by treating every unchecked item as a
+prerequisite.
+
+### Supporting work done outside the gates
+
+- [x] **Graphify detect-and-surface** (2026-07-20) — LoopDeck now reads `graphify-out/graph.json` when Graphify has been run in a project, surfacing node/edge/community counts, a confidence breakdown, and god nodes in a new Graph tab. No Python/CLI dependency — LoopDeck only parses JSON output. Scanner badges discovered repos with `has_graphify`. Follow-ups (triggering builds, managing the MCP server, in-app querying) explicitly deferred. See decision of same date.
+- [x] **Surface "stuck" AskUserQuestion prompts globally** (2026-07-21) — A LoopDeck-spawned agent that called `AskUserQuestion` while the user was on another view (or the Mac was locked) froze silently: the per-project question card only reconciled on Agent-tab mount, so the prompt never rendered and nothing flagged it. Fix rides the existing `AppState.pending_answers` slot + `usePendingInteractions` store (no `~/.claude/` reading, no new persistence). New `list_pending_questions` command (+ unit-tested `collect_pending_questions` helper) snapshots all pending slots; `useStuckSessions` hook reconciles on app mount + window focus + visibilitychange and fires a one-time-per-prompt toast; surfaces are a `ProjectCard` "Waiting" pill, a tab-agnostic `StuckQuestionCallout` banner in `ProjectDetail` (reusing the extracted `AskUserQuestionCard`), and the toast. Answer path is the existing `agent_answer_question`. See decision of same date. **Follow-up:** the extracted `AskUserQuestionCard` is now shared by `Chat.tsx` and `ProjectDetail.tsx`, so the P6 a11y item for it (real `role="radio"`/`role="checkbox"` + keyboard nav) now covers both call sites at once.
+- [x] **Longer retry budget + friendly exhausted-retry UX for gateway 529s** (2026-07-23) — A user's agent (pointed at `api.z.ai`) surfaced a raw `API Error: 529 [...] overloaded` bubble. The retry layer was already catching it (the user's exact string is the `retry.rs` test fixture) but gave up after 4 attempts / ~14s, and the exhausted path dumped the raw 529 in a red bubble with no retry affordance; separately the `ClaudeEvent::Retrying` event was emitted by the backend but **never typed or rendered in the frontend** (dead event — the agent looked frozen during the retry window). Three-part fix: (1) `MAX_ATTEMPTS` 4→9 + new `BACKOFF_TOTAL_BUDGET_MS = 300_000` (5 min) wall-clock ceiling enforced via a new pure `next_backoff(attempt, elapsed_ms)` (4 new tests); both `send_with_retry` and `send_streaming_with_retry` switched to it. (2) Added the missing `retrying` variant to the TS `ClaudeEvent` union + a `retrying` field on `StreamingState` (set on event, cleared on next result) + an inline amber "Gateway overloaded — retrying 2/9 in 4s…" row in `Chat`. (3) Client-side overload detection (`isOverloadError`, mirroring `retry::is_overloaded`) renders an amber bubble + `OverloadBanner` with a **Retry now** button that re-sends the last user prompt (recovered from `turns`) via `onSend` — which runs the full retry loop again. Transcript stays truthful (raw 529 still recorded); chose client-side detection over threading a new `error_kind` field through `AgentResponse`. See decision of same date. **Follow-up:** the non-streaming `send_with_retry` still doesn't emit `Retrying` (only the streaming variant does) — parity is a small follow-up if the non-streaming path becomes primary.
+- [x] **Remove the parked-slot timeout; approvals/questions wait indefinitely** (2026-07-23) — A user saw an "Interrupted — your approval was needed and the 10-minute limit elapsed" bubble: the `PARKED_SLOT_TIMEOUT` (PRD FR4, 10 min) fired on a manual approval they never saw and auto-denied the turn. The timeout predated the cross-project visibility layer (built 2026-07-22) — it was the only thing stopping a then-invisible parked prompt from wedging the per-project lock forever. With visibility now in place (toast + pill + callout, reconciled on launch + focus + visibilitychange), the timeout became a footgun (silent auto-deny) rather than a safety net, and the user explicitly wanted the prompt to "just show the question until answered." **Removed the entire expiry path** (Option A, not the dead-scaffolding Option B): deleted `park_or_expire` + `ParkOutcome` (incl. `Expired`); both park sites (question + permission) now `rx.await` directly — exits are answer or sender-dropped (Stop); removed `ApprovalTimeout`/`QuestionTimeout` from `AppError`; removed `interrupted_approval_timeout()`/`interrupted_question_timeout()` constructors; removed `PARKED_SLOT_TIMEOUT`; `mark_turn_terminal` now emits only the generic `interrupted()` marker. The `interrupt_kind` field + frontend `TurnBubble` keep handling `"approval_timeout"`/`"question_timeout"` for **legacy transcripts only** (no new turn is written with them). Removed 6 obsolete tests; rewrote the serialization/idempotency tests to `interrupted()` / `"process_exited"`. **Tradeoff accepted:** a genuinely-forgotten approval now holds the project's turn lock until answered or Stopped — acceptable given visibility makes "forgotten" unlikely. See decision of same date.
+- [x] **Per-project Autonomous Mode** (2026-07-23) — The multi-loop-overnight workflow ("start loops, go to bed, review the PRs in the morning") needs the agent to run unattended; under `ConfirmChanges` every mutating tool parks on an approval card and (post-timeout-removal) stalls indefinitely. This is the `AutonomousProject` variant the 2026-07-19 decision explicitly deferred. **Single behavioral change:** `answer_control_request` arm 3 (manual-approval parking) now also checks `!policy.is_autonomous()`, so floor-clearing mutating tools fall through to auto-allow; the floor in arm 2 is untouched (proven by a new `floor_denies_regardless_of_mode` property test). Backend: `Autonomous` variant + `is_autonomous()` getter + `decide()` arm in `permission.rs`; arm-3 predicate + `decision: "auto-allow"` discriminator in `claude_session.rs`; `autonomous: bool` on `ProjectEntry` (serde-default, no version bump); `set_project_autonomous` command; `resolve_permission_policy(state, path)` helper threaded to both spawn sites (unregistered path → confirm-changes safest). Frontend: toggle + confirm dialog in `ProjectDetail` OverviewTab; mode-aware `PermissionModeBadge` (amber Autonomous); `ProjectCard` pill; per-turn "auto" tag on mutating tool calls in `Chat` (derived from project flag × `wouldRequireApproval`, not per-event). **Kept:** destructive floor (`rm -rf`/force-push/`curl|sh`/`sudo` denied under all modes), `--permission-mode default` CLI flag (NOT bypassPermissions — would defeat the floor at the Claude layer), no broad allowlist seeding. MCP auto-approves (project's servers trusted). **Unblocks:** the multi-loop feature now has its dependency satisfied. **Follow-ups:** SECURITY.md T2 update for the autonomous path; precise per-event audit attribution (currently derived from the project flag, stable across a turn); the multi-loop feature itself. See decision of same date.
+
+### P2 — Hardening (correctness, robustness, secret hygiene)
+- [x] Move auth token out of plaintext `~/.config/loopdeck/config.yaml` into the OS keychain (macOS Keychain / Windows Credential Manager / Secret Service); `chmod 600` is the interim floor
+- [x] Wrap blocking I/O in `spawn_blocking`: `list_projects`, `rescan_project`, `scan_directory`, `import_project` (`commands.rs`) — they previously ran sync walkdir + git subprocess spawning inside `async` Tauri commands; now offloaded to the blocking pool
+- [x] Fix `Drop` blocking: `claude_session.rs:1183-1194` sleeps up to 7s reaping the child on a tokio worker thread — now reaped on the tokio blocking pool via a detached `spawn_blocking` task (preserving the graceful-EOF-then-SIGKILL sequence); `child` became `Option<Child>` so `Drop` can hand ownership to the reap task, with a synchronous no-runtime fallback so no zombie leaks
+- [x] Resolve `claude` and `git` to absolute, vetted paths at spawn (`claude_session.rs`, `git.rs`) to defeat PATH hijack — new `binary` module skips non-absolute `$PATH` entries (closes the cwd-hijack vector), vets the executable bit, and pins the path via `OnceLock` for the process lifetime
+- [x] Add a top-level React error boundary above `<App>` in `main.tsx` — pre-router crashes currently blank-screen with no recovery; new `RootErrorBoundary` class component wraps `<App>` (inside `React.StrictMode`) and renders a self-contained, LoopDeck-styled fallback with "Reload app" (guaranteed) + "Try again" (remounts the subtree via a keyed Fragment) and a collapsible error-details panel
+- [x] Audit `expect()`/`unwrap()` under `panic = "abort"`; in particular `skills.rs:362` (a malformed user `settings.json` aborts the process on import) and `lib.rs:77`
 - [ ] Add an absolute per-turn deadline or parked-slot expiry (`claude_session.rs`) — parked turns currently hold the per-project lock indefinitely
 - [ ] Cap unbounded accumulation in `ResponseAccumulator` (`agents.rs:603-625`) — abort past a block/byte limit
-- [ ] Cap log retention in `logging.rs` (daily rolling appender grows forever); confirm no `auth_token` is ever logged
+- [x] Cap log retention in `logging.rs` (daily rolling appender grows forever); confirm no `auth_token` is ever logged — done 2026-07-23 as the Gate B "Provide user-accessible diagnostics and bounded log retention" step (see ## Current + decision of same date)
 - [ ] Replace `eprintln!` diagnostics in `project.rs:43,76,172` with `tracing::debug!`
 - [ ] Strengthen `check_destructive_floor` further: prefix deny-list is now argv-analyzed, but `mv`/`cp` targeting `/`, `/etc`, `/usr`, `$HOME` root are still best-effort
 - [ ] Reconcile the `claude_session.rs:218-224` doc comment ("default") with the actual `--permission-mode acceptEdits` arg
 
-### P4 — Quality gates (CI, lint, tests)
+### P3 — Quality gates (CI, lint, tests)
 - [ ] CI: `.github/workflows/ci.yml` running `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm ci`, `tsc --noEmit`, `npm run build` on macOS/Linux/Windows matrices
 - [ ] Frontend lint/format: ESLint + @typescript-eslint + eslint-plugin-react-hooks + Prettier; add `npm run lint`
 - [ ] Rust lint/format: `rustfmt.toml` + `clippy.toml`; enforce `-D warnings`
@@ -44,8 +99,8 @@
 - [ ] SBOM / license check (`cargo bundle-licenses`) in CI
 
 ### P5 — Docs & policy
-- [ ] Add `LICENSE` (MIT) + `license` field in `package.json` and `Cargo.toml`
-- [ ] Add `SECURITY.md` documenting the agent threat model (subprocess spawn, `acceptEdits`, allow-by-default + destructive floor) and vuln-reporting policy
+- [x] Add `LICENSE` (MIT) + `license` field in `package.json` and `Cargo.toml` — done 2026-07-23 as part of the Gate B "Add LICENSE and SECURITY.md" step
+- [x] Add `SECURITY.md` documenting the agent threat model (subprocess spawn; **`--permission-mode default`**, not the stale `acceptEdits` this line assumed; destructive floor + `ConfirmChanges`) and vuln-reporting policy — done 2026-07-23 as part of the Gate B "Add LICENSE and SECURITY.md" step
 - [ ] Add `CONTRIBUTING.md` (dev setup, commit style, branch model, PR checklist, `.loopdeck/` memory convention)
 - [ ] Refresh README/CLAUDE — they claim "no agents" but the code has a full agent runtime with 29 IPC commands; fix the stale "30 tests" count (now 188)
 - [ ] `git rm --cached .DS_Store .claude -r` (both tracked despite being in `.gitignore`)
@@ -63,7 +118,7 @@
 - [ ] Chat perf: `useMemo` `groupLoopRuns`, memoize completed `TurnBubble`, virtualize the transcript (`@tanstack/react-virtual`)
 - [ ] Throttle `streamingState` delta writes (currently O(blocks) per token; use `useSyncExternalStore` selector + rAF)
 - [ ] Auto-scroll: only stick-to-bottom when the user is already near the bottom (`Chat.tsx:921-925`)
-- [ ] Persist only `selectedProject.path` in Zustand (not the full `ProjectEntry`) to avoid schema drift
+- [x] Persist only `selectedProject.path` in Zustand (not the full `ProjectEntry`) to avoid schema drift — done 2026-07-23 as the Gate B "Persist only navigation identifiers/preferences in Zustand" step (see ## Current + decision of same date)
 - [ ] Move module-level mutable `lastSelectedPath` (`AgentRunner.tsx:30`) into the Zustand store
 - [ ] Wire or remove the dead `cmdk` dependency; remove the misleading `⌘K` hint (`AppShell.tsx:152`)
 - [ ] Fetch model presets from backend/config instead of hardcoding model IDs (`Settings.tsx:24-29`)
@@ -75,642 +130,8 @@
 - [ ] **Move agent control into LoopDeck app** — When LoopDeck can spawn/manage AI agents from within the app (not just the terminal), it should own all agent configuration: CLAUDE.md, skills, hooks, and memory conventions. The current `.claude/settings.local.json` hooks (PreToolUse dirty flag, Stop hook reminder) are temporary workarounds that only work in the Claude Code terminal context. Once LoopDeck controls the agent runtime, it can intelligently decide when to prompt for memory updates, apply project-specific instructions, and manage skills — without relying on external hook files.
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
 
+
 ## History
 
-### 2026-07-05 — Phase 1: Stop the bleeding (security)
-
-- **Status**: completed
-- **Completed**: 2026-07-05
-
-Closed the critical/high security findings from the production-readiness audit.
-Reframing documented for future readers: `permission.rs` already parks
-`Bash`/`Edit`/`Write`/`NotebookEdit`/`WebFetch`/MCP on a manual-approval card
-(`MANUAL_APPROVAL_TOOLS`), so the user *is* in the loop for mutating tools; the
-"allow-by-default" only governs read-only tools. The destructive floor is the
-backstop for when a user clicks "Allow" without reading — that's what got
-strengthened, rather than flipping the whole posture.
-
-**Changes.**
-
-- **Leaked API key removed from source.** `sk-64a72…` was hardcoded in
-  `claude_session.rs` test_config and a dead commented block in `agents.rs`.
-  `test_config()` now reads `LOOPDECK_TEST_AUTH_TOKEN` from env (also
-  `LOOPDECK_TEST_BASE_URL`/`LOOPDECK_TEST_MODEL`); the dead block was deleted.
-  History scrub intentionally skipped (rotated literal is dead). New
-  `.env.example` documents all runtime + test env vars.
-- **Strict CSP** (`tauri.conf.json`). Was `null`; now `default-src 'self' ipc:
-  http://ipc.localhost`, `script-src 'self'` (no unsafe-inline/eval), only
-  `style-src 'unsafe-inline'` (Tailwind v4 + Radix need it). img/font/data
-  allowlisted minimally.
-- **Shell injection fixed** (`commands.rs`). New `resolve_dir_arg()` canonicalizes
-  and rejects non-directories — used by both `open_in_finder` and
-  `open_in_terminal` (blocks the macOS `open "x-apple-…"` handler trick).
-  macOS terminal launchers no longer interpolate the path into AppleScript —
-  it's passed as a separate `osascript … <path>` argv with `on run argv` +
-  `quoted form of`. Windows dropped `cmd /C "cd /d {path}"` for `cmd /K` +
-  `current_dir()`. Linux was already safe.
-- **Destructive floor strengthened** (`permission.rs`). Was a 5-rule prefix list
-  trivially bypassed (`rm -r -f`, `find -delete`, `ls; rm -rf`, etc.). Now: lex
-  with `shell-words`, quote-aware stage split on `| ; && ||`, walk every stage,
-  peel privilege wrappers (`sudo`/`command`/`exec`/`eval`/…), inspect argv[0] +
-  flags (case-insensitive, short-flag bundling aware). Catches `rm` with
-  recursive+force in any order/form, `find -delete`/`-exec rm`, `dd`, `mkfs*`,
-  `chmod/chown -R`, all force-push variants including `--force-with-lease`,
-  `curl|sh` pipe-to-shell, smuggled pipeline stages, and wrappers. Falls back
-  to legacy prefix rules if parse fails. +13 new tests, all 30 floor tests pass.
-- **Capabilities scoped** (`capabilities/default.json`). `shell:default` →
-  `shell:allow-open` (the only shell function the frontend uses is `open()` in
-  `Markdown.tsx`).
-- **Markdown href allowlist** (`Markdown.tsx`). The `a` override handed any
-  `href` to Tauri `open()`; now only `http:`/`https:`/`mailto:` get through,
-  others drop `href` entirely. Belt-and-braces alongside the CSP.
-
-**Verification.** `cargo test --lib` 188 passed / 0 failed / 7 ignored (was 175
-before; +13 new floor tests). `cargo clippy --all-targets` 0 warnings. `cargo fmt`
-applied. `npm run build` passes (tsc + vite).
-
-**Outstanding from this loop (carried to P2-P6).** Code signing / notarization /
-updater (P2); plaintext token → keychain, `spawn_blocking`, `Drop` blocking,
-absolute-path binary resolution, top-level error boundary (P3). CI, lint, frontend
-tests (P4). LICENSE / SECURITY.md / CONTRIBUTING / README refresh (P5).
-
-Files changed: src-tauri/src/{permission.rs, commands.rs, claude_session.rs,
-agents.rs, Cargo.toml}, src-tauri/{tauri.conf.json, capabilities/default.json},
-src/components/shared/Markdown.tsx, .env.example (new), .loopdeck/loops.md.
-
-### 2026-07-05 — Production readiness audit
-
-- **Status**: completed
-- **Completed**: 2026-07-05
-
-Three-pronged read of the codebase (Rust backend, React frontend, ops/tooling)
-to enumerate what's needed before production. Verdict: not production-ready —
-solid foundation (typed IPC, good Rust test coverage, navigation-stable
-streaming stores) but real blockers in security, distribution, and quality
-gates. Findings fed directly into the Phase 1-6 next-steps list above.
-
-Top blockers surfaced: leaked API key in git history; no CSP; shell injection
-in `open_in_terminal`; over-broad capabilities + PATH-resolved binaries; no
-code signing / notarization / updater; no CI; no LICENSE/SECURITY/CONTRIBUTING;
-zero frontend tests; no markdown sanitization; A11y failures on hand-rolled
-dropdowns and question/approval cards.
-
-### 2026-07-03 — TanStack Router (replace Zustand view switching)
-
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Replaced the Zustand `currentView` + conditional rendering pattern with
-`@tanstack/react-router` v1 using memory history (no browser URL bar in Tauri).
-Views are now proper routes with type-safe navigation.
-
-**`router.tsx`** (NEW — `src/router.tsx`, 200 lines):
-- `AppShellLayout` — root route component with sidebar nav, error banner, and
-  `<Outlet />` for child route content. Nav items use `<Link>` components;
-  active-state detection uses `useRouterState().location.pathname`.
-- Route tree: `/` (Dashboard), `/activity`, `/agent`, `/decisions`, `/loops`,
-  `/settings`, `/import`, `/project/$projectPath` (URL-encoded filesystem path).
-- `createMemoryHistory({ initialEntries: ["/"] })` — in-memory routing for
-  the Tauri desktop environment.
-- Re-exports `RouterProvider`, `Outlet`, `useNavigate`, `useParams`, `Link`
-  for convenience.
-
-**Store changes** (`appStore.ts`):
-- Removed `currentView` and `setCurrentView` from the Zustand store — navigation
-  is now the router's responsibility.
-- `setSelectedProject` simplified: no longer sets `currentView` to `"detail"`.
-- Persisted state (`loopdeck-nav`) reduced to `selectedProject` + `detailTab`.
-
-**Hook changes** (`useProjects.ts`):
-- `scanFolder` → navigates to `/import` after scan.
-- `importRepo` → navigates to `/` after import.
-- `removeProject` → navigates to `/` after removal.
-- All use `useNavigate()` instead of the old `setCurrentView`.
-
-**View component changes:**
-- `Dashboard.tsx`: `handleSelect` and `handleStart` now call `navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } })` instead of relying on `setSelectedProject` to change views.
-- `ProjectDetail.tsx`: reads `projectPath` from `useParams()`, decodes with `decodeURIComponent`, syncs `selectedProject` via `useEffect`. Back button uses `navigate({ to: "/" })`.
-- `ImportFlow.tsx`: back button uses `navigate({ to: "/" })`.
-- `AppShell.tsx`: reduced to only `PageHeader` export (the layout moved to `router.tsx`'s `AppShellLayout`).
-
-**Design decisions:**
-- **Memory history over browser history** — Tauri has no URL bar, so
-  `createMemoryHistory` is the natural fit. Routes are purely internal.
-- **URL-encoded project paths** — filesystem paths like `/Users/foo/bar` are
-  URI-encoded so they travel as a single route segment (`/project/$projectPath`).
-  `encodeURIComponent`/`decodeURIComponent` at the navigation/cosumption boundary.
-- **Zustand for data, Router for navigation** — the store still owns
-  `selectedProject`, `detailTab`, `pendingAgentStart`, and the project list.
-  The router owns the current location. No more store-driven view switching.
-- **Persisted selection reconciliation** — `loadProjects` still resolves the
-  persisted `selectedProject` against the fresh project list on startup,
-  clearing it if the project was removed or refreshing it if stale.
-
-**Verification.** `tsc --noEmit` clean; `cargo check` 0 new errors.
-
-Closes loops.md #13 (TanStack Router).
-
-Files changed: src/{router.tsx (new), App.tsx, store/appStore.ts,
-hooks/useProjects.ts, components/{layout/AppShell.tsx, dashboard/Dashboard.tsx,
-detail/ProjectDetail.tsx, import/ImportFlow.tsx}},
-.loopdeck/{loops.md, decisions.md}.
-
-### 2026-07-03 — Standalone Decisions + Loops views
-
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Added two standalone top-level views — Decisions and Loops — that aggregate data
-across all projects. Previously this content was only accessible inside
-`ProjectDetail`'s tabbed sidebar; now both are first-class views accessible from
-the main navigation.
-
-**`DecisionsView.tsx`** (NEW — `src/components/decisions/DecisionsView.tsx`, 240 lines):
-- Loads all decisions from every project's `.loopdeck/decisions.md`.
-- Filters: free-text search (title, context, consequences, project name),
-  status tabs (All / accepted / proposed / superseded), project dropdown.
-- Cards grouped by month, each showing project name, date, title, status badge,
-  context preview (2-line clamp). Click to expand full context + consequences.
-- Colour-coded status: accepted=green, proposed=amber, superseded=muted.
-- States: loading spinner, error, empty ("No decisions yet"), filtered-empty
-  with "Clear filters" link.
-
-**`LoopsView.tsx`** (NEW — `src/components/loops/LoopsView.tsx`, 210 lines):
-- Loads all loop statuses from every project's `.loopdeck/loops.md`.
-- Stats bar: active loops, pending next steps, completed history, project count.
-- Cards sorted: in-progress loops first, then by project name. Active cards
-  have a green-tinted border + background highlight, Play icon, and "Active" tag.
-  Completed/paused get CheckCircle/Circle icons.
-- Expanded card shows: current loop metadata (started/completed dates), next
-  steps list (checked items in green strikethrough, unchecked with arrow icon),
-  history summary (last 5 completed loops with "+N more" overflow).
-- States: loading, error, empty ("No loops yet").
-
-**Integration:**
-- `types/index.ts`: `AppView` gained `"decisions"` and `"loops"`.
-- `AppShell.tsx`: Lightbulb and Repeat nav items added.
-- `App.tsx`: Both views wired.
-
-**Design decisions:**
-- **Project-level sorting for Loops** — active projects first, then
-  alphabetical. The user's primary question is "what should I work on next?",
-  so active loops must surface above completed ones. Within the same
-  activity tier, alphabetical is predictable.
-- **Expand-in-place cards vs separate pages** — both views use click-to-
-  expand cards instead of navigating to a detail page. Since there's no
-  TanStack Router yet, per-card routing would need Zustand state management
-  (selected decision ID, selected loop path), which adds complexity without
-  clear benefit. The expand-in-place pattern shows detail inline while keeping
-  the list visible for context.
-- **Month grouping for Decisions** — decisions use month-level buckets
-  (not day-level like Activity Feed) because decision dates are date-only
-  strings (no time component) and there are typically fewer decisions than
-  agent turns. Month grouping avoids single-item day sections.
-
-**Verification.** `tsc --noEmit` clean; `cargo check` 0 new errors.
-
-Closes loops.md #11 (standalone Decisions) and #12 (standalone Loops).
-
-Files changed: src/{types/index.ts, App.tsx,
-components/{layout/AppShell.tsx, decisions/DecisionsView.tsx (new),
-loops/LoopsView.tsx (new)}}, .loopdeck/{loops.md, decisions.md}.
-
-### 2026-07-03 — Activity Feed view (`/activity`)
-
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Added a chronological event feed that aggregates activity from all registered
-projects into a single timeline — agent turns, architectural decisions, and
-development loop completions, merged and sorted by timestamp.
-
-**`ActivityFeed.tsx`** (NEW — `src/components/activity/ActivityFeed.tsx`, 240 lines):
-
-- **Data collection**: on mount, iterates all registered projects and fetches
-  three data sources per project: `agentGetConversation` (turns),
-  `getDecisions` (decisions), and `getLoops` (loop history). Each source is
-  caught independently — a missing file (e.g. no transcript yet) is skipped
-  silently without failing the entire feed.
-- **Event unification**: three collectors (`turnsToEvents`, `decisionsToEvents`,
-  `loopsToEvents`) normalise each source into a common `ActivityEvent` shape
-  with `kind` discriminator (`turn_user` | `turn_assistant` | `turn_error` |
-  `decision` | `loop_completed`), project name/path, timestamp, one-line
-  summary, and optional detail body.
-- **Timeline rendering**: events sorted descending by timestamp, grouped into
-  date buckets (Today / Yesterday / "Monday, July 1"), each group shown as a
-  section with a sticky date heading, count badge, and a divider line.
-- **Event row**: colour-coded icon per kind (User=neutral, Bot=primary,
-  Error=destructive, Decision=warning, Loop=success). Project name + timestamp
-  on the top row, summary on the second (line-clamped to 2 lines). Click-to-
-  expand detail for events with body content (turn text, decision context,
-  loop metadata) shown in a monospace block with max-height + scroll.
-- **States**: loading spinner, error display, empty state ("No activity yet"
-  with Activity icon and guidance text).
-
-**Integration:**
-- `types/index.ts`: `AppView` gained `"activity"`.
-- `AppShell.tsx`: Activity icon nav item between Dashboard and Agent Runner.
-- `App.tsx`: `ActivityFeed` rendered on `currentView === "activity"`.
-
-**Design decisions:**
-- **Unified event shape over separate sections** — merging conversations,
-  decisions, and loops into a single `ActivityEvent[]` (discriminated by
-  `kind`) keeps the timeline rendering logic simple: one sort, one grouping
-  pass, one render loop. The alternative (separate sections per source) would
-  fragment the chronology and require the user to mentally merge timelines.
-- **Best-effort per-source fetching** — each API call per project is tried
-  independently; a missing `.loopdeck/sessions/active.jsonl` doesn't prevent
-  decisions and loops from appearing. This is important for projects that
-  haven't run an agent yet but have decisions/loops from manual edits.
-- **Date-only timestamps for decisions/loops** — decisions use `"2026-06-22"`
-  format (no time component). We synthesise midnight UTC timestamps
-  (`dateToTs`) so they sort correctly within the day's bucket. This means
-  decisions always appear at the top of their date group, which is acceptable
-  since they're typically batched by session, not by exact hour.
-
-**Verification.** `tsc --noEmit` clean; `cargo check` 0 new errors.
-
-Closes loops.md #10 (Activity Feed view).
-
-Files changed: src/{types/index.ts, App.tsx,
-components/{layout/AppShell.tsx, activity/ActivityFeed.tsx (new)}},
-.loopdeck/{loops.md, decisions.md}.
-
-### 2026-07-03 — Agent Runner view (`/agent`)
-
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Added a standalone, terminal-themed AI agent runner view accessible from the
-sidebar. Unlike the project-specific Agent tab in ProjectDetail, the Agent
-Runner is a top-level view where the user can switch between projects without
-leaving the agent interface.
-
-**`AgentRunner.tsx`** (NEW — `src/components/agent/AgentRunner.tsx`, 370 lines):
-
-- **Left panel** (280px) — scrollable project list showing all registered
-  projects with session metadata: live status indicator (green dot for active
-  sessions within 30 min), turn count, last activity timestamp, and project
-  path. Sorted: live sessions first, then by recency. Empty state when no
-  projects are registered.
-- **Right panel** — terminal-themed agent interface:
-  - Header bar with terminal icon, `loopdeck agent ~/project-name` path, and
-    project filesystem path.
-  - Toolbar: **Run next loop** (green, starts/continues development loop from
-    `.loopdeck/loops.md`) and **Reset** (archive transcript, drop process).
-    Turn counter on the right.
-  - Scrollable output area with monospace font (`JetBrains Mono`):
-    - `❯ user` / `❯ assistant` prompts in green/primary with timestamps and
-      token-usage stats
-    - Turn content with `whitespace-pre-wrap` preserving agent formatting
-    - Empty state: "Select a project" or "No conversation yet" with CTA
-  - Live streaming: tool-call activity (diamond `◈` markers in warning color),
-    streaming text with green pulsing cursor, busy indicator
-  - Composer: green `❯` prompt + single-line input, Enter to send
-- **Streaming orchestration**: reuses the same `Channel<ClaudeEvent>` pattern
-  as `AgentPanel` — `runStreamingTurn(prompt?)` creates a Channel, wires
-  `onmessage` for delta accumulation (`text_delta`, `tool_use`, `result`), and
-  calls `agentStartLoopStreaming` / `agentSendMessageStreaming` accordingly.
-  Transcript reload on Result event. Mounted guard for channel safety.
-- **Session scanning**: on mount, queries all projects for their transcripts
-  to derive live/not-live status (active if last assistant turn < 30 min ago).
-
-**Integration:**
-- `types/index.ts`: `AppView` gained `"agent"`.
-- `AppShell.tsx`: Terminal icon nav item between Dashboard and Import Repo.
-- `App.tsx`: `AgentRunner` component rendered on `currentView === "agent"`.
-
-**Design decisions:**
-- **Terminal theme not Chat bubble theme** — The Agent Runner uses monospace
-  font, dark background (`oklch(0.13_0.01_270)`), prompt indicators (`❯`),
-  and flat line-by-line output instead of rounded chat bubbles. This
-  distinguishes it from the project-specific Agent Panel and signals
-  "developer tool" rather than "chat app".
-- **Standalone project selector** — Unlike AgentPanel (reached via Dashboard →
-  project → Agent tab), the Agent Runner has its own project list, so the user
-  can switch between agent sessions without navigating back to the dashboard.
-  This is the "tmux for AI agents" pattern.
-- **Shared streaming pattern** — `AgentRunner` does NOT reuse the `Chat`
-  component because the terminal aesthetic requires fundamentally different
-  rendering (no avatars, no bubbles, prompt-based layout, monospace font). It
-  DOES reuse the same streaming orchestration pattern: Channel → `onmessage` →
-  delta accumulation → Result → reload. The two components (AgentPanel+Chat,
-  AgentRunner) are rendering-siblings but orchestration-cousins — same
-  approach, different visual output.
-
-**Verification.** `tsc --noEmit` clean; `cargo check` 0 new errors (3
-pre-existing warnings).
-
-Closes loops.md #9 (Agent Runner view).
-
-Files changed: src/{types/index.ts, App.tsx,
-components/{layout/AppShell.tsx, agent/AgentRunner.tsx (new)}},
-.loopdeck/{loops.md, decisions.md}.
-
-### 2026-07-03 — Streaming frontend chat UI with Tauri Channel
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Upgraded `AgentPanel.tsx` from batch-only APIs to real-time streaming via Tauri
-`Channel<ClaudeEvent>`. The agent's response now renders token-by-token as it
-arrives instead of showing a spinner for the full turn duration.
-
-**Backend.**
-- `commands.rs`: new `agent_start_loop_streaming` command — builds the next-loop
-  prompt server-side (same `build_next_loop_prompt`) and sends via
-  `send_and_record_streaming` so the Start-next-loop flow also streams.
-- `lib.rs`: registered `agent_start_loop_streaming` in the invoke handler.
-
-**Frontend.**
-- `lib/tauri.ts`: `agentStartLoopStreaming(path, onEvent: Channel<ClaudeEvent>)`
-  — typed IPC wrapper for the new streaming start-loop command.
-- `AgentPanel.tsx`: full rewrite with streaming architecture:
-  - `runStreamingTurn(prompt?)` — shared helper that creates a `Channel`,
-    wires `onmessage` to accumulate `TextDelta`/`ThinkingDelta`/`Result` events,
-    calls the appropriate streaming IPC, and reloads the transcript on completion.
-  - Both "Start next loop" and free-form Send use streaming — no batch fallback.
-  - `mountedRef` guards channel event handlers against post-unmount state updates.
-- `Chat.tsx` (NEW, extracted from AgentPanel) — reusable presentational component:
-  - `TurnBubble` — persisted transcript turn (user/assistant/error with usage meta).
-  - `ThinkingBlock` — collapsible model reasoning (ChevronDown/ChevronRight toggle).
-  - `StreamingBubble` — live token accumulation with typewriter cursor, spinner→Bot
-    avatar transition on Result, usage/duration meta in transient window.
-  - `Chat` container — scrollable transcript, auto-scroll, empty state, error banner
-    with dismiss, composer (Enter to send, Shift+Enter for newline).
-  - Pure presentational — no Tauri/Channel imports; all state via props.
-
-**Design decisions:**
-- Channel events are the single source of truth for turn state. The invoke
-  Promise is only used for infra-level error catching (timeout, no config,
-  spawn failure). Model-level errors (`is_error: true`) are surfaced from the
-  `Result` event, not from Promise rejection — consistent with the existing
-  decision that streaming commands return `()` not `AgentResponse`.
-- The `StreamingBubble` renders alongside persisted `TurnBubble`s during a
-  turn. When the `Result` event triggers a transcript reload, the streaming
-  bubble is naturally replaced by the newly-persisted turn. No imperative
-  DOM manipulation — React reconciliation handles the transition.
-- Thinking is hidden by default (collapsed) and toggled explicitly. This
-  keeps the UI clean during normal turns while making extended thinking
-  inspectable when needed.
-- **Presentational Chat, streaming orchestration in AgentPanel** — `Chat`
-  is a pure rendering component with zero Tauri knowledge, making it reusable
-  (e.g. for a standalone `/agent` view) and testable in isolation. `AgentPanel`
-  remains the single owner of Channel lifecycle and transcript persistence.
-  State flows one way: Channel events → AgentPanel setState → Chat props.
-
-**Verification.** `cargo check` 0 new errors (3 pre-existing warnings);
-`cargo test --lib` 108/108 passed (5 ignored live); `tsc --noEmit` clean.
-
-Closes loops.md "Frontend chat UI" step.
-
-Files changed: src-tauri/src/{commands.rs, lib.rs}, src/{lib/tauri.ts,
-components/detail/{AgentPanel.tsx, Chat.tsx (new)}}, .loopdeck/{loops.md, decisions.md}.
-
-### 2026-07-03 — Streaming `send_message_streaming` with `ClaudeEvent` + `Channel<T>`
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Added a streaming variant of `send_message` so the frontend can render assistant
-tokens as they arrive instead of waiting for the full turn to buffer. The
-streaming path shares the same process/lock/transcript pipeline as the batch
-path — only the read loop differs.
-
-**Backend.**
-- `agents.rs`: new `ClaudeEvent` enum (Serialize, Clone) with three variants —
-  `TextDelta` (one per `ContentBlock::Text`), `ThinkingDelta`, and `Result`
-  (terminal; carries the full aggregated `AgentResponse` fields). Made
-  `ContentBlock`, `AssistantMessage`, and `RawUsage` `pub(crate)` so
-  `claude_session.rs` can iterate content blocks for per-block event emission.
-- `claude_session.rs`: `send_message_streaming(&mut self, text, channel:
-  &Channel<ClaudeEvent>)` — writes the user turn to stdin (same as `send_message`),
-  then reads NDJSON lines, emitting per-content-block `ClaudeEvent`s as each
-  `assistant` message arrives, accumulating into `ResponseAccumulator`, and
-  emitting the terminal `ClaudeEvent::Result` on turn completion. Channel sends
-  are best-effort (`let _ = channel.send(…)`) — a closed channel (frontend
-  navigates away) is silently dropped. Same 180s timeout as `send_message`.
-- `commands.rs`: `agent_send_message_streaming(path, prompt, on_event:
-  Channel<ClaudeEvent>)` Tauri command + `send_and_record_streaming` helper
-  (same pre-send user-turn append + post-send assistant-turn append as
-  `send_and_record`, but calls `send_message_streaming`). Returns `()`
-  rather than `AgentResponse` — the terminal `ClaudeEvent::Result` is the
-  single source of truth for the frontend.
-- `lib.rs`: registered `agent_send_message_streaming` in the invoke handler.
-
-**Frontend.**
-- `types/index.ts`: `ClaudeEvent` discriminated union type mirroring the Rust
-  enum (`text_delta`, `thinking_delta`, `result`).
-- `lib/tauri.ts`: `agentSendMessageStreaming(path, prompt, onEvent:
-  Channel<ClaudeEvent>)` — typed IPC wrapper that passes the Tauri `Channel`
-  from `@tauri-apps/api/core`.
-
-**Design decisions:**
-- The streaming and batch paths share `ResponseAccumulator` — they can't drift
-  in how they aggregate the final response.
-- Per-content-block emission (not per-NDJSON-line) matches the UI's natural
-  rendering granularity: each `TextDelta` is a complete text fragment.
-- `send_message` is *not* refactored to call `send_message_streaming` with a
-  dropped channel — the batch path is simpler and doesn't allocate channel
-  overhead; the duplication (~15 lines of stdin write) is small.
-- Channel dropping is expected and non-fatal: the turn completes regardless,
-  and the transcript is always recorded.
-
-**Verification.** `cargo check` 0 new errors (3 pre-existing warnings);
-`cargo test --lib` 108/108 passed (4 ignored live); `tsc --noEmit` clean.
-
-Closes loops.md #7 (streaming variant).
-
-Files changed: src-tauri/src/{agents.rs, claude_session.rs, commands.rs,
-lib.rs}, src/{types/index.ts, lib/tauri.ts}, .loopdeck/{loops.md, decisions.md}.
-
-### 2026-07-03 — Multi-project Claude session orchestration (Start button + Agent tab)
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Wired the existing `ClaudeSession` into the LoopDeck UI — pressing **Start** on
-a project card now spawns the agent, prompts it for the next loop from
-`.loopdeck/loops.md`, and drives work via the orchestrator skill conventions.
-Adds true cross-project parallelism, a persisted conversation transcript, and
-resume-across-restarts.
-
-**Phase 0 — resume spike (the gate).** The PRD's central risk —
-`--resume <id>` composed with `--input-format stream-json` had never been
-tested together — was de-risked first with a single ignored integration test
-(`test_session_resume_after_restart`): plant a codeword → drop the session
-(process dies, simulating restart) → re-spawn with `--resume <id>` → assert
-recall. It passed against the live provider, so the full resume path was
-built on top of it.
-
-**Backend.**
-- `claude_session.rs`: `spawn` gained `resume_session_id: Option<&str>`;
-  pushes `--resume <id>` when set.
-- `conversation.rs` (NEW): `ConversationTurn` (Serialize/Deserialize) +
-  `load_conversation` / `last_session_id` / `append_turn` / `archive_conversation`.
-  Storage: `<project>/.loopdeck/sessions/active.jsonl` (append-only JSONL) +
-  `archive-<ts>.jsonl` (rotated on reset). 11 offline unit tests.
-- `commands.rs`: `AppState.claude_sessions` restructured to the two-layer lock
-  (`Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<ClaudeSession>>>>`) — outer
-  std Mutex guards the map for microseconds (never across `.await`), inner
-  per-project tokio Mutex holds for a full turn so projects run concurrently
-  while same-project turns serialize. `with_session` (get-or-spawn, returns
-  the Arc), `build_next_loop_prompt` (first unchecked `- [ ]` under
-  `## Next Steps`, raw read since `memory::parse_loops` drops the
-  checked/unchecked distinction), and `send_and_record` (append user turn
-  before send → send → append assistant turn — crash-safe). Four Tauri
-  commands: `agent_start_loop`, `agent_send_message`, `agent_get_conversation`,
-  `agent_reset_session`.
-- `agents.rs`: `UsageInfo` made `pub` + `Deserialize` + `PartialEq` so
-  `ConversationTurn` can carry and round-trip it.
-
-**Frontend.**
-- `ProjectCard.tsx`: prominent **Start** CTA (Play icon, primary) above the
-  icon-tile row.
-- `Dashboard.tsx`: wires `onStart` → `setSelectedProject` +
-  `setDetailTab("agent")` + `setPendingAgentStart(path)`.
-- `ProjectDetail.tsx`: local `useState<DetailTab>` lifted into the store
-  (`detailTab` / `setDetailTab`); new `agent` tab (Bot icon) renders
-  `<AgentPanel>`.
-- `AgentPanel.tsx` (NEW): loads transcript on mount; auto-fires
-  `agent_start_loop` when `pendingAgentStart` matches; renders chat bubbles
-  (user/assistant/error styling, usage + duration meta); Start / Send
-  (free-form, Enter-to-send) / New conversation controls; spinner while busy.
-- `types/index.ts`, `lib/tauri.ts`, `store/appStore.ts`: `"agent"` tab,
-  `ConversationTurn` / `AgentResponse` / `UsageInfo` types, four typed IPC
-  wrappers, `detailTab` + `pendingAgentStart` store state.
-
-**Verification.** `cargo check` 0 errors; `cargo clippy` 0 new warnings (8
-pre-existing untouched); offline `cargo test --lib` 108 passed; live
-`cargo test --lib claude_session -- --ignored` 4/4 passed (existing 3 +
-resume); `tsc --noEmit` clean. Manual `tauri dev` UI verification left to the
-user.
-
-Closes loops.md #4 (per-project turn lock), #5 (`with_session`), #6
-(`agent_send_message`).
-
-Files changed: src-tauri/src/{claude_session.rs, conversation.rs (new),
-commands.rs, agents.rs, lib.rs}, src/{types/index.ts, lib/tauri.ts,
-store/appStore.ts, components/dashboard/{ProjectCard.tsx, Dashboard.tsx},
-components/detail/{ProjectDetail.tsx, AgentPanel.tsx (new)}},
-.loopdeck/loops.md.
-
-### 2026-07-03 — ClaudeSession resilience hardening (checkpoint 4)
-- **Status**: completed
-- **Completed**: 2026-07-03
-
-Closed the three foundation gaps flagged in checkpoint 3, plus a real Drop
-bug found via clippy along the way.
-
-- **stderr-drain task**: `Stdio::null()` → `Stdio::piped()` + a background
-  `tokio::spawn` that loops `read_line` on stderr and logs each non-empty line
-  at debug (`[claude stderr] …`), exiting on EOF. Eliminates the latent
-  deadlock where a verbose child fills its OS pipe buffer with nowhere to go.
-  Handle stored as `stderr_drain: Option<JoinHandle<()>>`; `Drop` aborts it
-  defensively after reaping the child.
-- **`send_message` timeout**: wrapped the whole turn (stdin write + read-until-
-  `result`) in `tokio::time::timeout` with a new `SEND_MESSAGE_TIMEOUT`
-  const (180s). A stuck peer now fails loudly as `AppError::Agent("…
-  timed out after 180s")` instead of hanging the caller. Post-timeout the
-  session is left mid-turn — documented as "drop, don't resend".
-- **Drop restructure (bonus bug fix)**: clippy's `let_underscore_future`
-  warning surfaced a real defect — the force-kill path used `let _ =
-  self.child.kill()` / `wait()`, but tokio's `kill()`/`wait()` return
-  *futures*; dropping them unawaited meant the SIGKILL was never sent and the
-  child was leaked, not killed. Rewrote `Drop` into two clear phases (graceful
-  5s EOF window → forceful `start_kill()` + 2s reap) sharing a new
-  `poll_reap(child, window)` helper (non-blocking `try_wait()` paced with
-  `thread::sleep`). `start_kill()` is synchronous — the correct tokio API for
-  a sync `Drop`.
-
-Verified: `cargo check` + `cargo clippy` clean for new code (remaining
-warnings are pre-existing dead-code that clears once `ClaudeSession` is wired
-into a Tauri command). All 3 live integration tests pass (`test_session_single_turn`,
-`test_session_current_directory`, `test_session_retains_context_across_turns`) —
-the stream-json protocol is unaffected and `Drop` still reaps cleanly.
-
-Next up: #4 per-project turn lock, #5 `with_session` helper, #6 `agent_send_message`
-Tauri command.
-
-Files changed: src-tauri/src/claude_session.rs.
-
-### 2026-07-02 — ClaudeSession async/tokio migration (checkpoint 3)
-- **Status**: completed
-- **Completed**: 2026-07-02
-
-Migrated `ClaudeSession` from `std::process` to `tokio::process` to prepare for
-concurrent multi-project sessions and streaming. `send_message` is now `async`,
-reading stdout via `AsyncBufReadExt::read_line().await` and writing stdin via
-`AsyncWriteExt::write_all().await`. `Drop` rewritten for tokio: `start_kill()`
-plus a bounded `try_wait()` reap loop (no `.await` in `Drop`).
-
-Two bugs fixed along the way: (1) missing `\n` on NDJSON writes — lost when
-`writeln!` became `write_all` during the migration, it silently broke the input
-protocol and stalled reads; surfaced by removing a stray `.ok()` that was
-swallowing the write error. (2) `Stdio::piped()` stderr with no reader — latent
-deadlock risk, switched to `Stdio::null()` for now (proper drain task is a
-next step).
-
-Also introduced a `CommandEnv` trait so `apply_agent_config` is generic over
-both std and tokio `Command` — keeps the offline env-var inspection tests
-working via std's `get_envs()` while production uses tokio. `spawn` now takes
-`project_path` and calls `cmd.current_dir(project_path)` so claude runs in the
-project, not in loopdeck's cwd.
-
-Live integration tests pass against the provider (single-turn, current-directory,
-and cross-turn context retention). Commits `4a10df9` (config foundation) and
-`192ac8a` (ClaudeSession) on `feat/claude-session`.
-
-Files changed: src-tauri/src/{claude_session.rs, agents.rs, commands.rs, lib.rs,
-config.rs}, src/{types/index.ts, lib/tauri.ts, App.tsx, components/{layout/AppShell.tsx, settings/Settings.tsx}}.
-
-### 2026-06-22 — V2 Agent Memory Layer
-- **Status**: completed
-- **Completed**: 2026-06-22
-
-Full V2 agent memory layer implemented across 4 phases:
-
-**Phase 1 — Backend (rust-expert):** memory.rs with lenient Markdown parser for decisions.md
-(architectural decision records) and loops.md (current loop, next steps, history). Two new IPC
-commands: get_decisions, get_loops. 22 unit tests covering edge cases (em dash, hyphen,
-empty files, missing headings, partial file creation).
-
-**Phase 2 — Frontend (vite-senior-engineer):** DecisionsPanel and LoopsPanel components
-with loading/empty/error states. Sidebar tab navigation in ProjectDetail (Overview |
-Decisions | Loops). All matches existing Zustand + typed IPC conventions.
-
-**Phase 3 — Agent Convention:** Project-local .claude/skills/orchestrator SKILL.md extending
-the global orchestrator with .loopdeck/ write conventions. CLAUDE.md updated with memory
-convention. settings.local.json Stop hook with dual approach: command hook with
-hookSpecificOutput.additionalContext (injects memory reminder into model context) and shell
-script (mechanical heartbeat fallback). Initial implementation used `type: "prompt"` which
-silently failed — fixed by switching to `type: "command"` with JSON output. Hook verified
-working via pipe-test and jq validation.
-
-**Phase 4 — Review:** rust-code-reviewer and vite-senior-engineer review completed. One
-medium finding (leading-newline split pattern) fixed. 5 additional edge case tests added.
-Final: 52 Rust tests passing, TypeScript clean, 12 IPC commands registered.
-
-Files created: memory.rs (610 lines), DecisionsPanel.tsx, LoopsPanel.tsx (both ~120 lines),
-DecisionsPanel.css, LoopsPanel.css, orchestrator SKILL.md, loopdeck-memory-write.sh.
-Updated: ProjectDetail.tsx/CSS (sidebar nav), types/index.ts, tauri.ts, lib.rs, commands.rs,
-CLAUDE.md, settings.local.json, .loopdeck/decisions.md (6 decisions), .loopdeck/loops.md.
-
-### 2026-06-22 — V2 Agent Memory Backend
-- **Status**: completed
-- **Completed**: 2026-06-22
-
-Created memory.rs with Markdown parser for decisions.md and loops.md. Two new IPC commands:
-get_decisions and get_loops. 18 new tests. All 47 tests passing.
-
-### 2026-06-22 — V1 Gaps
-- **Status**: completed
-- **Completed**: 2026-06-22
-
-Fixed 4 V1 gaps: scan_depth enforcement, last_opened on dashboard, detected_stack +
-description_preview on import, rescan_project command. 30→30 tests (added max_depth test).
-
-### 2026-06-22 — V1 Core
-- **Status**: completed
-- **Completed**: 2026-06-22
-
-Built the scanner, .loopdeck/ bootstrap, project config registry, and full React UI.
-10 IPC commands: scan, import, list, get, update_description, remove, open_in_finder,
-open_in_terminal, regenerate_description, rescan_project. 30 Rust tests passing.
+Completed loops have been archived to keep the live file small (~95% smaller).
+Full history (28 completed loops, 2026-06-22 onward): [`loops-archive.md`](./loops-archive.md)

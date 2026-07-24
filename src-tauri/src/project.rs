@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::limits;
 use crate::scanner::detect_stack;
 use crate::skills;
 use chrono::Utc;
@@ -47,7 +48,7 @@ pub fn bootstrap_project(
     // Check if already bootstrapped
     if !project_file.exists() {
         // Generate description
-        create_files_and_diretories(repo_path)?;
+        create_files_and_directories(repo_path)?;
         let description = generate_description(repo_path, repo_name, markers, has_readme)?;
         setup_skills(repo_path, markers)?;
         meta = ProjectMeta::new(repo_name, &description);
@@ -57,7 +58,7 @@ pub fn bootstrap_project(
         std::fs::write(&project_file, contents)?;
         tracing::info!("Bootstrapped project at {:?}", repo_path.display());
     } else {
-        create_files_and_diretories(repo_path)?;
+        create_files_and_directories(repo_path)?;
         meta = load_project(repo_path)?;
         setup_skills(repo_path, markers)?;
     }
@@ -65,9 +66,12 @@ pub fn bootstrap_project(
     Ok(meta)
 }
 
-fn create_files_and_diretories(loopdeck_dir: &Path) -> Result<(), AppError> {
-    // Create .loopdeck directory
-    std::fs::create_dir_all(loopdeck_dir)?;
+fn create_files_and_directories(repo_path: &Path) -> Result<(), AppError> {
+    // Runtime layer.
+    std::fs::create_dir_all(repo_path.join(".loopdeck"))?;
+    // Spec layer — empty by default; epics are authored by humans / the
+    // authoring skill, never seeded by the app.
+    std::fs::create_dir_all(repo_path.join("docs").join("epics"))?;
     Ok(())
 }
 
@@ -214,7 +218,11 @@ fn extract_readme_paragraph(repo_path: &Path) -> Result<Option<String>, AppError
         None => return Ok(None),
     };
 
-    let readme_content = std::fs::read_to_string(&readme_path)?;
+    // Bounded read (PRD FR4): only the first paragraph is wanted, so cap the
+    // read at README_MAX_BYTES — a hostile giant README stays out of memory and
+    // the extracted paragraph is unaffected in practice. Lossy decode keeps a
+    // cap that splits a UTF-8 sequence from erroring.
+    let readme_content = limits::read_bounded_to_string(&readme_path, limits::README_MAX_BYTES)?;
 
     // Parse: find the first paragraph of meaningful content
     let mut in_code_block = false;

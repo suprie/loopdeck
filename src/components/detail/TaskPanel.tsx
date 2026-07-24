@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ListTodo, ChevronDown, ChevronUp, Check, X, Plus, Pencil } from "lucide-react";
+import { ListTodo, ChevronDown, ChevronUp, Check, X, Plus, Pencil, Loader2, Circle } from "lucide-react";
 import type { TaskRecord } from "../../types";
 import { useStreamingState } from "../../store/streamingState";
 
@@ -118,6 +118,12 @@ function statusVisual(status: string): { icon: React.ReactNode; cls: string } {
   switch (status) {
     case "completed":
       return { icon: <Check className="size-3" strokeWidth={3} />, cls: "text-emerald-500" };
+    case "in_progress":
+      // The "actively working on it" state — the one genuinely new glyph TaskUpdate
+      // introduces. A spinner reads instantly without needing the word label.
+      return { icon: <Loader2 className="size-3 animate-spin" />, cls: "text-primary" };
+    case "pending":
+      return { icon: <Circle className="size-3" />, cls: "text-muted-foreground" };
     case "created":
       return { icon: <Plus className="size-3" strokeWidth={3} />, cls: "text-primary" };
     case "deleted":
@@ -133,6 +139,10 @@ function statusBadgeCls(status: string): string {
   switch (status) {
     case "completed":
       return "text-emerald-600 dark:text-emerald-400";
+    case "in_progress":
+      return "text-primary";
+    case "pending":
+      return "text-muted-foreground";
     case "created":
       return "text-primary";
     case "deleted":

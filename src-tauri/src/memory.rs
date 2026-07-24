@@ -4,6 +4,7 @@
 //! empty/default values rather than errors. This ensures the UI degrades
 //! gracefully before any AI agent has written the files.
 
+use crate::persist;
 use serde::Serialize;
 use std::path::Path;
 
@@ -42,15 +43,28 @@ pub struct Loop {
     pub completed: Option<String>,
 }
 
+/// A single checklist item under `## Next Steps` in `loops.md`.
+///
+/// Carries the checked state so the UI can render `- [x]` items as done.
+/// Previously this was a bare `Vec<String>` and the prefix was stripped,
+/// discarding the checked state entirely (a checked box never showed as checked).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct NextStep {
+    /// The step text (without the `- [ ]` / `- [x]` prefix).
+    pub text: String,
+    /// Whether the box is checked (`- [x]`).
+    pub checked: bool,
+}
+
 /// Full status from `.loopdeck/loops.md`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LoopStatus {
     /// The currently active loop, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<Loop>,
-    /// Checklist of next steps (from `- [ ]` items).
+    /// Checklist of next steps (from `- [ ]` / `- [x]` items).
     #[serde(default)]
-    pub next_steps: Vec<String>,
+    pub next_steps: Vec<NextStep>,
     /// Completed / historical loops.
     #[serde(default)]
     pub history: Vec<Loop>,
@@ -105,18 +119,82 @@ pub fn ensure_memory_files(repo_path: &Path) -> Result<(), std::io::Error> {
 
     let decisions_file = loopdeck.join("decisions.md");
     if !decisions_file.exists() {
-        std::fs::write(&decisions_file, "# Decisions\n\n")?;
+        persist::atomic_write(&decisions_file, "# Decisions\n\n")?;
     }
 
     let loops_file = loopdeck.join("loops.md");
     if !loops_file.exists() {
-        std::fs::write(
+        persist::atomic_write(
             &loops_file,
             "# Loops\n\n## Current\n\n_No active loop._\n\n## Next Steps\n\n## History\n\n",
         )?;
     }
 
     Ok(())
+}
+
+/// Toggle a `- [ ]` / `- [x]` checklist item under `## Next Steps` in
+/// `loops.md`.
+///
+/// Matches the checklist line by its text (the content after the `- [ ]` /
+/// `- [x]` prefix, trimmed for comparison). The first match is toggled.
+/// Returns `Ok(true)` if toggled to checked, `Ok(false)` if toggled to
+/// unchecked, or an error if the file or item can't be found.
+pub fn toggle_loop_step(repo_path: &Path, step_text: &str) -> Result<bool, std::io::Error> {
+    let loops_file = repo_path.join(".loopdeck").join("loops.md");
+    let content = std::fs::read_to_string(&loops_file)?;
+
+    let needle = step_text.trim();
+    let mut found: Option<(usize, bool)> = None; // (line index, currently_checked)
+
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some((prefix_len, checked)) = checklist_prefix_len(trimmed) {
+            let text = trimmed[prefix_len..].trim();
+            if text == needle {
+                found = Some((i, checked));
+                break;
+            }
+        }
+    }
+
+    let (line_idx, currently_checked) = found.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("checklist item not found: {step_text}"),
+        )
+    })?;
+
+    // Rewrite the line with the toggled prefix. Reassemble preserving the
+    // original line terminators by splitting on lines and re-joining.
+    let mut lines: Vec<String> = content.split('\n').map(String::from).collect();
+    let old_line = &lines[line_idx];
+    let indent = old_line.len() - old_line.trim_start().len();
+    let new_box = if currently_checked { "- [ ]" } else { "- [x]" };
+    let item_text =
+        old_line.trim()[checklist_prefix_len(old_line.trim()).unwrap().0..].trim_start();
+    lines[line_idx] = format!("{}{} {}", " ".repeat(indent), new_box, item_text);
+
+    let new_content = lines.join("\n");
+    persist::atomic_write(&loops_file, &new_content)?;
+    Ok(!currently_checked)
+}
+
+/// If `line` starts with a GFM checklist marker, returns `(prefix_len, checked)`.
+/// `prefix_len` is the byte length of the `- [ ] ` / `- [x] ` prefix.
+fn checklist_prefix_len(line: &str) -> Option<(usize, bool)> {
+    if let Some(rest) = line.strip_prefix("- [ ] ") {
+        let _ = rest;
+        Some((6, false))
+    } else if let Some(rest) = line
+        .strip_prefix("- [x] ")
+        .or_else(|| line.strip_prefix("- [X] "))
+    {
+        let _ = rest;
+        Some((6, true))
+    } else {
+        None
+    }
 }
 
 // ── Parsing internals ────────────────────────────────────────────────
@@ -231,7 +309,7 @@ fn parse_decision_block(block: &str) -> Option<Decision> {
 /// Parse loops.md content into a LoopStatus.
 fn parse_loops_content(content: &str) -> LoopStatus {
     let mut current: Option<Loop> = None;
-    let mut next_steps: Vec<String> = Vec::new();
+    let mut next_steps: Vec<NextStep> = Vec::new();
     let mut history: Vec<Loop> = Vec::new();
 
     // Prepend a newline so `## ` at the very start of the file is caught
@@ -305,18 +383,25 @@ fn parse_loop_section(section: &str) -> Option<Loop> {
     })
 }
 
-/// Parse `- [ ]` and `- [x]` checklist items.
-fn parse_checklist(section: &str) -> Vec<String> {
+/// Parse `- [ ]` and `- [x]` checklist items, preserving the checked state.
+fn parse_checklist(section: &str) -> Vec<NextStep> {
     section
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim();
-            if trimmed.starts_with("- [ ] ") {
-                Some(trimmed[6..].to_string())
-            } else if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
-                Some(trimmed[6..].to_string())
+            if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+                Some(NextStep {
+                    text: rest.to_string(),
+                    checked: false,
+                })
             } else {
-                None
+                trimmed
+                    .strip_prefix("- [x] ")
+                    .or_else(|| trimmed.strip_prefix("- [X] "))
+                    .map(|rest| NextStep {
+                        text: rest.to_string(),
+                        checked: true,
+                    })
             }
         })
         .collect()
@@ -617,8 +702,12 @@ Migration from Context API was straightforward.
         assert_eq!(current.status, "in_progress");
 
         assert_eq!(status.next_steps.len(), 3);
-        assert_eq!(status.next_steps[0], "Create memory.rs");
-        assert_eq!(status.next_steps[1], "Design file format");
+        assert_eq!(status.next_steps[0].text, "Create memory.rs");
+        assert_eq!(status.next_steps[1].text, "Design file format");
+        // The second item is `- [x] Design file format` — checked state preserved.
+        assert!(!status.next_steps[0].checked);
+        assert!(status.next_steps[1].checked);
+        assert!(!status.next_steps[2].checked);
 
         assert_eq!(status.history.len(), 1);
         assert_eq!(status.history[0].goal, "V1 Core");
@@ -862,6 +951,84 @@ _No active loop._
 
         // loops.md should be created
         assert!(dir.join(".loopdeck").join("loops.md").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── toggle_loop_step tests ───────────────────────────────────
+
+    #[test]
+    fn test_toggle_loop_step_unchecked_to_checked() {
+        let (dir, _name) = create_temp_repo();
+        let loops_file = dir.join(".loopdeck").join("loops.md");
+        std::fs::write(
+            &loops_file,
+            "# Loops\n\n## Next Steps\n- [ ] First step\n- [ ] Second step\n",
+        )
+        .unwrap();
+
+        let now_checked = toggle_loop_step(&dir, "Second step").unwrap();
+        assert!(now_checked);
+
+        let content = std::fs::read_to_string(&loops_file).unwrap();
+        assert!(content.contains("- [x] Second step"));
+        assert!(content.contains("- [ ] First step"));
+        assert!(!content.contains("- [x] First step"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_toggle_loop_step_checked_to_unchecked() {
+        let (dir, _name) = create_temp_repo();
+        let loops_file = dir.join(".loopdeck").join("loops.md");
+        std::fs::write(
+            &loops_file,
+            "# Loops\n\n## Next Steps\n- [x] Done thing\n- [ ] Todo\n",
+        )
+        .unwrap();
+
+        let now_checked = toggle_loop_step(&dir, "Done thing").unwrap();
+        assert!(!now_checked);
+
+        let content = std::fs::read_to_string(&loops_file).unwrap();
+        assert!(content.contains("- [ ] Done thing"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_toggle_loop_step_not_found_errors() {
+        let (dir, _name) = create_temp_repo();
+        std::fs::write(
+            dir.join(".loopdeck").join("loops.md"),
+            "# Loops\n\n## Next Steps\n- [ ] Real step\n",
+        )
+        .unwrap();
+
+        let err = toggle_loop_step(&dir, "nonexistent step");
+        assert!(err.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_toggle_loop_step_preserves_indentation() {
+        let (dir, _name) = create_temp_repo();
+        let loops_file = dir.join(".loopdeck").join("loops.md");
+        std::fs::write(
+            &loops_file,
+            "# Loops\n\n## Next Steps\n  - [ ] Indented step\n",
+        )
+        .unwrap();
+
+        toggle_loop_step(&dir, "Indented step").unwrap();
+
+        let content = std::fs::read_to_string(&loops_file).unwrap();
+        assert!(
+            content.contains("  - [x] Indented step"),
+            "indentation should be preserved"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AI Project Manager Desktop App"
 authors = ["LoopDeck"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "loopdeck_lib"

@@ -1,0 +1,74 @@
+name: CI
+
+# Basic CI for the hardened private alpha (Release Gate A — "Basic CI").
+#
+# Alpha scope: run the five core gates on ONE supported OS — macOS (the
+# alpha's primary development + target platform) — rather than a three-OS
+# matrix. Broadening to macOS/Linux/Windows is the P3 backlog item in
+# `.loopdeck/loops.md` and lands after the cross-boundary OS contract is
+# signed (Release Gate A — "Alpha distribution contract").
+#
+# This workflow supersedes the old `rust.yml` (ubuntu build+test only), which
+# it entirely covers plus fmt + clippy + the frontend build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: fmt · clippy · test · build (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5        # v5 = Node.js 24 runtime (v4 = deprecated Node 20)
+
+      # ---------------- Rust ----------------
+      - name: Install Rust stable (with rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      # `cargo clippy -D warnings` — warnings are CI failures, not advice. The
+      # prior lint debt (6 clippy warnings) was cleared in the "Clear current
+      # lint debt" gate step; keep this strict so new debt can't slip in. The
+      # two intentional `#[allow]`s (`too_many_arguments` on the 9-field
+      # `ConversationTurn::assistant` constructor; `cfg(test)` on the test-only
+      # `parse_response`) are annotated at the call sites with their rationale.
+      - name: cargo clippy (-D warnings)
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+      # ---------------- Frontend ----------------
+      - name: Install Node.js
+        uses: actions/setup-node@v5        # v5 = Node.js 24 runtime
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      # `npm run build` runs `tsc` (type-check) then `vite build`, so the
+      # frontend type-check is covered here — no separate `tsc --noEmit` step.
+      - name: npm run build
+        run: npm run build

@@ -1,6 +1,5 @@
 use crate::config::AgentConfig;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 pub(crate) trait CommandEnv {
     fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
@@ -146,7 +145,10 @@ pub enum ClaudeEvent {
         tool_name: String,
         /// The raw tool input object, serialized to a JSON string.
         input: String,
-        /// `"pending"` (awaiting user), or `"allow"` / `"deny"` (resolved).
+        /// `"pending"` (awaiting user), `"allow"` / `"deny"` (resolved), or
+        /// `"auto-allow"` (the autonomous-mode policy approved a floor-clearing
+        /// mutating tool without parking). The UI uses `"auto-allow"` to tag
+        /// unattended approvals in the transcript for the morning review.
         decision: String,
         /// Why LoopDeck allowed or denied. Empty for pending and plain allows.
         reason: String,
@@ -184,6 +186,24 @@ pub enum ClaudeEvent {
         duration_ms: u64,
         /// The session id (drives `--resume`). Present on all assistant turns.
         session_id: String,
+    },
+    /// A transient provider error (e.g. `529 overloaded`) was hit and the turn
+    /// is being retried after a backoff. Emitted *between* attempts on the
+    /// streaming path, after the failed attempt's `Result` event but before the
+    /// retry sends. Lets the UI show "Retrying 2/4 in 4s…" instead of a silent
+    /// double-`Result`. The frontend treats the *final* `Result` (success or
+    /// terminal failure) as authoritative.
+    Retrying {
+        /// 1-based index of the attempt that's about to run (e.g. `2` for the
+        /// first retry after the initial attempt).
+        attempt: u32,
+        /// The configured maximum number of attempts.
+        max_attempts: u32,
+        /// The backoff duration in milliseconds that was slept before this event
+        /// was emitted.
+        backoff_ms: u64,
+        /// The error message from the failed attempt that triggered the retry.
+        error: String,
     },
 }
 
@@ -566,6 +586,53 @@ pub(crate) fn extract_task_from_tool_result(
     })
 }
 
+/// Extract a `TaskRecord` from an assistant `tool_use` block, if it is a
+/// `TaskUpdate` call.
+///
+/// This is the *second* task signal — the first is `extract_task_from_tool_result`
+/// above, which fires on a `TaskCreate` **result** (`tool_use_result.task`). But
+/// Claude's `TaskUpdate` tool carries its state change in the **call input**
+/// (`{taskId, status}`), not in the result payload: when the agent marks a task
+/// in_progress / completed / deleted, the result echoes nothing we can parse as a
+/// task, so without this helper every update was dropped (the TaskPanel froze at
+/// "created" forever).
+///
+/// Reads `taskId` + `status` + optional `subject` straight off the structured
+/// input. `subject` is usually absent on an update (only the status changes), so
+/// the frontend merges it onto the prior record rather than blanking it — see
+/// `streamingState.applyTask`. Returns `None` for any other tool name
+/// (including `TaskCreate`, whose input has no id).
+pub(crate) fn extract_task_from_tool_use(
+    name: &str,
+    input: &serde_json::Value,
+) -> Option<crate::conversation::TaskRecord> {
+    if name != "TaskUpdate" {
+        return None;
+    }
+    let id = input.get("taskId").and_then(|v| v.as_str())?.to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let subject = input
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // `status` is required-by-convention on TaskUpdate but the schema only
+    // mandates `taskId`; fall back to "updated" so the panel always has a label
+    // even for a malformed/best-effort call.
+    let status = input
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("updated")
+        .to_string();
+    Some(crate::conversation::TaskRecord {
+        id,
+        subject,
+        status,
+    })
+}
+
 /// Default for `ContentBlock::ToolUse::input` when the block omits it.
 /// An empty object (not `null`) so downstream `input["field"]` lookups are safe.
 fn default_tool_input() -> serde_json::Value {
@@ -628,11 +695,38 @@ pub(crate) struct ResponseAccumulator {
     /// live ClaudeEvent::TaskUpdate emissions so the persisted transcript
     /// records task creates / updates.
     tasks: Vec<crate::conversation::TaskRecord>,
+    /// Running byte total of the accumulated content strings (text, thinking,
+    /// tool-call input, task payloads). Bounded by [`crate::limits::ACCUMULATOR_MAX_BYTES`]
+    /// (PRD FR4) so a runaway agent turn can't grow the persisted response
+    /// without limit. `blocks` mirror the same content and are bounded
+    /// separately by [`crate::limits::ACCUMULATOR_MAX_BLOCKS`].
+    bytes: usize,
+    /// Set once [`ACCUMULATOR_MAX_BLOCKS`] or [`ACCUMULATOR_MAX_BYTES`] is
+    /// breached. Further content is dropped; [`finish`] / [`clone_partial`]
+    /// stamp a truncation marker so the (persisted + streamed) result shows the
+    /// turn was bounded. The terminal `Result` fields are still recorded.
+    over_limit: bool,
 }
+
+/// Truncation marker appended to the `result` text when the accumulator hit a
+/// block/byte budget (PRD FR4). Visible in both the transcript and the streamed
+/// `ClaudeEvent::Result` so the user can tell the response was bounded.
+const ACCUMULATOR_TRUNCATION_MARKER: &str =
+    "\n\n[LoopDeck: response truncated — exceeded block or byte accumulation limit]";
 
 impl ResponseAccumulator {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the accumulator has breached a block/byte budget (PRD FR4).
+    /// Once true, [`ingest_event`] drops further content pushes (the terminal
+    /// `Result` fields are still recorded) and sets [`over_limit`] so the
+    /// finished response carries a truncation marker.
+    fn at_limit(&self) -> bool {
+        self.over_limit
+            || self.blocks.len() >= crate::limits::ACCUMULATOR_MAX_BLOCKS
+            || self.bytes >= crate::limits::ACCUMULATOR_MAX_BYTES
     }
 
     /// Feed one parsed stream event. Returns true if this event was the
@@ -645,12 +739,24 @@ impl ResponseAccumulator {
                 session_id: sid,
             } => {
                 for block in message.content {
+                    // Budget guard (PRD FR4): once a block/byte ceiling is
+                    // breached, stop ingesting further content for this turn —
+                    // drop the remaining blocks, record the breach, and keep
+                    // the session_id (still set below). The terminal Result
+                    // event is unaffected, so the turn finishes naturally with
+                    // a truncated response rather than aborting mid-stream.
+                    if self.at_limit() {
+                        self.over_limit = true;
+                        break;
+                    }
                     match block {
                         ContentBlock::Text { text: t } => {
+                            self.bytes += t.len();
                             self.text.push_str(&t);
                             self.blocks.push(ContentBlockRecord::Text { text: t });
                         }
                         ContentBlock::Thinking { thinking: th } => {
+                            self.bytes += th.len();
                             self.thinking.get_or_insert_default().push_str(&th);
                             self.blocks
                                 .push(ContentBlockRecord::Thinking { thinking: th });
@@ -670,14 +776,24 @@ impl ResponseAccumulator {
                                 continue;
                             }
                             let input_str = input.to_string();
+                            self.bytes += name.len() + input_str.len();
                             self.tool_calls.push(crate::conversation::ToolCallRecord {
                                 name: name.clone(),
                                 input: input_str.clone(),
                             });
                             self.blocks.push(ContentBlockRecord::ToolUse {
-                                name,
+                                name: name.clone(),
                                 input: input_str,
                             });
+                            // TaskUpdate carries its state change in the *call*
+                            // input, so capture it here (mirrors the live
+                            // emission in send_message_streaming). TaskCreate's
+                            // id+subject arrive via the tool *result* path below.
+                            if let Some(task) = extract_task_from_tool_use(&name, &input) {
+                                self.bytes +=
+                                    task.id.len() + task.subject.len() + task.status.len();
+                                self.tasks.push(task);
+                            }
                         }
                     }
                 }
@@ -726,9 +842,16 @@ impl ResponseAccumulator {
     /// Produce the final response. Returns `None` if we never saw any
     /// assistant text or a result event — useful for the caller to detect
     /// "claude produced nothing".
-    pub(crate) fn finish(self) -> Option<AgentResponse> {
+    pub(crate) fn finish(mut self) -> Option<AgentResponse> {
         if self.result_text.is_empty() && self.text.is_empty() {
             return None;
+        }
+        // Stamp the truncation marker (PRD FR4) onto the visible result text so
+        // the user/transcript can see the turn was bounded by a block/byte
+        // ceiling. `result_text` is set by the terminal Result event; if it's
+        // empty the marker alone still surfaces the condition.
+        if self.over_limit {
+            self.result_text.push_str(ACCUMULATOR_TRUNCATION_MARKER);
         }
 
         Some(AgentResponse {
@@ -754,10 +877,16 @@ impl ResponseAccumulator {
     /// transcript). `result_text` is empty until the real result event, so the
     /// caller stamps a "(interrupted)" marker onto the synthesized result.
     pub(crate) fn clone_partial(&self) -> AgentResponse {
+        // Stamp the truncation marker (PRD FR4) so an interrupted turn that had
+        // already breached a budget still surfaces it in the synthesized result.
+        let mut result = self.result_text.clone();
+        if self.over_limit {
+            result.push_str(ACCUMULATOR_TRUNCATION_MARKER);
+        }
         AgentResponse {
             text: self.text.clone(),
             thinking: self.thinking.clone(),
-            result: self.result_text.clone(),
+            result,
             usage: self.usage.clone(),
             is_error: self.is_error,
             duration_ms: self.duration_ms,
@@ -778,6 +907,11 @@ pub(crate) fn parse_stream_line(line: &str) -> Option<StreamEvent> {
 }
 
 /// Parse a full NDJSON string into a structured `AgentResponse`.
+///
+/// Test-only helper: drains a canned NDJSON blob into one `AgentResponse`. The
+/// production paths feed the `ResponseAccumulator` line-by-line as events
+/// arrive, so this whole-blob entry point has no non-test caller.
+#[cfg(test)]
 fn parse_response(ndjson: &str) -> Option<AgentResponse> {
     let mut acc = ResponseAccumulator::new();
     for line in ndjson.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -797,6 +931,10 @@ fn parse_response(ndjson: &str) -> Option<AgentResponse> {
 /// Extracted for testability — allows verifying env vars without spawning.
 /// Also reused by `ClaudeSession::spawn`, so both the single-shot
 /// (`call_agents`) and persistent (`ClaudeSession`) paths stay in sync.
+///
+/// If `model` is unset, a default is injected so the `claude` CLI doesn't
+/// silently fall back to an unknown model — the default is logged at spawn
+/// and can be overridden from Settings.
 pub(crate) fn apply_agent_config<C: CommandEnv>(cmd: &mut C, agent_config: &AgentConfig) {
     if let Some(auth_token) = &agent_config.auth_token {
         cmd.env("ANTHROPIC_AUTH_TOKEN", auth_token);
@@ -806,14 +944,20 @@ pub(crate) fn apply_agent_config<C: CommandEnv>(cmd: &mut C, agent_config: &Agen
         cmd.env("ANTHROPIC_BASE_URL", base_url);
     }
 
-    if let Some(model) = &agent_config.model {
-        cmd.env("ANTHROPIC_MODEL", model);
-    }
+    // Fall back to a default model so the CLI never uses an unknown one
+    // silently. The user can override in Settings or via ANTHROPIC_MODEL
+    // in their shell env (which the child inherits if we don't set it).
+    let model = agent_config.model.as_deref().unwrap_or(DEFAULT_MODEL);
+    cmd.env("ANTHROPIC_MODEL", model);
 
     if let Some(effort) = &agent_config.effort {
         cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
     }
 }
+
+/// Default model id used when `AgentConfig.model` is unset. Mirrors the
+/// documented default in `.env.example`.
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -1209,6 +1353,79 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_task_from_tool_use_status_transitions() {
+        // `TaskUpdate` carries its state change in the call input, not the
+        // result. The helper must parse `taskId` + `status` (+ optional subject)
+        // off the structured input. This is the path that was previously dropped
+        // entirely — the regression this test guards.
+        let inp = serde_json::json!({"taskId": "1", "status": "in_progress"});
+        let task = extract_task_from_tool_use("TaskUpdate", &inp)
+            .expect("TaskUpdate input must extract a task");
+        assert_eq!(task.id, "1");
+        assert_eq!(task.status, "in_progress");
+        // subject is absent on a status-only update — empty here, merged in the UI
+        assert_eq!(task.subject, "");
+
+        // Completed transition.
+        let inp = serde_json::json!({"taskId": "2", "status": "completed"});
+        let task = extract_task_from_tool_use("TaskUpdate", &inp).unwrap();
+        assert_eq!(task.status, "completed");
+
+        // A subject-bearing update (rename) passes through.
+        let inp =
+            serde_json::json!({"taskId": "3", "status": "in_progress", "subject": "New title"});
+        let task = extract_task_from_tool_use("TaskUpdate", &inp).unwrap();
+        assert_eq!(task.subject, "New title");
+
+        // Non-TaskUpdate tools (incl. TaskCreate, whose input has no id) → None.
+        assert!(extract_task_from_tool_use("TaskCreate", &serde_json::json!({})).is_none());
+        assert!(
+            extract_task_from_tool_use("Read", &serde_json::json!({"file_path": "/a"})).is_none()
+        );
+        // Missing taskId → None.
+        assert!(extract_task_from_tool_use(
+            "TaskUpdate",
+            &serde_json::json!({"status": "completed"})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_accumulator_collects_task_update_from_tool_use_input() {
+        // The realistic wire shape: a `TaskCreate` lands via a tool RESULT
+        // (carrying id+subject), then a `TaskUpdate` lands via a tool_use INPUT
+        // (carrying the new status). Before the fix, the update was silently
+        // dropped because its result carried no task payload — so both must now
+        // land on `AgentResponse.tasks` in arrival order.
+        let mut acc = ResponseAccumulator::new();
+        // Create: tool_use_result.task (id + subject), status mined as "created".
+        let create = parse_stream_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Task #1 created: A"}]},"tool_use_result":{"task":{"id":"1","subject":"A"}}}"#,
+        ).unwrap();
+        // Update: an assistant tool_use block named TaskUpdate with the new status.
+        let update = parse_stream_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]},"session_id":"s"}"#,
+        ).unwrap();
+        acc.ingest_event(create);
+        acc.ingest_event(update);
+        acc.ingest_event(StreamEvent::Result {
+            result: "done".into(),
+            is_error: false,
+            duration_ms: 1,
+            total_cost_usd: None,
+            usage: None,
+        });
+        let resp = acc.finish().expect("finish must produce a response");
+        assert_eq!(resp.tasks.len(), 2);
+        assert_eq!(resp.tasks[0].id, "1");
+        assert_eq!(resp.tasks[0].status, "created");
+        // The update landed — status from the call input, subject empty (merged in UI).
+        assert_eq!(resp.tasks[1].id, "1");
+        assert_eq!(resp.tasks[1].status, "completed");
+        assert_eq!(resp.tasks[1].subject, "");
+    }
+
+    #[test]
     fn test_parse_response_blocks_preserve_arrival_order() {
         // The headline reason `blocks` exists: a turn that interleaves
         // thinking → text → tool_use → thinking → text must keep that exact
@@ -1258,6 +1475,59 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
     }
 
+    // ── accumulator resource budgets (PRD FR4) ──────────────────────────
+
+    #[test]
+    fn accumulator_caps_blocks_and_marks_truncation() {
+        // Push well over the block cap (one tiny text block per assistant
+        // message), then a terminal Result. The accumulator must stop ingesting
+        // at the cap and stamp the truncation marker onto the visible result.
+        let mut acc = ResponseAccumulator::new();
+        for _ in 0..(crate::limits::ACCUMULATOR_MAX_BLOCKS + 1000) {
+            let _ = acc.ingest_event(StreamEvent::Assistant {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text { text: "x".into() }],
+                },
+                session_id: "s".into(),
+            });
+        }
+        let _ = acc.ingest_event(StreamEvent::Result {
+            result: "done".into(),
+            is_error: false,
+            duration_ms: 1,
+            total_cost_usd: None,
+            usage: None,
+        });
+        let resp = acc.finish().expect("finish must produce a response");
+        assert!(
+            resp.blocks.len() <= crate::limits::ACCUMULATOR_MAX_BLOCKS,
+            "blocks should be capped at ACCUMULATOR_MAX_BLOCKS, got {}",
+            resp.blocks.len()
+        );
+        assert!(
+            resp.result.contains("truncated"),
+            "result should carry the truncation marker: {}",
+            resp.result
+        );
+    }
+
+    #[test]
+    fn accumulator_clone_partial_stamps_truncation_when_over_limit() {
+        // An interrupted turn that already breached the budget must still
+        // surface the marker via clone_partial (the synthesized Result path).
+        let mut acc = ResponseAccumulator::new();
+        for _ in 0..(crate::limits::ACCUMULATOR_MAX_BLOCKS + 100) {
+            let _ = acc.ingest_event(StreamEvent::Assistant {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text { text: "y".into() }],
+                },
+                session_id: "s".into(),
+            });
+        }
+        let partial = acc.clone_partial();
+        assert!(partial.result.contains("truncated"));
+    }
+
     // ── apply_agent_config tests ─────────────────────────────────────────
 
     /// Helper: collect env vars from a Command as Vec<(String, String)>.
@@ -1279,6 +1549,7 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             model: Some("claude-opus-4-8".into()),
             effort: Some("max".into()),
+            ..Default::default()
         };
 
         let mut cmd = Command::new("claude");
@@ -1295,19 +1566,20 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_agent_config_empty_fields_set_nothing() {
+    fn test_apply_agent_config_empty_fields_set_default_model() {
         let config = AgentConfig {
             auth_token: None,
             base_url: None,
             model: None,
             effort: None,
+            ..Default::default()
         };
 
         let mut cmd = Command::new("claude");
 
         // Record env vars that *already exist* after construction (inherited from
-        // the test process). Then apply config and verify no NEW agent-specific vars
-        // were added.
+        // the test process). Then apply config and verify only the default model
+        // was added — everything else stays unset.
         let before: Vec<String> = cmd
             .get_envs()
             .map(|(k, _)| k.to_string_lossy().into_owned())
@@ -1315,21 +1587,32 @@ mod tests {
 
         apply_agent_config(&mut cmd, &config);
 
-        let after: Vec<String> = cmd
+        let envs: Vec<(String, String)> = cmd
             .get_envs()
-            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .filter_map(|(k, v)| {
+                v.map(|val| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        val.to_string_lossy().into_owned(),
+                    )
+                })
+            })
             .collect();
 
-        let agent_vars = [
+        // The default model IS set (no silent CLI fallback).
+        assert!(
+            envs.contains(&("ANTHROPIC_MODEL".into(), DEFAULT_MODEL.into())),
+            "expected ANTHROPIC_MODEL={DEFAULT_MODEL}, got: {envs:?}"
+        );
+
+        // The other three were NOT added (they're still None in the config).
+        for var in [
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_MODEL",
             "CLAUDE_CODE_EFFORT_LEVEL",
-        ];
-
-        for var in agent_vars {
+        ] {
             let was_present_before = before.contains(&var.to_string());
-            let is_present_after = after.contains(&var.to_string());
+            let is_present_after = envs.iter().any(|(k, _)| k == var);
             assert_eq!(
                 was_present_before, is_present_after,
                 "{var} should not have been added"
@@ -1345,6 +1628,7 @@ mod tests {
             base_url: Some("https://api.deepseek.com/anthropic".into()),
             model: Some("deepseek-v4-pro[1m]".into()),
             effort: None,
+            ..Default::default()
         };
 
         let mut cmd = Command::new("claude");

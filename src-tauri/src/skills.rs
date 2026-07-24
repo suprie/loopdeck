@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::persist;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -285,11 +286,21 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
     //
     // Under `--permission-mode default`, a tool call only emits a
     // `control_request` if it doesn't match an allow rule. Seeding a curated
-    // list of known-safe read/build commands means the common dev-loop traffic
-    // (ls, git status, cargo/npm builds, file reads/edits) short-circuits the
-    // control protocol entirely — so it neither stalls nor clutters the
-    // permission log/UI. Anything not on this list still routes through the
-    // `permission::PermissionPolicy` (allow-by-default + destructive floor).
+    // list of known-safe read commands means the common dev-loop traffic
+    // (ls, git status, file reads) short-circuits the control protocol
+    // entirely — so it neither stalls nor clutters the permission log/UI.
+    // Anything not on this list routes through LoopDeck's policy
+    // (destructive floor -> MANUAL_APPROVAL_TOOLS interception -> auto-allow).
+    //
+    // **What is deliberately NOT here (Phase 1, PRD FR1):**
+    // - No `Edit(*)` / `Write(*)` / `NotebookEdit(*)` — file mutation must
+    //   route through the manual-approval card so the user sees it.
+    // - No broad build-runner rules (`Bash(cargo:*)`, `Bash(npm:*)`, etc.) —
+    //   a hostile repo controls its own scripts and build steps, so a broad
+    //   allow rule is a privilege escalation vector. Users who trust a
+    //   project can add narrow rules (e.g. `Bash(npm run test:*)`) via the
+    //   approval card's "Always allow" button, which writes to
+    //   `.claude/settings.local.json`.
     // Idempotent + dedup'd, mirroring the hook-insertion pattern above; any
     // pre-existing rules are preserved.
     {
@@ -298,9 +309,6 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
             "Read(*)",
             "Glob(*)",
             "Grep(*)",
-            // File edits/writes — bounded by the project's git history.
-            "Edit(*)",
-            "Write(*)",
             // Common safe read-only Bash commands.
             "Bash(ls:*)",
             "Bash(cat:*)",
@@ -319,13 +327,6 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
             "Bash(git show:*)",
             "Bash(git branch:*)",
             "Bash(git add:*)",
-            // Build / test runners for common stacks.
-            "Bash(cargo:*)",
-            "Bash(npm:*)",
-            "Bash(npx:*)",
-            "Bash(go:*)",
-            "Bash(pnpm:*)",
-            "Bash(yarn:*)",
         ];
 
         if root.get("permissions").is_none() {
@@ -344,10 +345,13 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
         root["permissions"]["allow"] = serde_json::Value::Array(existing);
     }
 
-    // Write settings.json (pretty-printed for readability)
+    // Write settings.json (pretty-printed for readability) atomically so a
+    // crash mid-write can't leave a truncated allowlist — a half-written
+    // settings.json could either drop the user's curated rules or leave
+    // malformed JSON that claude refuses to load.
     let formatted = serde_json::to_string_pretty(&root)
         .map_err(|e| AppError::Config(format!("JSON serialization error: {e}")))?;
-    std::fs::write(&settings_path, formatted)?;
+    persist::atomic_write(&settings_path, &formatted)?;
 
     Ok(())
 }
@@ -357,9 +361,19 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
 ///
 /// An empty matcher string `""` denotes the default (no-matcher) group.
 fn find_or_create_matcher_group(event_array: &mut serde_json::Value, matcher: &str) -> usize {
+    // A pre-existing user `.claude/settings.json` may hold a hook event keyed to
+    // a non-array value (a string, number, object — hand-edited or written by a
+    // different tool). Coerce it to an empty array rather than panicking: under
+    // `panic = "abort"` a panic here aborts the whole process on import, and
+    // `setup_hooks` is on the import path. This mirrors the lenient parse
+    // fallback above (line ~213: malformed JSON → `{}`): treat malformed user
+    // config as "no existing hooks" and proceed.
+    if !event_array.is_array() {
+        *event_array = serde_json::Value::Array(Vec::new());
+    }
     let arr = event_array
         .as_array_mut()
-        .expect("hook event must be an array");
+        .expect("coerced to an array immediately above");
 
     // Look for an existing group with the same matcher
     for (i, entry) in arr.iter().enumerate() {
@@ -668,10 +682,52 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_hooks_survives_malformed_hook_events() {
+        // Regression: a pre-existing `.claude/settings.json` whose hook events
+        // are non-arrays (hand-edited, or written by a different tool) must not
+        // abort the process. Under `panic = "abort"` the old `.expect()` in
+        // `find_or_create_matcher_group` crashed the whole app on import — and
+        // `setup_hooks` is on the import path.
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.json"),
+            serde_json::json!({
+                "hooks": {
+                    "Stop": "not-an-array",
+                    "PreToolUse": 42
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        setup_hooks(&dir).expect("setup_hooks must tolerate malformed hook events");
+
+        let raw = fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // Both malformed values were coerced to arrays and populated.
+        let stop_groups = root["hooks"]["Stop"]
+            .as_array()
+            .expect("malformed Stop coerced to an array");
+        assert!(stop_groups[0]["hooks"].as_array().unwrap().iter().any(|h| {
+            h["command"].as_str() == Some("python3 .loopdeck/hooks/loopdeck-stop-hook.py")
+        }));
+
+        let ptuse_groups = root["hooks"]["PreToolUse"]
+            .as_array()
+            .expect("malformed PreToolUse coerced to an array");
+        assert_eq!(ptuse_groups[0]["matcher"].as_str(), Some("Skill"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_setup_hooks_writes_curated_allowlist() {
         // Under `default` permission mode, a curated allow list lets common
-        // safe commands short-circuit the control protocol. setup_hooks must
-        // seed it into every bootstrapped project's settings.json.
+        // safe read commands short-circuit the control protocol. setup_hooks
+        // must seed it into every bootstrapped project's settings.json.
         let dir = temp_dir();
         setup_hooks(&dir).unwrap();
 
@@ -681,13 +737,42 @@ mod tests {
             .as_array()
             .expect("permissions.allow must exist after setup_hooks");
 
-        // Spot-check a representative sample from each category.
+        // Spot-check a representative sample of what SHOULD be seeded.
         let has = |rule: &str| allow.iter().any(|v| v.as_str() == Some(rule));
         assert!(has("Read(*)"), "read tool missing");
         assert!(has("Bash(ls:*)"), "safe read command missing");
         assert!(has("Bash(git status:*)"), "vcs inspection missing");
-        assert!(has("Bash(cargo:*)"), "build runner missing");
-        assert!(has("Bash(npm:*)"), "npm runner missing");
+
+        // Phase 1 (PRD FR1): broad mutation + build-runner rules must NOT be
+        // seeded — they bypass LoopDeck's manual-approval card at the Claude
+        // layer. Users add narrow rules via the approval card's "Always allow"
+        // button instead.
+        assert!(!has("Edit(*)"), "broad Edit rule must NOT be seeded");
+        assert!(!has("Write(*)"), "broad Write rule must NOT be seeded");
+        assert!(
+            !has("Bash(cargo:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(npm:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(npx:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(go:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(pnpm:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
+        assert!(
+            !has("Bash(yarn:*)"),
+            "broad build-runner rule must NOT be seeded"
+        );
         assert!(
             !has("Bash(rm -rf:*)"),
             "destructive patterns must NOT be in the allow list"

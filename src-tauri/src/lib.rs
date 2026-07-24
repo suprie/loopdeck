@@ -1,15 +1,23 @@
 mod agents;
+mod binary;
 mod claude_session;
 mod commands;
 mod config;
 mod conversation;
+mod epic;
 mod error;
 mod git;
+mod graphify;
+mod limits;
 mod logging;
 mod memory;
+mod paths;
 mod permission;
+mod persist;
 mod project;
+pub mod retry;
 mod scanner;
+mod secrets;
 mod skills;
 
 use commands::AppState;
@@ -21,18 +29,69 @@ pub fn run() {
     // config load, Tauri, and the claude process are captured. Idempotent.
     logging::init_logging();
 
-    // Load config — if it fails, start with a clean default and persist it
-    let config = GlobalConfig::load().unwrap_or_else(|e| {
-        tracing::warn!("failed to load config, starting fresh: {e}");
-        let fresh = GlobalConfig::default();
-        // Try to save the fresh config so next restart succeeds
-        if let Err(save_err) = fresh.save() {
-            tracing::warn!("failed to save default config: {save_err}");
+    // Load the registry. Per PRD FR2, a malformed primary MUST NOT be silently
+    // overwritten with a fresh default — that would turn recoverable corruption
+    // into silent data loss. `GlobalConfig::load` tries the primary, then the
+    // `.bak`, then returns Err. Surface that as a structured error + exit so
+    // the user knows their project list is intact-but-needing-repair, not
+    // wiped. The malformed file stays on disk for manual recovery.
+    let mut config = match GlobalConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("registry load failed: {e}");
+            tracing::error!(
+                "the malformed registry has NOT been overwritten; repair it \
+                 manually or delete it to start fresh"
+            );
+            std::process::exit(1);
         }
-        fresh
-    });
+    };
 
-    tauri::Builder::default()
+    // One-time migration: move any plaintext auth token out of config.yaml into
+    // the local secrets file. Best-effort — if the secrets file write fails we
+    // keep the token in memory and carry on; `save()` still applies the 0600
+    // interim floor below so any plaintext copy that remains is owner-only.
+    match config.migrate_auth_token_to_secrets_file() {
+        Ok(true) => tracing::info!(
+            "migrated plaintext auth token from config.yaml to local secrets file"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            "secrets file write failed; keeping auth token in 0600 config.yaml as interim floor: {e}"
+        ),
+    }
+    // Persist: scrubs the token from the file when migration succeeded, and
+    // (re)applies the 0600 permission floor in every case so a pre-existing
+    // world-readable file is tightened even if nothing else changed.
+    if let Err(e) = config.save() {
+        tracing::warn!("failed to persist config after auth-token migration: {e}");
+    }
+
+    // Reconcile interrupted sessions (PRD FR5). A turn killed mid-flight by a
+    // restart/crash leaves the user turn (appended before the send) with no
+    // following assistant reply — a trailing orphan in `active.jsonl`. Mark each
+    // such orphan `interrupted` now, before any IPC load, so the transcript
+    // truthfully records that the turn did not complete and a new turn is
+    // unblocked (the in-memory busy/waiting state is already clear — it is
+    // ephemeral and starts empty on a fresh process). This is the
+    // restart-recovery half; the send-failure half runs in the agent pipelines.
+    // Transcript-based, so no separate run record is persisted. Best-effort per
+    // project: a reconciliation failure is logged, never fatal.
+    for project in &config.projects {
+        match conversation::reconcile_interrupted(&project.path) {
+            Ok(true) => tracing::info!(
+                "reconciled interrupted session for {}",
+                project.path.display()
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "failed to reconcile interrupted session for {}: {e}",
+                project.path.display()
+            ),
+        }
+    }
+
+    if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
@@ -43,40 +102,69 @@ pub fn run() {
             interrupt_slots: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
-            commands::list_dir_entries,
-            commands::search_project_files,
-            commands::list_skills,
-            commands::scan_directory,
-            commands::import_project,
-            commands::list_projects,
-            commands::get_project,
-            commands::update_description,
-            commands::remove_project,
-            commands::open_in_finder,
-            commands::open_in_terminal,
-            commands::regenerate_description,
-            commands::rescan_project,
-            commands::get_decisions,
-            commands::get_loops,
-            commands::get_agent_config,
-            commands::set_agent_config,
-            commands::agent_start_loop,
-            commands::agent_start_loop_streaming,
-            commands::agent_send_message,
-            commands::agent_send_message_streaming,
-            commands::agent_get_conversation,
-            commands::agent_list_conversations,
-            commands::agent_get_conversation_by_id,
-            commands::agent_promote_to_active,
-            commands::agent_reset_session,
-            commands::agent_answer_question,
-            commands::agent_answer_permission,
-            commands::agent_add_allow_rule,
-            commands::agent_interrupt,
-            commands::agent_is_busy,
-            commands::agent_pending_permission,
-            commands::agent_pending_question,
+            // Composer + scan (composer.rs)
+            commands::composer::list_dir_entries,
+            commands::composer::search_project_files,
+            commands::composer::list_skills,
+            commands::composer::scan_directory,
+            // Project management (project.rs)
+            commands::project::import_project,
+            commands::project::list_projects,
+            commands::project::get_project,
+            commands::project::update_description,
+            commands::project::set_project_autonomous,
+            commands::project::remove_project,
+            commands::project::open_in_finder,
+            commands::project::open_in_terminal,
+            commands::project::regenerate_description,
+            commands::project::rescan_project,
+            commands::project::get_graphify_stats,
+            // Decisions / loops / epics / specs (epics.rs)
+            commands::epics::get_decisions,
+            commands::epics::get_loops,
+            commands::epics::get_epics,
+            commands::epics::get_epics_by_milestone,
+            commands::epics::promote_epic_loop,
+            commands::epics::toggle_loop_step,
+            commands::epics::toggle_prd_loop,
+            commands::epics::read_spec_file,
+            commands::epics::write_spec_file,
+            // Agent config + auth token + diagnostics (config_cmds.rs)
+            commands::config_cmds::get_agent_config,
+            commands::config_cmds::set_agent_config,
+            commands::config_cmds::clear_auth_token,
+            commands::config_cmds::get_log_info,
+            commands::config_cmds::reveal_log_dir,
+            // Agent / Claude session (agent.rs)
+            commands::agent::agent_start_loop,
+            commands::agent::agent_start_loop_streaming,
+            commands::agent::agent_send_message,
+            commands::agent::agent_send_message_streaming,
+            commands::agent::agent_get_conversation,
+            commands::agent::agent_list_conversations,
+            commands::agent::agent_get_conversation_by_id,
+            commands::agent::agent_promote_to_active,
+            commands::agent::agent_reset_session,
+            commands::agent::agent_answer_question,
+            commands::agent::agent_answer_permission,
+            commands::agent::agent_add_allow_rule,
+            commands::agent::agent_interrupt,
+            commands::agent::agent_is_busy,
+            commands::agent::agent_pending_permission,
+            commands::agent::agent_pending_question,
+            commands::agent::list_pending_questions,
+            commands::agent::list_pending_permissions,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    {
+        // `run()` only errors on an unrecoverable startup failure (WebView
+        // init, context generation, plugin init) — there is no recovery path,
+        // so terminating is correct either way. But under `panic = "abort"` the
+        // `.expect()` that lived here aborted the process with a raw panic
+        // message; logging via tracing (initialized above) and exiting cleanly
+        // removes that panic source and lands a structured log line a user can
+        // actually find when the app won't start.
+        tracing::error!("error while running tauri application: {e}");
+        std::process::exit(1);
+    }
 }

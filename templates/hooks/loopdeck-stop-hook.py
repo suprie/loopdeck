@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""LoopDeck Stop hook — only emits memory-update reminder when code changed.
+"""LoopDeck Stop hook — append-only memory nudge (lean, no re-reads).
 
-Gated by .loopdeck/ directory existence (only fires in LoopDeck-tracked projects)
-and .claude/.session-dirty (only fires when file changes occurred this session).
-The shell fallback (loopdeck-memory-write.sh) is the sole consumer of the dirty file.
+Design rules (learned the hard way — see decision 2026-07-19 "Stop hook
+re-injection caused runaway token usage"):
+
+  1. NEVER instruct the model to *read* loops.md / decisions.md. Those files
+     can be large; forcing a re-read every turn is what burned ~30M tokens/hr.
+     This nudge is ~3 lines and asks for an APPEND only.
+  2. Gate on `.loopdeck/` (LoopDeck-tracked project) AND `.claude/.session-dirty`
+     (file changes happened this turn). Without the dirty flag the hook is a
+     no-op, so pure Q&A and read-only turns cost zero.
+  3. The dirty flag is created by loopdeck-dirty-flag.py (PreToolUse on
+     Edit/Write/MultiEdit) and consumed by loopdeck-memory-write.sh.
 """
 import json
 import os
@@ -11,38 +19,19 @@ import os
 LOOPDECK_DIR = ".loopdeck"
 DIRTY_FILE = ".claude/.session-dirty"
 
-# Gate: only fire in LoopDeck-tracked projects
-if not os.path.isdir(LOOPDECK_DIR):
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "Stop",
-            "additionalContext": "",
-        }
-    }))
-    exit(0)
-
+# Short, append-only reminder. Deliberately does NOT say "read loops.md".
 REMINDER = (
-    "LOOPDECK MEMORY UPDATE REQUIRED:\n"
-    "Before ending this session, update the project memory files:\n"
-    "1. Read .loopdeck/decisions.md and append any architectural decisions made "
-    "this session (format: ## YYYY-MM-DD — Title, then "
-    "- **Status**: accepted|proposed|superseded, - **Context**: ..., "
-    "- **Consequences**: ...).\n"
-    "2. Read .loopdeck/loops.md and update the Current loop status, refresh "
-    "Next Steps, and move any completed loops to History under ## History.\n"
-    "3. If you completed a loop this session, move it to History as "
-    "### YYYY-MM-DD — Title and set the next loop as Current.\n"
-    "\n"
-    "These files are displayed in LoopDeck UI tabs."
+    "LoopDeck: if you made an architectural decision or changed the active "
+    "loop this turn, APPEND a one-paragraph entry to "
+    ".loopdeck/decisions.md (## YYYY-MM-DD — Title) or update the Current "
+    "section of .loopdeck/loops.md. Skip if this turn was read-only or Q&A."
 )
 
-dirty = os.path.exists(DIRTY_FILE)
-if dirty:
-    # Don't delete the dirty file — the shell fallback hook also needs to see it.
-    # The shell script (loopdeck-memory-write.sh) is the sole consumer.
-    msg = REMINDER
-else:
+# Only fire in LoopDeck-tracked projects that changed files this turn.
+if not os.path.isdir(LOOPDECK_DIR) or not os.path.exists(DIRTY_FILE):
     msg = ""
+else:
+    msg = REMINDER
 
 print(json.dumps({
     "hookSpecificOutput": {

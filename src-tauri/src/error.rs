@@ -30,8 +30,17 @@ pub enum AppError {
     #[error("Project already exists at: {0}")]
     ProjectAlreadyExists(String),
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Agent error: {0}")]
     Agent(String),
+
+    #[error("Background task failed: {0}")]
+    BlockingTask(String),
+
+    #[error("Resource limit exceeded: {0}")]
+    Limit(String),
 }
 
 impl Serialize for AppError {
@@ -54,7 +63,10 @@ impl Serialize for AppError {
                 AppError::Config(_) => "config",
                 AppError::LockError => "lockError",
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
+                AppError::Conflict(_) => "conflict",
                 AppError::Agent(_) => "agent",
+                AppError::BlockingTask(_) => "blockingTask",
+                AppError::Limit(_) => "limit",
             },
         )?;
         state.end()

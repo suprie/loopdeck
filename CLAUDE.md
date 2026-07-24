@@ -88,6 +88,20 @@ See `docs/PRD.md` for full product requirements — V1 focuses on:
 
 V1 does NOT include agents, loops, cloud, or collaboration.
 
+## Context Discipline (token cost)
+
+This repo has several large files (`commands.rs` ~30K tok, `claude_session.rs` ~24K,
+`conversation.rs` / `agents.rs` / `epic.rs` / `config.rs` each >12K). Re-reading
+them across iterations is the dominant token cost in long sessions.
+
+- **Do not re-read a file you have already read this session.** The contents are
+  in your context already; use `Grep`/offset-`Read` to locate a specific symbol
+  instead of re-reading the whole file.
+- **Prefer `Grep` over full `Read`** when you need one function or constant.
+- **State which file/line you're reasoning from** so the next turn doesn't need
+  to re-read to verify.
+- If a file has grown past ~1500 lines, flag it for splitting in `loops.md`.
+
 ## .loopdeck/ Memory Convention
 
 This project itself is a LoopDeck-tracked project. AI agents working on this repo
