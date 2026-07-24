@@ -5,9 +5,9 @@ argument-hint: <prd-file-path>
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, TaskCreate, TaskUpdate, Skill]
 ---
 
-# Orchestrator — PRD → Clarify → API Contract → Build → Review → Stitch → Iterate
+# Orchestrator — PRD → Clarify → API Contract → Build → Review → Stitch → Verify → Ship
 
-Read a Product Requirements Document (PRD), ask clarifying questions, produce an API contract, spawn parallel backend (Go) and frontend (iOS) agents, review output, stitch everything together, and iterate through phases.
+Read a Product Requirements Document (PRD), ask clarifying questions, produce an API contract, spawn parallel backend (Go) and frontend (iOS) agents, review output, stitch everything together, verify against the PRD's acceptance criteria, and ship a reviewable pull request.
 
 ## Full Orchestration Flow
 
@@ -34,9 +34,13 @@ Read a Product Requirements Document (PRD), ask clarifying questions, produce an
 │     Verify Go ↔ iOS contract alignment, wire          │
 │     everything together, run tests.                   │
 ├──────────────────────────────────────────────────────┤
-│  6. Decide Next Phase                                 │
-│     Based on review + integration results:            │
-│     proceed, rework, or adjust plan.                  │
+│  6. Verify Against PRD                                │
+│     Invoke prd-verifier → PASS / WARN / BLOCK;        │
+│     BLOCK / WARN gate the ship step.                  │
+├──────────────────────────────────────────────────────┤
+│  7. Decide & Open PR                                  │
+│     On a green verdict, invoke open-pr to ship a      │
+│     reviewable PR.                                    │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -139,11 +143,17 @@ Based on the PRD and clarified answers, produce a multi-stack phase plan:
 | Go | Unit tests, integration tests | 2 |
 | iOS | ViewModel tests, Interactor tests | 3 |
 
-### Phase 6: Stitch & Verify
+### Phase 6: Verify Against PRD
 | Task | Agent |
 |------|-------|
-| DI wiring, navigation, contract alignment check with the PRD | 1 |
+| DI wiring, navigation, contract alignment check | 1 |
 | Full test suite run | 1 |
+| Per-criterion PASS / PARTIAL / FAIL via `prd-verifier` | 1 |
+
+### Phase 7: Decide & Open PR
+| Task | Skill |
+|------|-------|
+| On a green verdict, `open-pr` drafts the PR body and runs `gh pr create` | 1 |
 ```
 
 **Wait for user approval** before proceeding.
@@ -283,18 +293,69 @@ scope, and groups the WIP coherently before push. The orchestrator does **not**
 `git add`, commit, or push — those are the auto-commit hook point owned by
 `open-pr`, gated by its PR-body confirmation.
 
-## Phase 6: Decide Next Phase
+## Phase 6: Verify Against PRD
 
-Based on integration results:
+Before opening a PR, verify the implemented code against the PRD's **stated
+acceptance criteria**. This is a structured per-criterion pass/fail — distinct
+from Phase 4's code-quality reviews and Phase 5's contract-alignment check,
+neither of which assesses whether the PRD's acceptance criteria are actually met.
 
-| Outcome | Action |
+### Invoke the verifier
+
+Call the `loopdeck:prd-verifier` skill with the PRD path from `$ARGUMENTS`. The
+skill is read-only (`allowed-tools: [Read, Glob, Grep, Bash]` — no
+`Edit`/`Write`/`Agent`); it produces a per-criterion **PASS / PARTIAL / FAIL**
+table with `file:line` evidence, a non-goals scope-creep audit, and a single
+greppable roll-up verdict:
+
+- any **FAIL** → **BLOCK**
+- else any **PARTIAL** → **WARN**
+- else → **PASS**
+
+### Verdict & Actions
+
+| Verdict | Action |
 |---------|--------|
-| All green | Report completion. Summarize files created, test coverage, any deferred warnings. |
-| Minor issues | Spawn targeted fix agents, re-run affected checks. |
-| Major gaps | Return to the relevant phase, respawn agents with corrected prompts. |
-| PRD gap discovered | Flag to user — the PRD may need an amendment. Do not guess. |
+| **PASS** (all criteria green) | Proceed to Phase 7 — decide & open PR. |
+| **WARN** (one or more PARTIAL) | Spawn targeted fix agents for the PARTIAL criteria, then re-verify. Do not proceed to Phase 7 until WARN clears or the user explicitly accepts the partial. |
+| **BLOCK** (one or more FAIL) | Return to Phase 3 for the failing scope; re-spawn agents with corrected prompts. Do not ship. |
+| Non-goals scope creep flagged | Surface to the user; let the user decide whether to retract the scope or amend the PRD. The audit is a flag, not a FAIL. |
 
-If the feature spans multiple PRDs or epics, return to Phase 1 with the next PRD.
+Re-verify on every rework loop — the verdict is what tells the orchestrator to
+proceed vs. rework, so verifying only at the very end defeats the gate.
+
+## Phase 7: Decide & Open PR
+
+Based on the Phase 6 verify verdict and the Phase 5 integration results:
+
+| Verdict / Outcome | Action |
+|---------|--------|
+| Verify **PASS** + integration green | Report completion (files created, test coverage, deferred warnings). **Invoke `loopdeck:open-pr`** to ship the verified work as a reviewable PR. |
+| Verify **WARN** (one or more PARTIAL) | Spawn targeted fix agents for the PARTIAL criteria, re-verify. Do **not** ship until WARN clears or the user explicitly accepts the partial. |
+| Verify **BLOCK** (one or more FAIL) | Return to Phase 3 for the failing scope; re-spawn agents with corrected prompts. Do **not** ship. |
+| Integration issues (minor) | Spawn targeted fix agents, re-run affected checks. |
+| Major gaps | Return to the relevant phase, re-spawn agents with corrected prompts. |
+| PRD gap discovered | Flag to user — the PRD may need an amendment. Do not guess. |
+| Non-goals scope creep flagged | Surface to the user; let the user retract the scope or amend the PRD. |
+
+### Open PR (green verdict only)
+
+When the Phase 6 verdict is **PASS** and Phase 5's integration check is green:
+
+1. Call `loopdeck:open-pr`. The skill runs pre-flight checks, gathers
+   `.loopdeck/` context, drafts a PR body (Summary / What changed / PRD /
+   Decisions / Test plan), and shows it to the user for confirmation.
+2. After the user confirms the body, `open-pr` commits any uncommitted work
+   (message authored from the verified scope), pushes, and runs
+   `gh pr create --web`. Report the returned PR URL.
+3. `open-pr` records the PR URL in `.loopdeck/loops.md ## Next Steps` itself.
+
+Do **not** call `open-pr` on a WARN or BLOCK verdict. Ship only green work. The
+verify verdict is the gate: `open-pr` is independently invocable, but the
+orchestrator only reaches it through a PASS.
+
+If the feature spans multiple PRDs or epics, return to Phase 1 with the next PRD
+after this PRD's work is shipped.
 
 # LoopDeck Memory Convention
 
@@ -332,7 +393,7 @@ Additional body text explaining the decision in more detail.
 - `Consequences` captures what changed because of this decision
 - Body text after the bullets adds detail
 - **Append** new decisions — never delete old ones
-- **Append to the file after each phase** — do this as part of the Phase 6 "Decide Next Phase" step
+- **Append to the file after each phase** — do this as part of the Phase 7 "Decide & Open PR" step
 
 ### current-loop.md Format
 
@@ -384,14 +445,14 @@ After each phase completes:
 1. If you made an architectural decision → append to `.loopdeck/decisions.md`
 2. At the end of each phase → update `.loopdeck/loops.md` Next Steps
 
-At the end of the session (Phase 6 or equivalent):
+At the end of the session (Phase 7 or equivalent):
 1. Update `.loopdeck/loops.md` Current status and Next Steps
 2. Append any unrecorded decisions to `.loopdeck/decisions.md`
 3. If a loop completed, move it to History and set the next Current loop
 
-## Integration with Phase 6
+## Integration with Phase 7
 
-In the final "Decide Next Phase" step, after reporting results:
+In the final "Decide & Open PR" step, after reporting results:
 - Write/update the files as described above
 - Ensure the next loop's goal is recorded in loops.md so the next session picks it up
 
