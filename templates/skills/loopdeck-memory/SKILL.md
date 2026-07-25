@@ -56,6 +56,38 @@ UI restyling — Tailwind CSS v4, OKLCH dark palette, sidebar layout
 - **High-level summary only** — what is being worked on right now, one sentence
 - Keep details (start date, status, next steps) in `loops.md`
 
+## Structured execution state (`execution.yaml`) — check this first
+
+Before editing `loops.md`, check which runtime mode the project is in:
+
+```bash
+test -f .loopdeck/execution.yaml && echo structured || echo legacy
+```
+
+- **Structured mode** (`.loopdeck/execution.yaml` exists): it is the
+  **authoritative** current loop / queue / history. **Never hand-edit it** —
+  free-form edits bypass validation and the optimistic-concurrency guard.
+  Transition loops exclusively through the validated `loopdeck state` CLI
+  (same Rust path the UI uses):
+
+  | Action | Command |
+  |--------|---------|
+  | Read state | `loopdeck state show` |
+  | Start a PRD loop | `loopdeck state promote <loop-id>` |
+  | Complete the current loop | `loopdeck state complete [--commit <sha>]` |
+  | Abandon the current loop | `loopdeck state abandon --reason "<text>"` |
+
+  `--path` defaults to the current directory (run from the project root). The
+  `<loop-id>` is the stable ID from the PRD checklist (e.g.
+  `structured-state/parse-loop-id`). `decisions.md` is still hand-edited — it
+  is not part of execution state. Treat any `loops.md` as a legacy artifact.
+- **Legacy mode** (only `loops.md` exists): use the `loops.md` format below.
+  (Phase 4 will offer an explicit, confirmed migration to `execution.yaml`.)
+
+When a loop completes: in **structured mode** run `loopdeck state complete`; in
+**legacy mode** move it to History as described below. In both modes, if the
+loop was promoted from an epic/PRD, check the origin PRD box (next section).
+
 ## loops.md Format
 
 Write loops as level-2 sections for Current/Next Steps/History, with level-3

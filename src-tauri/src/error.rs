@@ -24,6 +24,9 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Execution state error: {0}")]
+    ExecutionState(String),
+
     #[error("Lock poisoned")]
     LockError,
 
@@ -61,6 +64,7 @@ impl Serialize for AppError {
                 AppError::InvalidPath(_) => "invalidPath",
                 AppError::Scan(_) => "scan",
                 AppError::Config(_) => "config",
+                AppError::ExecutionState(_) => "executionState",
                 AppError::LockError => "lockError",
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
                 AppError::Conflict(_) => "conflict",

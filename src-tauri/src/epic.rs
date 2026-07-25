@@ -231,6 +231,45 @@ pub fn epics_by_milestone(repo_path: &Path) -> BTreeMap<String, Vec<Epic>> {
     map
 }
 
+/// A PRD loop located in the spec layer — the spec→execution bridge's lookup
+/// result. Spec-native (no dependency on the `execution` runtime layer): the
+/// caller builds the runtime `LoopOrigin` from these fields, keeping the layer
+/// direction one-way (runtime knows about spec, not vice-versa).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopLocation {
+    pub epic: String,
+    pub prd: String,
+    pub phase: String,
+    /// Display title (presentation, not identity) — re-read fresh on each
+    /// call, so a rename in the PRD after promotion does not break the join.
+    pub title: String,
+}
+
+/// Find a PRD checklist loop by its stable ID across every PRD under
+/// `docs/epics/`. Returns its spec location and display title, or `None` if no
+/// checklist item carries that ID. The ID is the join key the execution layer
+/// (`execution.rs`) and the `loopdeck state` CLI both key off; this is the one
+/// place that lookup lives, so the IPC command and the CLI never duplicate it.
+pub fn find_loop_by_id(repo_path: &Path, loop_id: &str) -> Option<LoopLocation> {
+    for epic in parse_epics(repo_path) {
+        for prd in &epic.prds {
+            for phase in &prd.phases {
+                for item in &phase.loops {
+                    if item.id.as_deref() == Some(loop_id) {
+                        return Some(LoopLocation {
+                            epic: epic.slug.clone(),
+                            prd: prd.slug.clone(),
+                            phase: phase.name.clone(),
+                            title: item.title.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // ── Promote-to-loop bridge (spec → runtime) ─────────────────────────
 
 /// Promote a PRD checklist item into `.loopdeck/loops.md ## Current`.
