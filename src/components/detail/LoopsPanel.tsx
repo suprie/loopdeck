@@ -1,10 +1,26 @@
 import { useState, useEffect, useCallback } from "react";
-import { Repeat, Circle, CheckCircle2, History, ArrowRight, Loader2 } from "lucide-react";
+import {
+  Repeat,
+  Circle,
+  CheckCircle2,
+  History,
+  ArrowRight,
+  Loader2,
+  AlertTriangle,
+} from "lucide-react";
 import { toast } from "sonner";
-import type { LoopStatus, Loop } from "../../types";
+import type {
+  LoopStatus,
+  Loop,
+  LoadedExecution,
+  HistoryLoop,
+  QueuedLoop,
+  MigrationPreview,
+} from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { Markdown } from "../shared/Markdown";
+import { MigrationCard } from "./MigrationCard";
 
 interface LoopsPanelProps {
   projectPath: string;
@@ -22,6 +38,7 @@ const LOOP_STATUS_BG: Record<string, string> = {
   abandoned: "bg-muted",
 };
 
+/** A loop in legacy `.loopdeck/loops.md` (goal/status/completed). */
 function LoopCard({ loop, isCurrent }: { loop: Loop; isCurrent?: boolean }) {
   return (
     <div
@@ -56,34 +73,198 @@ function LoopCard({ loop, isCurrent }: { loop: Loop; isCurrent?: boolean }) {
   );
 }
 
+/** The YYYY-MM-DD portion of an RFC3339 timestamp (the legacy display shape). */
+function dateOnly(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+/** A structured loop from `execution.yaml`, keyed by stable ID. */
+function StructuredCard({
+  loop,
+  status,
+  date,
+  isCurrent,
+}: {
+  loop: { id: string; title: string };
+  status: "in_progress" | "completed" | "abandoned";
+  date: string;
+  isCurrent?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-3.5 ${
+        isCurrent
+          ? "border-[var(--primary)] bg-[color-mix(in_oklab,var(--primary)_5%,transparent)]"
+          : "border-border bg-card"
+      }`}
+    >
+      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        <span className="text-[11px] font-mono text-muted-foreground">{date}</span>
+        <span
+          className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${LOOP_STATUS_BG[status] ?? "bg-muted"}`}
+          style={{ color: LOOP_STATUS_COLORS[status] ?? "var(--muted-foreground)" }}
+        >
+          {status.replace("_", " ")}
+        </span>
+      </div>
+      <div className="text-sm font-semibold text-foreground leading-snug">
+        {loop.title}
+      </div>
+      <div className="mt-1 text-[10px] font-mono text-muted-foreground/70">
+        {loop.id}
+      </div>
+    </div>
+  );
+}
+
+function StructuredView({ loaded }: { loaded: LoadedExecution }) {
+  const s = loaded.state;
+  const current = s.current;
+  const isEmpty =
+    !current && s.queue.length === 0 && s.history.length === 0;
+  return (
+    <div className="max-w-2xl">
+      {loaded.warnings.length > 0 && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-[color-mix(in_oklab,var(--warning)_40%,transparent)] bg-[color-mix(in_oklab,var(--warning)_8%,transparent)] p-2.5 text-[11px] text-muted-foreground">
+          <AlertTriangle
+            size={13}
+            className="mt-0.5 shrink-0"
+            style={{ color: "var(--warning)" }}
+          />
+          <div>
+            {loaded.warnings.map((w, i) => (
+              <p key={i}>{w}</p>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {current && (
+        <section className="mb-6">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+            Current Loop
+          </h3>
+          <StructuredCard
+            loop={current}
+            status="in_progress"
+            date={dateOnly(current.started_at)}
+            isCurrent
+          />
+        </section>
+      )}
+
+      {s.queue.length > 0 && (
+        <section className="mb-6">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+            Queued ({s.queue.length})
+          </h3>
+          <div className="space-y-2">
+            {s.queue.map((q: QueuedLoop) => (
+              <StructuredCard
+                key={q.id}
+                loop={q}
+                status="completed"
+                date={dateOnly(q.queued_at)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {s.history.length > 0 && (
+        <section>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-1.5">
+            <History size={13} />
+            History ({s.history.length})
+          </h3>
+          <div className="space-y-2">
+            {s.history.map((h: HistoryLoop) => (
+              <StructuredCard
+                key={`${h.id}-${h.attempt}`}
+                loop={h}
+                status={h.outcome}
+                date={dateOnly(h.completed_at)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {isEmpty && (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <Repeat size={32} className="text-muted-foreground/30 mb-3" />
+          <h3 className="text-sm font-semibold text-foreground mb-1.5">
+            No loops recorded
+          </h3>
+          <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
+            This project uses the structured{" "}
+            <code className="font-mono text-[11px] bg-muted px-1 py-0.5 rounded">
+              execution.yaml
+            </code>{" "}
+            store. Promote a loop from the Epics tab to begin.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type Mode = "structured" | "legacy" | "empty";
+
 export function LoopsPanel({ projectPath }: LoopsPanelProps) {
-  const [status, setStatus] = useState<LoopStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<Mode>("empty");
+  const [exec, setExec] = useState<LoadedExecution | null>(null);
+  const [status, setStatus] = useState<LoopStatus | null>(null);
+  const [preview, setPreview] = useState<MigrationPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
 
+  const reload = useCallback(async () => {
+    setError(null);
+    try {
+      const loaded = await api.getExecutionState(projectPath);
+      if (loaded.file_present) {
+        setExec(loaded);
+        setStatus(null);
+        setPreview(null);
+        setMode("structured");
+        return;
+      }
+      // No execution.yaml yet → legacy loops.md (or empty).
+      setExec(null);
+      const loops = await api.getLoops(projectPath);
+      setStatus(loops);
+      if (loops.current || loops.history.length > 0) {
+        setMode("legacy");
+        // Offer migration only when the preview says it's available.
+        try {
+          const p = await api.getMigrationPreview(projectPath);
+          setPreview(
+            p.loops_md_present && !p.execution_yaml_present ? p : null,
+          );
+        } catch {
+          setPreview(null);
+        }
+      } else {
+        setMode("empty");
+        setPreview(null);
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [projectPath]);
+
   useEffect(() => {
     let cancelled = false;
-    async function load() {
-      try {
-        const data = await api.getLoops(projectPath);
-        if (!cancelled) {
-          setStatus(data);
-          setError(null);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(String(err));
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    load();
+    setLoading(true);
+    reload().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
-  }, [projectPath]);
+  }, [reload]);
 
   const handleToggle = useCallback(
     async (stepText: string) => {
@@ -116,13 +297,19 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
 
   if (error) {
     return (
-      <div className="text-destructive text-sm p-3">
-        Failed to load loops: {error}
-      </div>
+      <div className="text-destructive text-sm p-3">Failed to load loops: {error}</div>
     );
   }
 
-  if (!status || (!status.current && status.history.length === 0)) {
+  if (mode === "structured" && exec) {
+    return <StructuredView loaded={exec} />;
+  }
+
+  if (
+    mode === "empty" ||
+    !status ||
+    (!status.current && status.history.length === 0)
+  ) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <Repeat size={32} className="text-muted-foreground/30 mb-3" />
@@ -140,9 +327,13 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
     );
   }
 
+  // Legacy mode (loops.md only) — render the legacy view + offer migration.
   return (
     <div className="max-w-2xl">
-      {/* Current loop */}
+      {preview && (
+        <MigrationCard projectPath={projectPath} preview={preview} onMigrated={reload} />
+      )}
+
       {status.current && (
         <section className="mb-6">
           <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
@@ -162,7 +353,9 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
                     <li
                       key={i}
                       className={`flex items-start gap-2 text-sm leading-relaxed ${
-                        step.checked ? "text-muted-foreground line-through" : "text-foreground"
+                        step.checked
+                          ? "text-muted-foreground line-through"
+                          : "text-foreground"
                       }`}
                     >
                       <button
@@ -191,7 +384,6 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
         </section>
       )}
 
-      {/* History */}
       {status.history.length > 0 && (
         <section>
           <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-1.5">

@@ -113,7 +113,12 @@ test -f .loopdeck/execution.yaml && echo structured || echo legacy
   `structured-state/parse-loop-id`). `decisions.md` is still hand-edited — it
   is not part of execution state. Treat any `loops.md` as a legacy artifact.
 - **Legacy mode** (only `loops.md` exists): use the `loops.md` format below.
-  (Phase 4 will offer an explicit, confirmed migration to `execution.yaml`.)
+  Migration to `execution.yaml` is a one-time, human-confirmed action (Phase 4) —
+  the project's Loops tab offers a preview + "Migrate" button, or run
+  `loopdeck state migrate` (preview) / `loopdeck state migrate --yes` (apply).
+  It matches records to PRD loop IDs by exact title (never guessed), renames the
+  original `loops.md` → `loops.legacy.md`, and writes `execution.yaml`. Do not
+  hand-edit `loops.md` to "migrate" it — always use the confirmed command/UI.
 
 When a loop completes: in **structured mode** run `loopdeck state complete`; in
 **legacy mode** move it to History as described below. In both modes, if the

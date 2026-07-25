@@ -478,6 +478,11 @@ pub struct LoadedExecution {
     pub state: ExecutionState,
     pub source: LoadSource,
     pub warnings: Vec<String>,
+    /// Whether `execution.yaml` exists on disk (vs a fresh default synthesized
+    /// for a missing file). Lets the UI branch on structured-vs-legacy mode
+    /// without a separate probe (0.2.1 Phase 4 migration surface). Mirrors
+    /// `source != LoadSource::Default`, exposed as a plain bool for the wire.
+    pub file_present: bool,
 }
 
 /// Load `.loopdeck/execution.yaml` for `repo_path`. See [`load_from_path`].
@@ -500,6 +505,7 @@ pub fn load_from_path(path: &Path) -> Result<LoadedExecution, AppError> {
             state: ExecutionState::default(),
             source: LoadSource::Default,
             warnings: Vec::new(),
+            file_present: false,
         });
     }
 
@@ -518,6 +524,7 @@ pub fn load_from_path(path: &Path) -> Result<LoadedExecution, AppError> {
                 state,
                 source: LoadSource::Primary,
                 warnings,
+                file_present: true,
             })
         }
         Err(primary_err) => {
@@ -583,6 +590,7 @@ fn recover_from_backup(path: &Path) -> Result<LoadedExecution, ()> {
         state,
         source: LoadSource::BackupRecovered,
         warnings,
+        file_present: true,
     })
 }
 

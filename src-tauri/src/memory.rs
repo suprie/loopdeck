@@ -6,10 +6,7 @@
 
 use crate::persist;
 use serde::Serialize;
-use std::path::Path;
-
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -107,6 +104,13 @@ pub fn parse_loops(repo_path: &Path) -> LoopStatus {
     };
 
     parse_loops_content(&content)
+}
+
+/// The canonical path to a project's `.loopdeck/loops.md`.
+///
+/// Shared by the migration module so the legacy-file location isn't duplicated.
+pub fn loops_md_path(repo_path: &Path) -> PathBuf {
+    repo_path.join(".loopdeck").join("loops.md")
 }
 
 /// Bootstrap empty memory files if `.loopdeck/` exists but files don't.
@@ -469,7 +473,7 @@ fn parse_loop_from_heading_and_body(entry: &str) -> Option<Loop> {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /// Split a heading like "2026-06-22 — Title Here" into (date, title).
-fn split_heading(heading: &str) -> Option<(String, String)> {
+pub(crate) fn split_heading(heading: &str) -> Option<(String, String)> {
     // Try em-dash first, then en-dash, then hyphen with spaces.
     // Track which separator was found to correctly compute the slice.
     let separators: &[&str] = &[" — ", " - "];
@@ -491,7 +495,7 @@ fn split_heading(heading: &str) -> Option<(String, String)> {
 }
 
 /// Parse a `- **Key**: Value` line. Returns (key, value) if matched.
-fn parse_kv_line(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn parse_kv_line(line: &str) -> Option<(&str, &str)> {
     let stripped = line.strip_prefix("- **")?;
     let colon_pos = stripped.find("**:")?;
     let key = &stripped[..colon_pos];
