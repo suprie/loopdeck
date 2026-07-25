@@ -111,6 +111,15 @@ export async function rescanProject(path: string): Promise<ProjectEntry> {
 }
 
 /**
+ * Refresh a project's managed skills to the current app version, re-deriving
+ * stack markers so newly-added skills install too.
+ * Rust: refresh_skills(path: String) -> Result<Vec<String>, AppError>
+ */
+export async function refreshSkills(path: string): Promise<string[]> {
+  return invoke<string[]>("refresh_skills", { path });
+}
+
+/**
  * Regenerate the project description by re-scanning README and structure.
  * Rust: regenerate_description(path: String) -> Result<String, AppError>
  */

@@ -24,6 +24,14 @@ const SKILL_TAURI_EXPERT: &str =
 const SKILL_TAURI_CODE_REVIEWER: &str =
     include_str!("../../templates/skills/loopdeck-tauri-code-reviewer/SKILL.md");
 const SKILL_API_EXPERT: &str = include_str!("../../templates/skills/loopdeck-api-expert/SKILL.md");
+const SKILL_LOOP_RUNNER: &str =
+    include_str!("../../templates/skills/loopdeck-loop-runner/SKILL.md");
+const SKILL_EPIC_AUTHOR: &str =
+    include_str!("../../templates/skills/loopdeck-epic-author/SKILL.md");
+const SKILL_MEMORY: &str = include_str!("../../templates/skills/loopdeck-memory/SKILL.md");
+const SKILL_OPEN_PR: &str = include_str!("../../templates/skills/loopdeck-open-pr/SKILL.md");
+const SKILL_PRD_VERIFIER: &str =
+    include_str!("../../templates/skills/loopdeck-prd-verifier/SKILL.md");
 
 // ── Embedded hook scripts ──
 
@@ -45,6 +53,11 @@ const NAME_IOS_CODE_REVIEW: &str = "loopdeck-ios-code-review";
 const NAME_TAURI_EXPERT: &str = "loopdeck-tauri-expert";
 const NAME_TAURI_CODE_REVIEWER: &str = "loopdeck-tauri-code-reviewer";
 const NAME_API_EXPERT: &str = "loopdeck-api-expert";
+const NAME_LOOP_RUNNER: &str = "loopdeck-loop-runner";
+const NAME_EPIC_AUTHOR: &str = "loopdeck-epic-author";
+const NAME_MEMORY: &str = "loopdeck-memory";
+const NAME_OPEN_PR: &str = "loopdeck-open-pr";
+const NAME_PRD_VERIFIER: &str = "loopdeck-prd-verifier";
 
 // ── Lookup from skill name to embedded content ──
 
@@ -61,6 +74,11 @@ fn skill_content(name: &str) -> Option<&'static str> {
         NAME_TAURI_EXPERT => Some(SKILL_TAURI_EXPERT),
         NAME_TAURI_CODE_REVIEWER => Some(SKILL_TAURI_CODE_REVIEWER),
         NAME_API_EXPERT => Some(SKILL_API_EXPERT),
+        NAME_LOOP_RUNNER => Some(SKILL_LOOP_RUNNER),
+        NAME_EPIC_AUTHOR => Some(SKILL_EPIC_AUTHOR),
+        NAME_MEMORY => Some(SKILL_MEMORY),
+        NAME_OPEN_PR => Some(SKILL_OPEN_PR),
+        NAME_PRD_VERIFIER => Some(SKILL_PRD_VERIFIER),
         _ => None,
     }
 }
@@ -85,8 +103,16 @@ fn is_backend_marker(marker: &str) -> bool {
 pub fn determine_skills(repo_path: &Path, markers: &[String]) -> Vec<String> {
     let mut skills: HashSet<&str> = HashSet::new();
 
-    // Always include the orchestrator
+    // Always-installed skills (mechanics + orchestration), regardless of stack.
+    // The orchestrator drives multi-agent feature flows; loop-runner executes a
+    // single loop; epic-author drafts specs; memory holds the .loopdeck/ write
+    // conventions; open-pr + prd-verifier are the orchestrator's verify→ship tail.
     skills.insert(NAME_ORCHESTRATOR);
+    skills.insert(NAME_LOOP_RUNNER);
+    skills.insert(NAME_EPIC_AUTHOR);
+    skills.insert(NAME_MEMORY);
+    skills.insert(NAME_OPEN_PR);
+    skills.insert(NAME_PRD_VERIFIER);
 
     let has_cargo = markers.iter().any(|m| m == "Cargo.toml");
     let has_package_json = markers.iter().any(|m| m == "package.json");
@@ -137,30 +163,142 @@ pub fn determine_skills(repo_path: &Path, markers: &[String]) -> Vec<String> {
     result
 }
 
-/// Copy relevant skill SKILL.md files into `<repo_path>/.claude/skills/<skill>/`.
+// ── App version + managed-skills manifest ──
+//
+// The `loopdeck-` prefix is the skills ownership boundary (ADR-4 of the
+// `support-project-management` epic): app-managed skills may be overwritten
+// when the app version advances; user-owned skills (no prefix) are never
+// touched. A per-project manifest (`.claude/skills/.loopdeck-manifest.json`)
+// records the version the app last installed at, so a refresh only overwrites
+// managed skills when the version actually moved.
+
+/// The app version, baked in at compile time from `Cargo.toml`'s `version`.
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Record of which skills the app installed and at what version.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SkillManifest {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    skills: Vec<String>,
+}
+
+impl Default for SkillManifest {
+    fn default() -> Self {
+        // A manifest-less project is treated as version "0.0.0" so the very
+        // first refresh (app version > 0.0.0) overwrites every managed skill.
+        SkillManifest {
+            version: "0.0.0".to_string(),
+            skills: Vec::new(),
+        }
+    }
+}
+
+fn manifest_path(skills_dir: &Path) -> std::path::PathBuf {
+    skills_dir.join(".loopdeck-manifest.json")
+}
+
+/// Read the project's skill manifest; a missing or malformed file yields the
+/// default (`version: "0.0.0"`), never an error — a bad manifest must not
+/// block a refresh.
+fn read_manifest(skills_dir: &Path) -> SkillManifest {
+    let path = manifest_path(skills_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<SkillManifest>(&raw).unwrap_or_default(),
+        Err(_) => SkillManifest::default(),
+    }
+}
+
+fn write_manifest(skills_dir: &Path, manifest: &SkillManifest) -> Result<(), AppError> {
+    let json = serde_json::to_string_pretty(manifest)
+        .map_err(|e| AppError::Config(format!("manifest serialization error: {e}")))?;
+    let path = manifest_path(skills_dir);
+    persist::atomic_write(&path, &json)?;
+    Ok(())
+}
+
+/// Parse a `major.minor.patch` version into a tuple. Malformed or missing
+/// components default to 0, so a garbage manifest version compares as `0.0.0`
+/// and never blocks a refresh.
+fn parse_version(v: &str) -> (u32, u32, u32) {
+    let mut parts = v.split('.');
+    let maj = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let min = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let pat = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (maj, min, pat)
+}
+
+/// True iff `a` is a strictly newer `major.minor.patch` than `b` (numeric, not
+/// lexicographic — so `0.10.0` > `0.9.0`).
+fn version_gt(a: &str, b: &str) -> bool {
+    parse_version(a) > parse_version(b)
+}
+
+/// Copy the project's skill `SKILL.md` files into
+/// `<repo_path>/.claude/skills/<skill>/`, using a version-aware refresh.
 ///
-/// Returns the list of skill names that were written. Idempotent: if a
-/// SKILL.md already exists for a skill, it is skipped.
+/// Returns the list of skill names that apply to the project (whether or not
+/// each was freshly written).
+///
+/// **Refresh rule.** For each applicable skill:
+/// - if it's app-managed (`loopdeck-` prefix) **and** the app version advanced
+///   past the manifest's recorded version → **overwrite**;
+/// - if it's app-managed at the same version and already exists → **skip**
+///   (don't clobber);
+/// - otherwise (already exists) → **skip**.
+///
+/// A managed skill that does not yet exist is always installed, even at the
+/// same version. After writing, the manifest is updated to the current app
+/// version + skill set. User-owned (non-`loopdeck-`) skills are never in
+/// `determine_skills`' output and are never touched.
 pub fn copy_skills(repo_path: &Path, markers: &[String]) -> Result<Vec<String>, AppError> {
+    copy_skills_with_version(repo_path, markers, APP_VERSION)
+}
+
+/// Injectable inner form — tests pass an explicit version rather than the
+/// compile-time `APP_VERSION`.
+fn copy_skills_with_version(
+    repo_path: &Path,
+    markers: &[String],
+    app_version: &str,
+) -> Result<Vec<String>, AppError> {
     let names = determine_skills(repo_path, markers);
     let skills_dir = repo_path.join(".claude").join("skills");
 
     std::fs::create_dir_all(&skills_dir)?;
 
+    let manifest = read_manifest(&skills_dir);
+    let overwrite_managed = version_gt(app_version, &manifest.version);
+
     for name in &names {
         let skill_dir = skills_dir.join(name);
+        let skill_file = skill_dir.join("SKILL.md");
 
-        // Check if SKILL.md already exists — skip to avoid overwriting
-        if skill_dir.join("SKILL.md").exists() {
+        let is_managed = name.starts_with("loopdeck-");
+        let exists = skill_file.exists();
+
+        // Skip when there's nothing to do: an existing managed skill at the
+        // same app version, or any already-present user-owned skill.
+        if exists && !(is_managed && overwrite_managed) {
             continue;
         }
 
-        std::fs::create_dir_all(&skill_dir)?;
-
         if let Some(content) = skill_content(name) {
-            std::fs::write(skill_dir.join("SKILL.md"), content)?;
+            std::fs::create_dir_all(&skill_dir)?;
+            std::fs::write(&skill_file, content)?;
         }
     }
+
+    // Record the current app version + the skill set the app manages, so a
+    // future refresh knows whether an overwrite is due.
+    write_manifest(
+        &skills_dir,
+        &SkillManifest {
+            version: app_version.to_string(),
+            skills: names.clone(),
+        },
+    )?;
 
     Ok(names)
 }
@@ -421,10 +559,16 @@ mod tests {
     // ── determine_skills tests ──
 
     #[test]
-    fn test_orchestrator_always_included() {
+    fn test_core_skills_always_included() {
         let dir = temp_dir();
         let skills = determine_skills(&dir, &[]);
+        // Mechanics + orchestration skills are always installed, regardless of stack.
         assert!(skills.contains(&NAME_ORCHESTRATOR.to_string()));
+        assert!(skills.contains(&NAME_LOOP_RUNNER.to_string()));
+        assert!(skills.contains(&NAME_EPIC_AUTHOR.to_string()));
+        assert!(skills.contains(&NAME_MEMORY.to_string()));
+        assert!(skills.contains(&NAME_OPEN_PR.to_string()));
+        assert!(skills.contains(&NAME_PRD_VERIFIER.to_string()));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -574,6 +718,119 @@ mod tests {
         assert!(rust_path.exists());
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── version-aware refresh + manifest tests ──
+
+    #[test]
+    fn test_version_refresh_overwrites_managed_skill() {
+        let dir = temp_dir();
+        let skills_dir = dir.join(".claude").join("skills");
+        let orch_file = skills_dir.join("loopdeck-orchestrator/SKILL.md");
+        fs::create_dir_all(orch_file.parent().unwrap()).unwrap();
+        // Seed a stale managed skill + a manifest recording an older version.
+        fs::write(&orch_file, "STALE-CONTENT").unwrap();
+        write_manifest(
+            &skills_dir,
+            &SkillManifest {
+                version: "0.1.0".to_string(),
+                skills: vec![],
+            },
+        )
+        .unwrap();
+
+        // App 0.2.0 > manifest 0.1.0 → managed skill is overwritten.
+        copy_skills_with_version(&dir, &[], "0.2.0").unwrap();
+        let after = fs::read_to_string(&orch_file).unwrap();
+        assert_ne!(after, "STALE-CONTENT");
+        assert!(after.contains("name: loopdeck:orchestrator"));
+
+        // Manifest now records the new version.
+        assert_eq!(read_manifest(&skills_dir).version, "0.2.0");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_version_equal_skips_existing_managed_skill() {
+        let dir = temp_dir();
+        let skills_dir = dir.join(".claude").join("skills");
+        let orch_file = skills_dir.join("loopdeck-orchestrator/SKILL.md");
+        fs::create_dir_all(orch_file.parent().unwrap()).unwrap();
+        fs::write(&orch_file, "KEEP-ME").unwrap();
+        write_manifest(
+            &skills_dir,
+            &SkillManifest {
+                version: "0.2.0".to_string(),
+                skills: vec![],
+            },
+        )
+        .unwrap();
+
+        // Same version → existing managed skill is NOT overwritten.
+        copy_skills_with_version(&dir, &[], "0.2.0").unwrap();
+        assert_eq!(fs::read_to_string(&orch_file).unwrap(), "KEEP-ME");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_user_owned_skill_untouched_on_refresh() {
+        // A non-`loopdeck-`-prefixed skill is user-owned; it is never returned
+        // by determine_skills and must survive a version-advancing refresh.
+        let dir = temp_dir();
+        let skills_dir = dir.join(".claude").join("skills");
+        let user_file = skills_dir.join("my-custom-skill/SKILL.md");
+        fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+        fs::write(&user_file, "USER-OWNED").unwrap();
+        write_manifest(
+            &skills_dir,
+            &SkillManifest {
+                version: "0.1.0".to_string(),
+                skills: vec![],
+            },
+        )
+        .unwrap();
+
+        copy_skills_with_version(&dir, &[], "0.2.0").unwrap();
+        assert_eq!(fs::read_to_string(&user_file).unwrap(), "USER-OWNED");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_manifest_round_trip() {
+        let dir = temp_dir();
+        let skills_dir = dir.join(".claude").join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let m = SkillManifest {
+            version: "0.2.0".to_string(),
+            skills: vec!["loopdeck-orchestrator".to_string()],
+        };
+        write_manifest(&skills_dir, &m).unwrap();
+        let read = read_manifest(&skills_dir);
+        assert_eq!(read.version, "0.2.0");
+        assert_eq!(read.skills, vec!["loopdeck-orchestrator".to_string()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_manifest_missing_defaults_to_zero() {
+        let dir = temp_dir();
+        let skills_dir = dir.join(".claude").join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let m = read_manifest(&skills_dir);
+        assert_eq!(m.version, "0.0.0");
+        assert!(m.skills.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_version_gt_is_numeric_semver() {
+        assert!(version_gt("0.2.0", "0.1.0"));
+        assert!(version_gt("1.0.0", "0.9.9"));
+        assert!(version_gt("0.10.0", "0.9.0")); // numeric, not lexicographic
+        assert!(!version_gt("0.2.0", "0.2.0"));
+        assert!(!version_gt("0.1.0", "0.2.0"));
+        assert!(version_gt("0.0.1", "garbage")); // malformed → 0.0.0
+        assert!(!version_gt("garbage", "0.0.1"));
     }
 
     // ── setup_hooks tests ──

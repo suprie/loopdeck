@@ -118,6 +118,7 @@ pub fn run() {
             commands::project::open_in_terminal,
             commands::project::regenerate_description,
             commands::project::rescan_project,
+            commands::project::refresh_skills,
             commands::project::get_graphify_stats,
             // Decisions / loops / epics / specs (epics.rs)
             commands::epics::get_decisions,
