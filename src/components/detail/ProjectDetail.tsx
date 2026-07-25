@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from "@tanstack/react-router";
 import {
   ArrowLeft,
   Pencil,
+  Sparkles,
   RefreshCw,
   FolderOpen,
   Terminal,
@@ -16,6 +17,7 @@ import {
   Bot,
   Network,
 } from "lucide-react";
+import { toast } from "sonner";
 import { relativeTime } from "../../lib/time";
 import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
@@ -89,6 +91,15 @@ export function ProjectDetail() {
 
   const handleRescan = async () => {
     await rescanProject(project.path);
+  };
+
+  const handleRefreshSkills = async () => {
+    try {
+      const skills = await api.refreshSkills(project.path);
+      toast.success(`Refreshed ${skills.length} skill${skills.length === 1 ? "" : "s"}.`);
+    } catch (e) {
+      toast.error(`Failed to refresh skills: ${String(e)}`);
+    }
   };
 
   const handleToggleAutonomous = (path: string, autonomous: boolean) => {
@@ -174,6 +185,7 @@ export function ProjectDetail() {
                 onCancelEdit={() => setIsEditing(false)}
                 onRegenerate={handleRegenerate}
                 onRescan={handleRescan}
+                onRefreshSkills={handleRefreshSkills}
                 onToggleAutonomous={handleToggleAutonomous}
                 onFinder={() => openInFinder(project.path)}
                 onTerminal={() => openInTerminal(project.path)}
@@ -316,6 +328,7 @@ function OverviewTab({
   onCancelEdit,
   onRegenerate,
   onRescan,
+  onRefreshSkills,
   onToggleAutonomous,
   onFinder,
   onTerminal,
@@ -327,6 +340,8 @@ function OverviewTab({
   onCancelEdit: () => void;
   onRegenerate: () => void;
   onRescan: () => void;
+  /** Re-install managed skills to the current app version. */
+  onRefreshSkills: () => void;
   /** Enable autonomous mode. The confirm dialog lives inside OverviewTab —
    *  this fires only after the user confirms. Disabling (back to confirm) is
    *  unconditional and doesn't need confirmation. */
@@ -481,6 +496,7 @@ function OverviewTab({
 
       <div className="mt-6 flex flex-wrap items-center gap-2">
         <ActionButton icon={RefreshCw} label="Rescan" onClick={onRescan} />
+        <ActionButton icon={Sparkles} label="Skills" onClick={onRefreshSkills} />
         <ActionButton icon={FolderOpen} label="Finder" onClick={onFinder} />
         <ActionButton icon={Terminal} label="Terminal" onClick={onTerminal} />
         <ActionButton icon={Trash2} label="Remove" onClick={onRemove} destructive />

@@ -360,131 +360,18 @@ after this PRD's work is shipped.
 
 # LoopDeck Memory Convention
 
-This project uses `.loopdeck/` for persistent project memory. The standard AI workflow writes to these files so LoopDeck's UI displays them.
+This orchestrator does **not** restate the `.loopdeck/` write formats inline.
+For every memory write — the `decisions.md`, `loops.md`, and `current-loop.md`
+formats, the Epic/PRD back-reference handling, and the check-the-origin-PRD-box
+rule on completion — follow the **`loopdeck:memory`** skill (read its `SKILL.md`
+or invoke it when you need to record a decision or update `loops.md`). The
+single-loop executor (`loopdeck:loop-runner`) delegates to the same conventions.
 
-## Files
-
-| File | Purpose | When to Write |
-|------|---------|---------------|
-| `.loopdeck/current-loop.md` | Active loop snapshot (created by hook on orchestrator start) | Auto-created by `orchestrator-start` PreToolUse hook |
-| `.loopdeck/decisions.md` | Lightweight ADRs (architectural decision records) | After any significant design/architecture decision |
-| `.loopdeck/loops.md` | Current loop status, next steps, history | At the end of every session |
-
-## Auto-Write Convention
-
-### decisions.md Format
-
-Write decisions as level-2 headings with date and title, followed by key-value bullets and body text:
-
-```markdown
-# Decisions
-
-## YYYY-MM-DD — Title of the decision
-- **Status**: proposed | accepted | superseded
-- **Context**: Why this decision was needed.
-- **Consequences**: What follows from this decision.
-
-Additional body text explaining the decision in more detail.
-```
-
-**Rules:**
-- Use `## YYYY-MM-DD — Title` format (em dash preferred, hyphen accepted)
-- `Status` must be one of: `proposed`, `accepted`, `superseded`
-- `Context` explains the situation that prompted the decision
-- `Consequences` captures what changed because of this decision
-- Body text after the bullets adds detail
-- **Append** new decisions — never delete old ones
-- **Append to the file after each phase** — do this as part of the Phase 7 "Decide & Open PR" step
-
-### current-loop.md Format
-
-A single line of plain text — the high-level summary of the active loop. Displayed on the LoopDeck dashboard project card.
-
-```markdown
-UI restyling — Tailwind CSS v4, OKLCH dark palette, sidebar layout
-```
-
-**Rules:**
-- **Max 100 characters** — this is a dashboard card label, not a detailed description
-- **Single line** — no markdown bullets, no headings, no newlines
-- **High-level summary only** — what is being worked on right now, in one sentence
-- Keep details (start date, status, next steps) in `loops.md`
-
-### loops.md Format
-
-Write loops as level-2 sections for Current/Next Steps/History, with level-3 entries for historical loops:
-
-```markdown
-# Loops
-
-## Current
-- **Started**: YYYY-MM-DD
-- **Goal**: What this loop aims to accomplish
-- **Status**: in_progress
-
-## Next Steps
-- [ ] Task one
-- [ ] Task two
-
-## History
-
-### YYYY-MM-DD — Completed loop title
-- **Status**: completed
-- **Completed**: YYYY-MM-DD
-```
-
-When a loop was promoted from an epic/PRD (via the LoopDeck UI), the
-`## Current` block carries back-reference bullets that trace it back to the
-spec layer:
-
-```markdown
-## Current
-- **Started**: YYYY-MM-DD
-- **Goal**: Define Epic and Prd structs in epic.rs
-- **Status**: in_progress
-- **Epic**: support-project-management
-- **PRD**: prd-spec-layer
-```
-
-Treat `**Epic**` and `**PRD**` as read-only context — they tell you *why* the
-loop exists. Never edit, remove, or reorder them. The `**Goal**` is the only
-field that drives your work.
-
-**Rules:**
-- `## Current` contains the active loop (or `_No active loop._` if none)
-- `## Next Steps` is a checklist of `- [ ]` items for the current loop
-- `## History` contains completed/abandoned loops as `### YYYY-MM-DD — Title` entries
-- At the end of every session, update the Current loop status and Next Steps
-- When a loop completes, move it to History and start a new Current loop
-- **When moving a loop to History, if its `## Current` block carried `**Epic**`
-  and `**PRD**` back-references, check the matching `- [ ]` box in the origin
-  PRD file.** The PRD lives at
-  `docs/epics/<Epic-slug>/<PRD>.md`, under a `## Phases` → `### Phase N`
-  checklist. Find the item whose text matches the loop's `**Goal**` and change
-  `- [ ]` to `- [x]`. This keeps the spec layer in sync with what's actually
-  been built. If the item isn't found (title drifted, or the file was
-  removed), skip silently — the human can check it manually in the UI.
-
-## Phase Actions
-
-After each phase completes:
-1. If you made an architectural decision → append to `.loopdeck/decisions.md`
-2. At the end of each phase → update `.loopdeck/loops.md` Next Steps
-
-At the end of the session (Phase 7 or equivalent):
-1. Update `.loopdeck/loops.md` Current status and Next Steps
-2. Append any unrecorded decisions to `.loopdeck/decisions.md`
-3. If a loop completed, move it to History and set the next Current loop
-4. **If the completed loop carried `**Epic**`/`**PRD**` back-references, check
-   the matching `- [ ]` box in the origin PRD** at
-   `docs/epics/<Epic>/<PRD>.md` (find the item matching the loop's `**Goal**`,
-   change `- [ ]` to `- [x]`). Skip silently if not found.
-
-## Integration with Phase 7
-
-In the final "Decide & Open PR" step, after reporting results:
-- Write/update the files as described above
-- Ensure the next loop's goal is recorded in loops.md so the next session picks it up
+At each phase boundary: if you made an architectural decision, append it to
+`decisions.md`; update `loops.md` Next Steps. At the end of the loop (Phase 7),
+update `loops.md` Current status, append unrecorded decisions, move any
+completed loop to History (checking its origin PRD box if it carried
+`**Epic**`/`**PRD**`), and set the next loop's goal — all per `loopdeck:memory`.
 
 ## Important Rules
 

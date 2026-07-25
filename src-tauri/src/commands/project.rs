@@ -8,6 +8,7 @@ use crate::graphify;
 use crate::paths;
 use crate::project::{self, ProjectMeta};
 use crate::scanner;
+use crate::skills;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -498,6 +499,37 @@ pub async fn rescan_project(
 
     info!("rescan_project complete for: {path}");
     Ok(result)
+}
+
+/// Refresh a project's managed skills (`loopdeck-`-prefixed) to the current app
+/// version, re-deriving the project's stack markers so any newly-added skills
+/// install too. Returns the list of skill names that apply to the project.
+#[tauri::command]
+pub async fn refresh_skills(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    debug!("refresh_skills called for path: {path}");
+
+    // Resolve the registered root under a brief lock, then release before the
+    // (blocking) marker scan + skill copy.
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
+
+    let written = tokio::task::spawn_blocking(move || {
+        let (_name, markers, _has_readme) = scanner::quick_scan_directory(&root);
+        skills::copy_skills(&root, &markers)
+    })
+    .await
+    .map_err(blocking_task_failed)??;
+
+    info!(
+        "refresh_skills complete for: {path} — {} skills",
+        written.len()
+    );
+    Ok(written)
 }
 
 /// Regenerate the project description by re-scanning README and structure.
