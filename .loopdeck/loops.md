@@ -17,6 +17,8 @@
 
 ## Next Steps
 
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/11 (0.2.1 Phase 4 — migrate legacy loops.md to execution.yaml)
+
 ### Milestone 0.2.0 — Support Project Management
 
 Source: [`docs/epics/support-project-management/README.md`](../docs/epics/support-project-management/README.md)
