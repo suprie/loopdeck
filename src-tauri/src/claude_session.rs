@@ -17,26 +17,50 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-/// Upper bound on a single `send_message` turn.
-///
-/// Generous enough to cover a real agent turn (incl. tool use / file reads),
-/// but bounded so a stuck peer fails loudly instead of hanging the caller.
-/// A timed-out session is left in an inconsistent state — the caller should
-/// drop it (Drop cleans up) rather than send again.
 /// Per-`read_line` idle timeout. Bounds how long we'll wait for the next line
-/// of stdout from claude with no activity. Distinct from the legacy
-/// SEND_MESSAGE_TIMEOUT, which used to bound the *whole* turn — including the
-/// time spent parked on a manual approval / AskUserQuestion. Parking for a
-/// user decision can legitimately take many minutes (the user stepped away,
-/// navigated to another page, etc.), so the turn-level timeout was wrong: it
-/// would fire mid-park, drop the session, and surface as
-/// "agent timed out / missing requestId" on the next answer attempt.
+/// of stdout from claude with no activity — a stuck peer (no output for this
+/// long) fails loudly instead of hanging the caller.
 ///
-/// The per-read timeout preserves the original "stuck peer" guard (no stdout
-/// activity for N seconds ⇒ fail loudly) while excluding the parked phase —
-/// when we're parked on `rx` we're not awaiting `read_line`, so this timeout
-/// doesn't fire.
+/// Bounds *active reading* only, not the parked phase: when we're parked on
+/// `rx` awaiting an approval/answer we're not awaiting `read_line`, so this
+/// timeout never fires mid-park. The parked phase is bounded separately by
+/// [`TURN_DEADLINE`].
 const READ_LINE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Absolute (turn-start-relative) deadline bounding how long a single turn
+/// may stay **parked** on a manual approval / `AskUserQuestion`.
+///
+/// This is the backstop the 2026-07-23 "approvals/questions wait indefinitely"
+/// decision explicitly deferred. That decision removed the old 10-minute
+/// `PARKED_SLOT_TIMEOUT`: the visibility layer (toast / `ProjectCard` pill /
+/// detail-view callout, reconciled on app launch + window focus +
+/// visibilitychange) makes a *briefly*-unattended prompt unlikely to be
+/// missed, so the 10-minute auto-deny was a footgun (it silently denied
+/// prompts the user never saw). But "forgotten is unlikely" is not "forgotten
+/// is impossible": a prompt parked while the laptop is closed overnight, the
+/// app is backgrounded, or the user simply stepped away for hours still holds
+/// the per-project turn lock, blocking every later turn on that project (and
+/// stalling an unattended autonomous loop). This deadline releases it.
+///
+/// **Why 30 minutes** (3× the removed 10-minute footgun): long enough that
+/// stepping away for a meeting or lunch never trips it, short enough that a
+/// genuinely-abandoned turn frees the lock in bounded time. It is a single
+/// constant — the contract, not a runtime knob (cf. `logging::MAX_LOG_FILES`)
+/// — so it is trivial to tune if the backstop proves too tight or too loose.
+///
+/// **Scope — parked phase only.** A turn that is actively producing output is
+/// bounded by [`READ_LINE_TIMEOUT`] (per-read inactivity) and the
+/// [`ResponseAccumulator`] byte/block caps, not by this deadline. The read
+/// loop is suspended while parked, so this deadline is the only thing
+/// bounding that gap. A turn that streamed actively for longer than
+/// `TURN_DEADLINE` and *then* parked will expire on that first park — correct,
+/// since nobody is watching a turn that long.
+///
+/// On expiry the park site writes the graceful `interrupt` control_request
+/// (the live process survives — the next send resumes the conversation, just
+/// as a manual Stop does) and returns `Err`, releasing the lock. See
+/// [`park_until`].
+const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 /// The tool name Claude uses when it wants to ask the user a clarifying
 /// question. We intercept this *before* the auto-permission policy so the
@@ -69,6 +93,61 @@ enum BoundedRead {
     Eof,
     /// The line exceeded the byte cap and was discarded in full.
     Oversized,
+}
+
+/// Outcome of parking a turn on a oneshot receiver (a pending manual approval
+/// or `AskUserQuestion`) bounded by an absolute turn deadline.
+///
+/// Separates the *decision* (this pure enum, returned by [`park_until`]) from
+/// the *action* the park site takes on each variant (write a control_response,
+/// return a cancellation error, or write an interrupt + return an expiry
+/// error) — so the deadline logic is unit-testable without a live session.
+#[derive(Debug)]
+enum ParkOutcome<T> {
+    /// The receiver resolved with an answer/verdict — write the control_response.
+    Answered(T),
+    /// The sender was dropped without sending — the turn was cancelled (the
+    /// session is being dropped / a Stop landed elsewhere). The park site
+    /// returns an error so the read loop stops.
+    Cancelled,
+    /// The absolute turn deadline elapsed with no answer — the prompt was
+    /// abandoned. The park site writes the graceful `interrupt` control_request
+    /// and returns an error, releasing the per-project lock.
+    Expired,
+}
+
+/// Race a parked oneshot receiver against the turn's absolute deadline.
+///
+/// Returns [`ParkOutcome::Answered`] when the receiver resolves,
+/// [`ParkOutcome::Cancelled`] when the sender is dropped, or
+/// [`ParkOutcome::Expired`] when `deadline` elapses first. `deadline` is
+/// absolute (captured at turn start as a `tokio::time::Instant`), so the same
+/// deadline bounds every park within a turn — the total parked time across
+/// multiple parks is bounded by [`TURN_DEADLINE`], not re-reset per park.
+///
+/// Cancel-safe: dropping the future mid-await only drops the
+/// `oneshot::Receiver`.
+async fn park_until<T>(deadline: tokio::time::Instant, rx: oneshot::Receiver<T>) -> ParkOutcome<T> {
+    match tokio::time::timeout_at(deadline, rx).await {
+        Ok(Ok(value)) => ParkOutcome::Answered(value),
+        Ok(Err(_)) => ParkOutcome::Cancelled,
+        Err(_) => ParkOutcome::Expired,
+    }
+}
+
+/// The error surfaced when a parked prompt exceeds [`TURN_DEADLINE`].
+///
+/// Shared by the AskUserQuestion and manual-approval park sites so the
+/// "abandoned, lock released" message stays consistent. The live session
+/// survives (the park site already wrote the `interrupt` control_request), so
+/// the caller can re-send to resume the conversation.
+fn turn_deadline_expired_error() -> AppError {
+    AppError::Agent(format!(
+        "turn deadline ({} minutes) elapsed while parked for a decision — the \
+         project lock was released; the live session survived, so re-send to \
+         resume",
+        TURN_DEADLINE.as_secs() / 60
+    ))
 }
 
 /// Read one newline-terminated line from `reader` into `buf`, bounding peak
@@ -455,11 +534,18 @@ impl ClaudeSession {
         channel: Option<&Channel<ClaudeEvent>>,
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
+        turn_deadline: tokio::time::Instant,
     ) -> Result<(), AppError> {
         // ── Arm 1: AskUserQuestion — defer to the human via its dedicated path. ──
         if request.tool_name == ASK_USER_QUESTION_TOOL {
             return self
-                .answer_ask_user_question(request_id, request, channel, question_slot)
+                .answer_ask_user_question(
+                    request_id,
+                    request,
+                    channel,
+                    question_slot,
+                    turn_deadline,
+                )
                 .await;
         }
 
@@ -487,7 +573,14 @@ impl ClaudeSession {
             && crate::permission::requires_manual_approval(&request.tool_name)
         {
             return self
-                .answer_manual_permission(request_id, request, &input_str, channel, permission_slot)
+                .answer_manual_permission(
+                    request_id,
+                    request,
+                    &input_str,
+                    channel,
+                    permission_slot,
+                    turn_deadline,
+                )
                 .await;
         }
 
@@ -558,9 +651,10 @@ impl ClaudeSession {
     ///    (shared with `AppState.pending_answers`), where the
     ///    `agent_answer_question` command will find and resolve it.
     /// 3. Emit `ClaudeEvent::AskUserQuestion` so the UI can render the prompt.
-    /// 4. `.await` the receiver. The `SEND_MESSAGE_TIMEOUT` wrapper around the
-    ///    whole turn bounds the wait — a user who never answers aborts the turn
-    ///    at 180s and the session is dropped by the caller.
+    /// 4. `.await` the receiver, bounded by the absolute `turn_deadline`
+    ///    ([`TURN_DEADLINE`]). A user who answers resolves it; a user who never
+    ///    answers eventually expires the deadline, which writes the graceful
+    ///    `interrupt` control_request and aborts the turn (releasing the lock).
     /// 5. On answer, build `updatedInput = original input + { answers }` and
     ///    write back an `allow`-with-`updatedInput` control_response.
     ///
@@ -573,6 +667,7 @@ impl ClaudeSession {
         request: &ControlRequestBody,
         channel: Option<&Channel<ClaudeEvent>>,
         question_slot: &QuestionSlot,
+        turn_deadline: tokio::time::Instant,
     ) -> Result<(), AppError> {
         let questions = parse_ask_user_questions(&request.input);
         if questions.is_empty() {
@@ -632,22 +727,33 @@ impl ClaudeSession {
                 .await;
         }
 
-        // Park until the user answers. There is no expiry: the visibility
-        // layer (toast / ProjectCard pill / detail-view callout, reconciled on
-        // app launch + window focus + visibilitychange) surfaces the pending
-        // question so it isn't missed, and the user's only escapes are to
-        // answer it or hit Stop (which cancels the turn and drops the sender).
-        // `rx` is a `oneshot::Receiver`, so awaiting it is cancel-safe and
-        // resolves the moment the user's answer arrives.
-        let answers = match rx.await {
-            Ok(answers) => answers,
-            Err(_) => {
+        // Park until the user answers, bounded by the absolute turn deadline.
+        // The visibility layer (toast / ProjectCard pill / detail-view
+        // callout, reconciled on app launch + window focus + visibilitychange)
+        // surfaces the pending question so it isn't missed, and the normal
+        // escapes are to answer it or hit Stop (which cancels the turn and
+        // drops the sender). The deadline is the last-resort backstop for a
+        // genuinely-abandoned prompt (laptop closed overnight, app
+        // backgrounded) — see `TURN_DEADLINE`. `rx` is a `oneshot::Receiver`,
+        // so `park_until` is cancel-safe.
+        let answers = match park_until(turn_deadline, rx).await {
+            ParkOutcome::Answered(answers) => answers,
+            ParkOutcome::Cancelled => {
                 // Sender dropped without sending — the turn was cancelled
                 // (e.g. session dropped or Stop was hit). Return an error so
                 // the caller stops reading.
                 return Err(AppError::Agent(
                     "AskUserQuestion cancelled — answer channel closed".into(),
                 ));
+            }
+            ParkOutcome::Expired => {
+                // Deadline elapsed with no answer — the prompt was abandoned.
+                // Write the graceful interrupt so the live claude process
+                // aborts cleanly (it survives — the next send resumes the
+                // conversation), then surface an error to release the
+                // per-project lock. See `TURN_DEADLINE`.
+                self.write_interrupt_control_request().await;
+                return Err(turn_deadline_expired_error());
             }
         };
 
@@ -706,9 +812,11 @@ impl ClaudeSession {
     /// 2. Create a oneshot; stash the `Sender` in `permission_slot` (shared
     ///    with `AppState.pending_permissions`), where the
     ///    `agent_answer_permission` command will pop it to deliver the verdict.
-    /// 3. `.await` the receiver. `SEND_MESSAGE_TIMEOUT` bounds the wait — a
-    ///    user who never answers aborts the turn at 180s and the caller drops
-    ///    the session.
+    /// 3. `.await` the receiver, bounded by the absolute `turn_deadline`
+    ///    ([`TURN_DEADLINE`]). A user who decides resolves it; a user who
+    ///    never decides eventually expires the deadline, which writes the
+    ///    graceful `interrupt` control_request and aborts the turn (releasing
+    ///    the lock).
     /// 4. On `Decision::Allow`, write `allow`; on `Decision::Deny(r)`, write
     ///    `deny(r)`. Then emit a second `PermissionRequest` carrying the
     ///    resolved decision so the UI's pending marker becomes ✓/✗.
@@ -723,6 +831,7 @@ impl ClaudeSession {
         input_str: &str,
         channel: Option<&Channel<ClaudeEvent>>,
         permission_slot: &PermissionSlot,
+        turn_deadline: tokio::time::Instant,
     ) -> Result<(), AppError> {
         // Surface the pending request to the UI BEFORE parking. The streaming
         // bubble renders a pending marker so the user sees what's being asked.
@@ -772,22 +881,32 @@ impl ClaudeSession {
             return Ok(());
         }
 
-        // Park until the user decides. There is no expiry: the visibility
-        // layer surfaces pending approvals (toast / ProjectCard pill /
-        // detail-view callout, reconciled on app launch + window focus +
-        // visibilitychange) so the user can't miss one, and the only escapes
-        // are Allow/Deny or Stop (which cancels the turn and drops the
-        // sender). Borrow of `self` is released at the `.await`, so the writes
-        // below can re-take `&mut self`.
-        let decision = match rx.await {
-            Ok(d) => d,
-            Err(_) => {
+        // Park until the user decides, bounded by the absolute turn deadline.
+        // The visibility layer surfaces pending approvals (toast / ProjectCard
+        // pill / detail-view callout, reconciled on app launch + window focus +
+        // visibilitychange) so the user can't miss one, and the normal escapes
+        // are Allow/Deny or Stop (which cancels the turn and drops the sender).
+        // The deadline is the last-resort backstop for a genuinely-abandoned
+        // approval — see `TURN_DEADLINE`. Borrow of `self` is released at the
+        // `.await`, so the writes below can re-take `&mut self`.
+        let decision = match park_until(turn_deadline, rx).await {
+            ParkOutcome::Answered(d) => d,
+            ParkOutcome::Cancelled => {
                 // Sender dropped without sending — the turn was cancelled.
                 // Return an error so the caller stops reading (mirrors the
                 // AskUserQuestion cancellation path).
                 return Err(AppError::Agent(
                     "manual approval cancelled — answer channel closed".into(),
                 ));
+            }
+            ParkOutcome::Expired => {
+                // Deadline elapsed with no decision — the approval was
+                // abandoned. Write the graceful interrupt so the live claude
+                // process aborts cleanly (it survives — the next send resumes
+                // the conversation), then surface an error to release the
+                // per-project lock. See `TURN_DEADLINE`.
+                self.write_interrupt_control_request().await;
+                return Err(turn_deadline_expired_error());
             }
         };
 
@@ -936,16 +1055,14 @@ impl ClaudeSession {
         permission_slot: &PermissionSlot,
         _interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
-        // Bound the whole turn so a stuck peer fails loudly instead of
-        // hanging the caller. On timeout the session is left mid-turn (a late
-        // `result` could still arrive) — the caller should drop it rather than
-        // send again. See SEND_MESSAGE_TIMEOUT doc comment above.
-        // No outer turn-level timeout: that used to bound the *whole* turn
-        // (including the parked phase) and would fire mid-approval, dropping
-        // the session out from under a user who'd stepped away. Instead we
-        // bound each individual `read_line` with READ_LINE_TIMEOUT — when
-        // parked on a control_request we're awaiting the oneshot, not reading
-        // stdout, so the per-read timeout naturally excludes the parked phase.
+        // Active reading is bounded per-`read_line` by READ_LINE_TIMEOUT (a
+        // stuck peer fails loudly). The parked phase (awaiting an
+        // approval/answer, which excludes the read timeout) is bounded by an
+        // absolute, turn-start-relative backstop — TURN_DEADLINE — so a
+        // genuinely-abandoned prompt releases the per-project lock instead of
+        // holding it forever. The deadline is captured here once and threaded
+        // into `answer_control_request` below.
+        let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
         let result = async {
             // ---- write the user turn to stdin ----
             let stdin = self
@@ -1037,6 +1154,7 @@ impl ClaudeSession {
                             None,
                             question_slot,
                             permission_slot,
+                            turn_deadline,
                         )
                         .await?;
                         false
@@ -1085,9 +1203,12 @@ impl ClaudeSession {
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
-        // No outer turn-level timeout — see `send_message` for the rationale.
-        // The per-read timeout lives in the select below (READ_LINE_TIMEOUT
-        // branch) so the parked phase is naturally excluded.
+        // Active reading is bounded per-`read_line` by READ_LINE_TIMEOUT (in
+        // the select below); the parked phase — which that select excludes —
+        // is bounded by the absolute TURN_DEADLINE backstop captured here and
+        // threaded into `answer_control_request`. See `send_message` for the
+        // full rationale.
+        let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
         let result = async {
             // ---- write the user turn to stdin ----
             let stdin = self
@@ -1235,6 +1356,7 @@ impl ClaudeSession {
                         Some(channel),
                         question_slot,
                         permission_slot,
+                        turn_deadline,
                     )
                     .await?;
                     continue; // control events are not turn content — keep reading
@@ -1592,6 +1714,64 @@ mod tests {
         assert_eq!(&buf, b"tail-no-newline");
     }
 
+    // ── park_until (absolute turn deadline) ────────────────────────────
+
+    #[test]
+    fn turn_deadline_is_a_finite_backstop() {
+        // Lock the backstop value: 30 minutes, finite. A change here should be
+        // deliberate (and reflected in the TURN_DEADLINE doc + decisions.md).
+        assert_eq!(TURN_DEADLINE, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn turn_deadline_expired_error_describes_lock_release() {
+        let msg = match turn_deadline_expired_error() {
+            AppError::Agent(m) => m,
+            _ => panic!("expected AppError::Agent variant"),
+        };
+        assert!(msg.contains("turn deadline"), "msg: {msg}");
+        assert!(msg.contains("lock was released"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn park_until_answered_when_receiver_resolves_before_deadline() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (tx, rx) = oneshot::channel::<u32>();
+        tx.send(42).unwrap();
+        let outcome = park_until(deadline, rx).await;
+        match outcome {
+            ParkOutcome::Answered(v) => assert_eq!(v, 42),
+            other => panic!("expected Answered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn park_until_cancelled_when_sender_dropped() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (tx, rx) = oneshot::channel::<u32>();
+        drop(tx); // sender dropped without sending — receiver resolves to a RecvError
+        let outcome = park_until(deadline, rx).await;
+        match outcome {
+            ParkOutcome::Cancelled => {}
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn park_until_expired_when_deadline_already_passed() {
+        // A deadline in the past must expire immediately — never hang waiting
+        // for the (never-coming) answer. Race it against a short wall-clock
+        // guard so a regression (e.g. a per-park relative timeout instead of
+        // the absolute `timeout_at`) fails loudly instead of stalling the
+        // suite for TURN_DEADLINE.
+        let past = tokio::time::Instant::now() - Duration::from_secs(60);
+        let (_tx, rx) = oneshot::channel::<u32>(); // never answered
+        let outcome = tokio::time::timeout(Duration::from_millis(500), park_until(past, rx))
+            .await
+            .expect("park_until with a past deadline must not hang");
+        assert!(matches!(outcome, ParkOutcome::Expired), "got {outcome:?}");
+    }
+
     /// Smoke test: spawn one session, send one message, get a structured reply.
     ///
     /// Validates the full pipeline end-to-end: spawn (env vars, piped stdio)
@@ -1864,7 +2044,7 @@ mod tests {
     /// `MANUAL_APPROVAL_TOOLS`, so under allow-by-default the synchronous
     /// policy auto-allows it — proving the control-protocol round-trip works
     /// without parking on the manual-approval slot. Before the original fix,
-    /// this would stall until SEND_MESSAGE_TIMEOUT (180s).
+    /// this would stall until READ_LINE_TIMEOUT (180s).
     ///
     /// (The earlier version of this test used `git status` via Bash, but Bash
     /// is now in the manual-approval set, so it would park on `permission_slot`
