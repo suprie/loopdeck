@@ -15,6 +15,7 @@ pub mod agent;
 pub mod composer;
 pub mod config_cmds;
 pub mod epics;
+pub mod execution;
 pub mod project;
 pub mod state;
 

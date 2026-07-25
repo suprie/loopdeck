@@ -6,6 +6,7 @@ mod config;
 mod conversation;
 mod epic;
 mod error;
+mod execution;
 mod git;
 mod graphify;
 mod limits;
@@ -19,6 +20,11 @@ pub mod retry;
 mod scanner;
 mod secrets;
 mod skills;
+mod state_cli;
+
+/// Entry point for the `loopdeck state` subcommand (Phase 3 `state-command`).
+/// Branch is taken in `main.rs` when the binary's first arg is `state`.
+pub use state_cli::run_state_cli;
 
 use commands::AppState;
 use config::GlobalConfig;
@@ -130,6 +136,12 @@ pub fn run() {
             commands::epics::toggle_prd_loop,
             commands::epics::read_spec_file,
             commands::epics::write_spec_file,
+            // Structured execution state (execution.rs) — 0.2.1
+            commands::execution::get_execution_state,
+            commands::execution::promote_loop_by_id,
+            commands::execution::complete_current_loop,
+            commands::execution::abandon_current_loop,
+            commands::execution::promote_next_queued_loop,
             // Agent config + auth token + diagnostics (config_cmds.rs)
             commands::config_cmds::get_agent_config,
             commands::config_cmds::set_agent_config,

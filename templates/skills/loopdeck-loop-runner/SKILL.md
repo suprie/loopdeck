@@ -58,21 +58,30 @@ the remainder into new loops.
 
 ### 4. On completion — record the result
 
-When the loop is done (or abandoned), update `.loopdeck/` by following the
-`loopdeck:memory` conventions (do not freehand the formats):
+First detect the project's runtime mode (`test -f .loopdeck/execution.yaml`):
 
-1. Move the `## Current` entry into `## History` as a `### YYYY-MM-DD — Title`
-   entry with `- **Status**: completed` (or `abandoned`) and `- **Completed**:
-   YYYY-MM-DD`.
-2. Clear `## Current` (set it to `_No active loop._` or start the next loop if
-   one is queued in `## Next Steps`).
-3. **If the completed loop carried `**Epic**`/`**PRD**` back-references**, check
+- **Structured mode** (`.loopdeck/execution.yaml` exists): complete/abandon the
+  loop through the validated CLI — it performs the atomic current→history
+  transition through the same Rust domain as the UI (never hand-edit
+  `execution.yaml`):
+  - done → `loopdeck state complete [--commit <sha>]`
+  - abandoned → `loopdeck state abandon --reason "<why>"`
+- **Legacy mode** (only `loops.md` exists): follow the `loopdeck:memory`
+  `loops.md` format — move `## Current` into `## History` as a
+  `### YYYY-MM-DD — Title` entry with `- **Status**: completed` (or `abandoned`)
+  and `- **Completed**: YYYY-MM-DD`, then clear `## Current` (or start the next
+  queued loop).
+
+Then, in **both** modes:
+
+1. **If the completed loop carried `**Epic**`/`**PRD**` back-references**, check
    the matching `- [ ]` box in the origin PRD at
    `docs/epics/<Epic>/<PRD>.md` (find the item matching the loop's `**Goal**`,
    change `- [ ]` → `- [x]`; skip silently if not found).
-4. Append any architectural decision made during the loop to `decisions.md`.
+2. Append any architectural decision made during the loop to `decisions.md`.
 
-Delegate every `.loopdeck/` write above to the formats in `loopdeck:memory`.
+Delegate every `.loopdeck/` write (legacy mode) and the format details to
+`loopdeck:memory`.
 
 ## Important Rules
 

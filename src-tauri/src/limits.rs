@@ -79,6 +79,14 @@ pub const SEARCH_MAX_DURATION: Duration = Duration::from_secs(10);
 /// out of memory without changing the extracted result in practice.
 pub const README_MAX_BYTES: u64 = 64 * 1024;
 
+/// Max bytes of `.loopdeck/execution.yaml` read wholesale.
+///
+/// App-managed structured state (current loop, queue, completion history). 1
+/// MiB is far beyond any real project history at schema v1; history is
+/// checkpointed to an append-only archive only in a later schema version if it
+/// ever grows material.
+pub const EXECUTION_MAX_BYTES: u64 = 1024 * 1024;
+
 /// Max bytes of a spec / PRD / epic Markdown file read wholesale.
 ///
 /// These live under `docs/epics/` (human-authored) and `.loopdeck/` (agent-

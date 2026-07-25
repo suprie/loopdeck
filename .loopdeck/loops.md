@@ -52,7 +52,60 @@ Source: [`docs/epics/support-project-management/prd-structured-execution-state.m
   `author-loop-ids` (epic-author skill), `render-legacy-items` (EpicsPanel
   promote-disabled + remediation tooltip; EpicsView ID chip),
   `update-dogfood-prds` (dogfood test asserts ID parsing on the real repo).
-- [ ] Implement the remaining PRD phases (2–6) after Phase 1 ships.
+- [x] **Implement Phase 2 — Execution schema and persistence** (2026-07-25,
+  worktree `feat-0.2.1-execution-state`; verified `fmt`/`clippy -D`/
+  `test(387, +23)`/`tsc`/`build` green): new `src-tauri/src/execution.rs` data
+  layer — `execution-types` (`ExecutionState` + `ActiveLoop`/`QueuedLoop`/
+  `HistoryLoop`/`LoopOrigin`/`Outcome`/`GitEvidence`, matching the
+  `execution.yaml` schema; membership in `current` *is* the `in_progress`
+  status — no drift-prone `status` field; `attempt` defaults to 1 per the
+  retry lean), `execution-validation` (`validate_invariants` — duplicate
+  IDs in queue / current↔queue / current-vs-completed-attempt / duplicate
+  (id,attempt) history / abandoned-needs-reason; `validate` enforces the
+  current schema version on write; pure transitions `complete_current` /
+  `abandon_current` / `promote_next_from_queue` re-validate before return),
+  `execution-persistence` (`load`/`save` mirror `config.rs`: bounded read,
+  OCC `expected_revision`, `.bak` + `persist::atomic_write`; new
+  `EXECUTION_MAX_BYTES`, `AppError::ExecutionState`), `execution-recovery`
+  (malformed primary → load `.bak` read-only as `LoadSource::BackupRecovered`
+  with a warning; the primary is preserved — never auto-overwritten; a
+  newer/older `schema_version` fails read-only with an upgrade message).
+  **Phase 2 is the data layer only** — module-level `#![allow(dead_code)]`
+  with a Phase-3 removal note, since the transition commands + the
+  `loopdeck-state` CLI + `get_execution_state` (Phase 3) are its first
+  production callers.
+- [x] **Implement Phase 3 — State transitions and agent integration** (2026-07-25,
+  same worktree `feat-0.2.1-execution-state`, stacked on Phase 2 — Phase 3 depends
+  on Phase 2's `execution.rs`, so it shares the worktree rather than branching
+  fresh from `origin/main`; verified `fmt`/`clippy -D`/`test(398)`/`tsc` green,
+  binary smoke-tested). Three pieces:
+  **(a) Command layer** — new `commands/execution.rs`: `get_execution_state` (read;
+  returns `LoadedExecution` incl. `source`/`warnings`), `promote_loop_by_id`
+  (`promote-by-id` — resolves title + `LoopOrigin` from the spec layer by stable
+  ID via the shared `epic::find_loop_by_id`, so a rename after promotion can't
+  break the join; computes the retry `attempt`), `complete_current_loop`
+  (`complete-loop`, optional `--commit` → `GitEvidence`, optional `promote_next`),
+  `abandon_current_loop` (`abandon-loop`, required reason), `promote_next_queued_loop`.
+  New domain transition `ExecutionState::promote_loop_into_current`. Every command
+  runs through the validated domain (load → transition → OCC `save`); the Phase 2
+  `#![allow(dead_code)]` is **removed** (commands are the first real callers).
+  **(b) `loopdeck-state` CLI** (`state-command`) — new `state_cli.rs`, branched in
+  `main.rs` on a leading `state` arg (lightest, no clap, no new dep — the PRD's
+  "LoopDeck binary" option): `loopdeck state show|promote <id>|complete
+  [--commit]|abandon --reason`, `--path` defaults to cwd. Reuses the same
+  `execution` domain + `epic::find_loop_by_id` — no duplicated transition rules
+  (PRD lean). Pure arg-parser is unit-tested; the binary was smoke-tested
+  (`show`→0, bad subcommand→2, complete-with-no-current→1).
+  **(c) Skill migration** (`update-memory-skill` + `remove-freeform-runtime-edits`)
+  — `loopdeck-memory` gained a "Structured execution state" section: if
+  `.loopdeck/execution.yaml` exists, transition loops ONLY via `loopdeck state`
+  (validated), never hand-edit it; `loops.md` becomes a legacy artifact. Legacy
+  `loops.md` format is retained for unmigrated projects (Phase 4 migrates).
+  `loopdeck-loop-runner`'s completion step is mode-aware (structured →
+  `loopdeck state complete/abandon`; legacy → move to History). Both keep the
+  "check the origin PRD box" + `decisions.md` append.
+- [ ] Implement the remaining PRD phases (4–6): Phase 4 (migration &
+  compatibility), Phase 5 (derived progress UI), Phase 6 (Git delivery evidence).
 
 The two remaining PRDs are coupled (the split creates the `loopdeck-epic-author`
 slot; the author PRD fills it) and should land together, each in its own worktree
