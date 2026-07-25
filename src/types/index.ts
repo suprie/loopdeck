@@ -237,6 +237,102 @@ export interface LoopStatus {
   history: Loop[];
 }
 
+// ── Structured execution state (.loopdeck/execution.yaml) — 0.2.1 ────
+// Mirrors Rust `execution.rs` + `migration.rs`. Dates serialize as RFC3339
+// strings (chrono). The ID is the join key; titles are presentation only.
+
+/** A spec → runtime origin triple. Mirrors Rust `LoopOrigin`. */
+export interface LoopOrigin {
+  epic: string;
+  prd: string;
+  phase: string;
+}
+
+/** serde `rename_all = "lowercase"`. */
+export type Outcome = "completed" | "abandoned";
+
+/** Local Git delivery evidence (optional; Phase 6 enriches it). */
+export interface GitEvidence {
+  commit: string;
+}
+
+/** The loop currently in progress (`current:`). */
+export interface ActiveLoop {
+  id: string;
+  title: string;
+  origin: LoopOrigin;
+  started_at: string;
+  attempt: number;
+}
+
+/** A planned-but-not-started loop (`queue:`). */
+export interface QueuedLoop {
+  id: string;
+  title: string;
+  origin: LoopOrigin;
+  queued_at: string;
+}
+
+/** A finished loop (`history:`), completed or abandoned. */
+export interface HistoryLoop {
+  id: string;
+  title: string;
+  origin: LoopOrigin;
+  outcome: Outcome;
+  started_at: string;
+  completed_at: string;
+  attempt: number;
+  git?: GitEvidence;
+  /** Present only for abandoned loops. */
+  reason?: string;
+}
+
+/** The on-disk shape of `.loopdeck/execution.yaml`. */
+export interface ExecutionState {
+  schema_version: number;
+  revision: number;
+  current?: ActiveLoop;
+  queue: QueuedLoop[];
+  history: HistoryLoop[];
+}
+
+/** Where a loaded ExecutionState came from. Mirrors Rust `LoadSource` (PascalCase). */
+export type LoadSource = "Default" | "Primary" | "BackupRecovered";
+
+export interface LoadedExecution {
+  state: ExecutionState;
+  source: LoadSource;
+  warnings: string[];
+  /** Whether `execution.yaml` exists on disk (vs a fresh default). Lets the UI
+   * branch on structured-vs-legacy mode (Phase 4 migration surface). */
+  file_present: boolean;
+}
+
+/** A legacy record that could not be mapped to exactly one PRD loop. */
+export interface UnmatchedRecord {
+  label: string;
+  title: string;
+  section: "current" | "history";
+  reason: string;
+}
+
+/** A Next Steps item that could not become a queue entry. */
+export interface UnconvertedNextStep {
+  text: string;
+  checked: boolean;
+}
+
+/** The migration preview: planned state + everything that stayed unmatched. */
+export interface MigrationPreview {
+  planned: ExecutionState;
+  current_matched: boolean;
+  matched_history: number;
+  unmatched: UnmatchedRecord[];
+  unconverted_next_steps: UnconvertedNextStep[];
+  execution_yaml_present: boolean;
+  loops_md_present: boolean;
+}
+
 /**
  * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
  * Mirrors Rust `Epic` in epic.rs.

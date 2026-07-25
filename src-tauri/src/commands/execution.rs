@@ -13,6 +13,7 @@ use super::state::{resolve_root, AppState};
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionState, GitEvidence, LoadedExecution, LoopOrigin};
+use crate::migration::{self, MigrationPreview};
 use chrono::Utc;
 use std::path::Path;
 use tauri::State;
@@ -109,6 +110,35 @@ pub async fn promote_next_queued_loop(
     let next = loaded.state.promote_next_from_queue(Utc::now())?;
     execution::save(&root, &next, loaded.state.revision)?;
     Ok(next)
+}
+
+/// Compute a read-only migration preview for a project still on legacy
+/// `.loopdeck/loops.md` (Phase 4). Returns the planned `execution.yaml`, the
+/// records that map to stable IDs, and every unmatched/ambiguous record +
+/// unconverted next-step (preserved verbatim — never fuzzy-matched). Writes
+/// nothing. `available()` is false when `execution.yaml` already exists.
+#[tauri::command]
+pub async fn get_migration_preview(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<MigrationPreview, AppError> {
+    debug!("get_migration_preview called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+    migration::preview(&root, Utc::now())
+}
+
+/// Perform the confirmed legacy→structured migration (Phase 4). Recomputes the
+/// preview server-side, validates, atomically writes `execution.yaml`, then
+/// renames `loops.md` → `loops.legacy.md` (preserving the original). Idempotent
+/// against a crash between the two writes. Returns the new structured state.
+#[tauri::command]
+pub async fn apply_migration(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ExecutionState, AppError> {
+    debug!("apply_migration called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+    migration::apply(&root, Utc::now())
 }
 
 /// A resolved PRD loop: its display title + spec origin.

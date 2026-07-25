@@ -9,6 +9,9 @@ import type {
   Decision,
   Epic,
   LoopStatus,
+  ExecutionState,
+  LoadedExecution,
+  MigrationPreview,
   AgentResponse,
   ClaudeEvent,
   ConversationTurn,
@@ -150,6 +153,38 @@ export async function getDecisions(path: string): Promise<Decision[]> {
  */
 export async function getLoops(path: string): Promise<LoopStatus> {
   return invoke<LoopStatus>("get_loops", { path });
+}
+
+/**
+ * Load .loopdeck/execution.yaml (structured state). `file_present` is false when
+ * the file doesn't exist yet (fresh default) — use it to branch on structured vs
+ * legacy mode. Rust: get_execution_state(path) -> Result<LoadedExecution, AppError>
+ */
+export async function getExecutionState(
+  path: string,
+): Promise<LoadedExecution> {
+  return invoke<LoadedExecution>("get_execution_state", { path });
+}
+
+/**
+ * Read-only migration preview for a project still on legacy .loopdeck/loops.md:
+ * the planned execution.yaml + every unmatched/ambiguous record (preserved
+ * verbatim, never fuzzy-matched). Writes nothing. Rust:
+ * get_migration_preview(path) -> Result<MigrationPreview, AppError>
+ */
+export async function getMigrationPreview(
+  path: string,
+): Promise<MigrationPreview> {
+  return invoke<MigrationPreview>("get_migration_preview", { path });
+}
+
+/**
+ * Perform the confirmed legacy → structured migration: writes execution.yaml,
+ * renames loops.md → loops.legacy.md (original preserved). Idempotent. Returns
+ * the new structured state. Rust: apply_migration(path) -> Result<ExecutionState, AppError>
+ */
+export async function applyMigration(path: string): Promise<ExecutionState> {
+  return invoke<ExecutionState>("apply_migration", { path });
 }
 
 /**

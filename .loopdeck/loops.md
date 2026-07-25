@@ -104,8 +104,30 @@ Source: [`docs/epics/support-project-management/prd-structured-execution-state.m
   `loopdeck-loop-runner`'s completion step is mode-aware (structured →
   `loopdeck state complete/abandon`; legacy → move to History). Both keep the
   "check the origin PRD box" + `decisions.md` append.
-- [ ] Implement the remaining PRD phases (4–6): Phase 4 (migration &
-  compatibility), Phase 5 (derived progress UI), Phase 6 (Git delivery evidence).
+- [x] **Implement Phase 4 — Migration and compatibility** (2026-07-25,
+  worktree `feat-0.2.1-migration`; verified `fmt`/`clippy -D`/`test(415)`/
+  `tsc`/`build` green, binary-smoked). New `src-tauri/src/migration.rs`: a pure
+  `build_preview` (exact-only identity matching — `(epic, prd, title)` when the
+  legacy record carries the promote-bridge `**Epic**`/`**PRD**` back-ref, else
+  title-only exact; "exactly one match" wins, zero/many → unmatched, **never
+  fuzzy**) + crash-safe idempotent `apply` (validate → atomic-write
+  `execution.yaml` → `fs::rename` `loops.md`→`loops.legacy.md`; completes a
+  crashed rename on re-run). Unmatched records are preserved verbatim in
+  `loops.legacy.md` + surfaced in the preview, **never** written to
+  `execution.yaml` (no schema change). `parse_loops_for_migration` reuses
+  `memory::parse_kv_line`/`split_heading` (now `pub(crate)`) + a new
+  `memory::loops_md_path`; spec index built from `epic::parse_epics`. IPC:
+  `get_migration_preview`/`apply_migration` (`commands/execution.rs`) +
+  `LoadedExecution.file_present` (mode signal) registered in `lib.rs`. CLI:
+  `loopdeck state migrate [--yes]` (`state_cli.rs`) — preview is read-only,
+  `--yes` applies. Frontend: execution-state TS types + wrappers + a project-level
+  `MigrationCard` (preview summary, expandable unmatched reconciliation list,
+  confirm-gated Migrate) wired into a mode-branching `LoopsPanel` (structured →
+  render `execution.yaml`; legacy → legacy view + MigrationCard). Dogfood test
+  migrates this repo's own `loops.md`+spec to a valid state. See the 2026-07-25
+  decision.
+- [ ] Implement the remaining PRD phases (5–6): Phase 5 (derived progress UI),
+  Phase 6 (Git delivery evidence).
 
 The two remaining PRDs are coupled (the split creates the `loopdeck-epic-author`
 slot; the author PRD fills it) and should land together, each in its own worktree

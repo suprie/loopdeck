@@ -12,6 +12,7 @@ mod graphify;
 mod limits;
 mod logging;
 mod memory;
+mod migration;
 mod paths;
 mod permission;
 mod persist;
@@ -142,6 +143,9 @@ pub fn run() {
             commands::execution::complete_current_loop,
             commands::execution::abandon_current_loop,
             commands::execution::promote_next_queued_loop,
+            // Migration from legacy loops.md → execution.yaml — 0.2.1 Phase 4
+            commands::execution::get_migration_preview,
+            commands::execution::apply_migration,
             // Agent config + auth token + diagnostics (config_cmds.rs)
             commands::config_cmds::get_agent_config,
             commands::config_cmds::set_agent_config,

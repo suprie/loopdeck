@@ -13,7 +13,12 @@
 //! loopdeck state promote <loop-id> [--path <dir>]
 //! loopdeck state complete [--commit <sha>] [--no-promote-next] [--path <dir>]
 //! loopdeck state abandon --reason <text> [--no-promote-next] [--path <dir>]
+//! loopdeck state migrate [--yes] [--path <dir>]
 //! ```
+//!
+//! `migrate` (Phase 4) prints a read-only legacy→structured migration preview;
+//! `--yes` performs it (writes `execution.yaml`, renames `loops.md` →
+//! `loops.legacy.md`). It reuses the `migration` domain — no duplicated logic.
 //!
 //! `--path` defaults to the current directory (skills/hooks run from the
 //! project root). Errors print to stderr; the process exits non-zero.
@@ -21,6 +26,7 @@
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, GitEvidence, LoadedExecution, LoopOrigin};
+use crate::migration::{self, MigrationPreview};
 use chrono::Utc;
 use std::path::PathBuf;
 
@@ -30,6 +36,7 @@ usage:
   loopdeck state promote <loop-id> [--path <dir>]
   loopdeck state complete [--commit <sha>] [--no-promote-next] [--path <dir>]
   loopdeck state abandon --reason <text> [--no-promote-next] [--path <dir>]
+  loopdeck state migrate [--yes] [--path <dir>]
 
 --path defaults to the current directory.";
 
@@ -73,6 +80,12 @@ enum StateCli {
         promote_next: bool,
         path: PathBuf,
     },
+    /// Phase 4: migrate legacy `loops.md` → structured `execution.yaml`.
+    /// `yes == false` prints a read-only preview; `true` performs the migration.
+    Migrate {
+        yes: bool,
+        path: PathBuf,
+    },
 }
 
 /// Parse the args that follow `state` into a [`StateCli`]. Pure (no I/O) so it
@@ -81,11 +94,12 @@ enum StateCli {
 fn parse_state_cli(args: &[String]) -> Result<StateCli, String> {
     let sub = args
         .first()
-        .ok_or("missing subcommand (show|promote|complete|abandon)")?;
+        .ok_or("missing subcommand (show|promote|complete|abandon|migrate)")?;
     let mut path: Option<PathBuf> = None;
     let mut commit: Option<String> = None;
     let mut reason: Option<String> = None;
     let mut promote_next = true;
+    let mut yes = false;
     let mut positionals: Vec<String> = Vec::new();
 
     let mut i = 1;
@@ -101,6 +115,7 @@ fn parse_state_cli(args: &[String]) -> Result<StateCli, String> {
             "--reason" => reason = Some(take_value(name, inline, args, &mut i)?),
             "--no-promote-next" => promote_next = false,
             "--promote-next" => promote_next = true,
+            "--yes" | "-y" => yes = true,
             _ => positionals.push(arg.clone()),
         }
         i += 1;
@@ -129,8 +144,9 @@ fn parse_state_cli(args: &[String]) -> Result<StateCli, String> {
                 path,
             })
         }
+        "migrate" => Ok(StateCli::Migrate { yes, path }),
         other => Err(format!(
-            "unknown subcommand \"{other}\" (expected show|promote|complete|abandon)"
+            "unknown subcommand \"{other}\" (expected show|promote|complete|abandon|migrate)"
         )),
     }
 }
@@ -211,11 +227,60 @@ fn execute(cmd: &StateCli) -> Result<(), String> {
             println!("abandoned current loop (revision {})", next.revision);
             Ok(())
         }
+        StateCli::Migrate { yes, path } => {
+            // Always compute + print the read-only preview first; --yes applies.
+            let preview = migration::preview(path, Utc::now()).map_err(fmt_err)?;
+            print_migration_preview(&preview);
+            if !preview.available() {
+                return Ok(());
+            }
+            if *yes {
+                let state = migration::apply(path, Utc::now()).map_err(fmt_err)?;
+                println!(
+                    "migrated: execution.yaml written at revision {} \
+                     (loops.md → loops.legacy.md)",
+                    state.revision
+                );
+            } else {
+                println!(
+                    "\nre-run with --yes to apply. The original loops.md is preserved \
+                     verbatim as loops.legacy.md."
+                );
+            }
+            Ok(())
+        }
     }
 }
 
 fn fmt_err(e: AppError) -> String {
     e.to_string()
+}
+
+/// Print a human-readable migration preview to stdout. Unmatched records are
+/// listed so the user sees exactly what will NOT be carried into execution.yaml
+/// (it stays in loops.legacy.md). Read-only — never writes.
+fn print_migration_preview(p: &MigrationPreview) {
+    if p.execution_yaml_present {
+        println!("migration not available: execution.yaml already exists (already structured).");
+        return;
+    }
+    if !p.loops_md_present {
+        println!("migration not available: no .loopdeck/loops.md found.");
+        return;
+    }
+    println!(
+        "migration preview: current {} · {} history record(s) matched · {} unmatched · {} next-step(s) unconverted",
+        if p.current_matched { "matched" } else { "unmatched or none" },
+        p.matched_history,
+        p.unmatched.len(),
+        p.unconverted_next_steps.len(),
+    );
+    if !p.unmatched.is_empty() {
+        println!("unmatched (preserved in loops.legacy.md, NOT written to execution.yaml):");
+        for u in &p.unmatched {
+            println!("  [{}] {} — {}", u.section, u.title, u.reason);
+        }
+    }
 }
 
 fn print_summary(loaded: &LoadedExecution) {
@@ -344,6 +409,34 @@ mod tests {
                 assert_eq!(path, PathBuf::from("."));
             }
             _ => panic!("expected Abandon"),
+        }
+    }
+
+    #[test]
+    fn parse_migrate_preview_and_yes() {
+        // Preview (no --yes).
+        match parse_state_cli(&[s("migrate"), s("--path"), s("/r")]).unwrap() {
+            StateCli::Migrate { yes, path } => {
+                assert!(!yes);
+                assert_eq!(path, PathBuf::from("/r"));
+            }
+            _ => panic!("expected Migrate"),
+        }
+        // Apply (--yes), inline path.
+        match parse_state_cli(&[s("migrate"), s("--yes"), s("--path=/r")]).unwrap() {
+            StateCli::Migrate { yes, path } => {
+                assert!(yes);
+                assert_eq!(path, PathBuf::from("/r"));
+            }
+            _ => panic!("expected Migrate"),
+        }
+        // -y short form.
+        match parse_state_cli(&[s("migrate"), s("-y")]).unwrap() {
+            StateCli::Migrate { yes, path } => {
+                assert!(yes);
+                assert_eq!(path, PathBuf::from("."));
+            }
+            _ => panic!("expected Migrate"),
         }
     }
 
