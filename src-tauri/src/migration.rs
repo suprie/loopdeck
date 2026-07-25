@@ -509,7 +509,7 @@ fn build_preview(legacy: &LegacyLoops, spec: &[SpecEntry], now: DateTime<Utc>) -
     for step in &legacy.next_steps {
         let converts = leading_backtick_token(&step.text)
             .filter(|tok| spec.iter().any(|e| e.id == *tok))
-            .and_then(|tok| if seen.contains(&tok) { None } else { Some(tok) });
+            .filter(|tok| !seen.contains(tok));
         match converts {
             Some(id) => {
                 let entry = spec
