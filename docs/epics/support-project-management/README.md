@@ -53,6 +53,9 @@ In scope:
 - Managed-skills model: version-aware refresh so the split reaches existing
   projects instead of leaving them on the fat self-directing orchestrator.
 - Bootstrap `docs/epics/` for new projects.
+- Structured execution-state refinement: stable loop IDs plus a
+  schema-versioned `.loopdeck/execution.yaml`, so mutable runtime state and
+  derived progress no longer depend on Markdown title matching.
 
 Out of scope (deferred to later milestones):
 
@@ -70,7 +73,9 @@ Out of scope (deferred to later milestones):
 - **Auto-sync between the PRD checklist and `loops.md` History.** In 0.2.0 the
   human checks off PRD boxes by hand. Drift between the plan-of-record and the
   truth-of-execution is expected and visible — the human reconciles it.
-  Auto-sync is a 0.2.x refinement once the manual rule is proven.
+  The 0.2.1 structured-state refinement is specified in
+  `prd-structured-execution-state.md`; it derives progress without rewriting
+  the human-authored checkbox.
 - **Cross-project epics** (an epic spanning two repos). Each epic is scoped to
   one project. A shared roadmap across repos is a later concern.
 - **Restructuring the agent's autonomy.** The agent keeps executing the current
@@ -86,6 +91,7 @@ Out of scope (deferred to later milestones):
 | [prd-epics-view.md](./prd-epics-view.md) | Cross-project `/epics` view (grouped by milestone), Epics tab, promote-to-loop bridge |
 | [prd-skill-split.md](./prd-skill-split.md) | Orchestrator → runner + author + memory; managed-skills refresh; migration |
 | [prd-epic-author.md](./prd-epic-author.md) | `loopdeck-epic-author` skill detail: clarifying-question set, goal→epic→PRD→phase→loop decomposition, format contract, posture rules |
+| [prd-structured-execution-state.md](./prd-structured-execution-state.md) | 0.2.1 refinement: stable loop IDs, structured execution state, migration, and derived implementation/shipping progress |
 
 ## Architecture Decisions
 
@@ -170,6 +176,8 @@ re-litigating the ownership rule.
 - An existing project (pre-split) can run "Refresh skills" and receive the
   three new skills, with the old orchestrator removed and the action logged.
 - LoopDeck's own 0.2.0 work is planned and tracked using this very epic.
+- Loop title edits no longer break plan-to-execution identity after the 0.2.1
+  structured-state refinement.
 
 ## Risks
 
@@ -180,3 +188,4 @@ re-litigating the ownership rule.
 | Managed-skills refresh clobbers a user's in-place edit of a `loopdeck-` skill | Document the prefix convention in CONTRIBUTING; the refresh is version-gated, not every-run. The escape hatch is renaming. |
 | The skill split changes agent behavior for existing projects mid-stream | Migration is explicit (logged), user-triggered via Refresh, not silent. The user opts in per project. |
 | Frontmatter diverges between hand-authored and AI-drafted epics | The `loopdeck-epic-author` skill carries the frontmatter schema as its format contract; `epic.rs` and the skill ship together. Schema validation on parse surfaces mismatches loudly. |
+| Markdown runtime state accumulates duplicate truth and title-based joins | The 0.2.1 structured-state PRD moves mutable execution into schema-versioned YAML with stable IDs while preserving Markdown for human-owned specs and decisions. |

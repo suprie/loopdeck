@@ -135,8 +135,8 @@ Phase  ─────── "### Phase N — <Name>"
     │              a GFM checklist
     │
     ▼  (atomic, promote-able)
-Loop  ──────── "- [ ] <loop title>"
-                   becomes loops.md ## Current on promote
+Loop  ──────── "- [ ] `<namespace>/<loop-slug>` <loop title>"
+                   ID is identity; title becomes loops.md ## Current on promote
 ```
 
 ### Step 1 — Draft the epic README
@@ -181,16 +181,28 @@ The user confirms/edits the phase list per PRD before checklists are filled.
 
 ### Step 4 — Decompose phases into loops
 For each phase, draft the GFM checklist. **Each `- [ ]` item must be:**
-1. **Atomic** — completable in a single agent loop, not a multi-session epic.
-2. **Single-loop-shaped** — fits the `**Goal**` field of `loops.md ## Current`
-   (one sentence, verb-led, checkable). The promote-to-loop action takes the
-   item text **verbatim** as the promoted loop's `**Goal**` — so the item text
-   *is* the loop goal.
-3. **Ordered within the phase** — earlier items unblock later ones where there's
-   a dependency; otherwise logical.
+1. **Carry a stable loop ID** — a leading backtick token before the title:
+   `` - [ ] `<namespace>/<loop-slug>` <verb-led title> ``. `<namespace>` is a
+   short kebab slug shared by every loop in the PRD — derive it from the PRD
+   filename (strip the `prd-` prefix, optionally shorten: `prd-epics-view` →
+   `epics-view`, `prd-structured-execution-state` → `structured-state`).
+   `<loop-slug>` is a short kebab name unique within the PRD. The whole ID is
+   lowercase kebab with exactly one `/`. It is the loop's immutable identity —
+   the spec→execution bridge joins on the ID, not the title — so author it
+   before the loop is ever promoted and never edit it after. The title that
+   follows is presentation only.
+2. **Atomic** — completable in a single agent loop, not a multi-session epic.
+3. **Single-loop-shaped** — the title fits the `**Goal**` field of `loops.md ##
+   Current` (one sentence, verb-led, checkable). The promote-to-loop action
+   copies the **title** as the promoted loop's `**Goal**`; the ID travels
+   alongside as the join key.
+4. **Ordered within the phase** — earlier items unblock later ones where
+   there's a dependency; otherwise logical.
 
-If an item can't be expressed as a single loop ("implement the whole IPC
-layer"), split it. Propose the split and ask for confirmation.
+A checklist item without an ID is **legacy** — it remains readable but cannot be
+promoted until the user adds one. Always author IDs for new PRDs. If an item
+can't be expressed as a single loop ("implement the whole IPC layer"), split it
+and give each piece its own ID. Propose the split and ask for confirmation.
 
 ### Step 5 — Final review + write
 Print the full tree (epic → PRDs → phases → loops) and ask the user to confirm
@@ -215,6 +227,12 @@ invariants:
   epic's `slug`.
 - **Phase heading shape:** `### Phase N — <Name>` (em dash, not hyphen — matches
   the existing epics). Followed by a GFM checklist.
+- **Loop item shape:** each `## Phases` checklist item is
+  `` - [ ] `<namespace>/<loop-slug>` <title> `` (or `- [x]` when done). The ID
+  is lowercase kebab with exactly one `/`, unique within the project, and
+  immutable once the loop has been promoted. `epic.rs` parses the leading
+  backtick token as the loop's `id` and the remainder as its `title`; a
+  malformed or duplicate ID is flagged by `validate_loop_ids`.
 - **Status vocabularies:** epic `status` ∈ {proposed, in_progress, completed,
   abandoned}; PRD `status` ∈ {proposed, accepted, completed}.
 
