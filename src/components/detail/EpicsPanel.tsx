@@ -332,6 +332,9 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                     hasActiveLoop && !isCurrent;
                                   const isPromoting = promoting === key;
                                   const isToggling = toggling === key;
+                                  // Legacy ID-less items can't be promoted (Phase 1):
+                                  // the stable ID is the spec→execution join key.
+                                  const noId = !loop.id;
                                   return (
                                     <li
                                       key={i}
@@ -363,22 +366,24 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                         {loop.title}
                                       </span>
 
-                                      {/* Promote action — only on not-done loops */}
+                                      {/* Promote action — only on not-done loops with a stable ID */}
                                       {!done && (
                                         <button
                                           onClick={() => handlePromote(epic.slug, prd.file, loop)}
-                                          disabled={disabled || isPromoting}
+                                          disabled={disabled || isPromoting || noId}
                                           title={
-                                            isCurrent
-                                              ? "Currently in progress"
-                                              : disabled
-                                                ? "Another loop is in progress"
-                                                : "Promote to current loop"
+                                            noId
+                                              ? "Add a stable ID `namespace/loop` before this loop can be promoted"
+                                              : isCurrent
+                                                ? "Currently in progress"
+                                                : disabled
+                                                  ? "Another loop is in progress"
+                                                  : "Promote to current loop"
                                           }
                                           className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
                                             isCurrent
                                               ? "text-[var(--primary)]"
-                                              : disabled
+                                              : disabled || noId
                                                 ? "cursor-not-allowed text-muted-foreground/40"
                                                 : "text-muted-foreground hover:bg-accent hover:text-foreground"
                                           }`}

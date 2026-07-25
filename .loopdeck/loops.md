@@ -34,6 +34,26 @@ All four PRDs are done — milestone 0.2.0 is implementation-complete (on
 - [x] **prd-skill-split** (done 2026-07-25) — slimmed orchestrator + `loop-runner`/`epic-author`/`memory`; version-aware refresh + manifest; `refresh_skills` command + UI button; SSOT reconciliation
 - [x] **prd-epic-author** (done 2026-07-25) — the `loopdeck-epic-author` SKILL.md
 
+### Milestone 0.2.1 — Structured Execution State
+
+Source: [`docs/epics/support-project-management/prd-structured-execution-state.md`](../docs/epics/support-project-management/prd-structured-execution-state.md)
+
+- [x] **Review and accept the PRD** (2026-07-25) — `status: proposed` →
+  `accepted`; the five open questions resolved to their leans (see the
+  2026-07-25 decision in `decisions.md`): same loop-ID + monotonic `attempt`
+  for retries; queue order in execution state; history stays in
+  `execution.yaml` for v1; no auto-rewrite of frontmatter; `loopdeck-state`
+  reuses the Rust domain behind a narrow subcommand.
+- [x] **Implement Phase 1 — Stable IDs in the spec layer** (2026-07-25,
+  branch `feat/0.2.1-stable-loop-ids`; verified `fmt`/`clippy -D`/
+  `test(358)`/`tsc`/`build` green): `parse-loop-id` (`PrdLoop.id` + leading
+  backtick-token split), `validate-loop-ids` (malformed/duplicate diagnostics
+  — `/`-bearing tokens only, so prose code identifiers aren't flagged),
+  `author-loop-ids` (epic-author skill), `render-legacy-items` (EpicsPanel
+  promote-disabled + remediation tooltip; EpicsView ID chip),
+  `update-dogfood-prds` (dogfood test asserts ID parsing on the real repo).
+- [ ] Implement the remaining PRD phases (2–6) after Phase 1 ships.
+
 The two remaining PRDs are coupled (the split creates the `loopdeck-epic-author`
 slot; the author PRD fills it) and should land together, each in its own worktree
 (per the 2026-07-24 one-worktree-per-loop rule). See `## Current` for the open

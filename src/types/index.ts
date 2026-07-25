@@ -285,6 +285,12 @@ export interface PrdLoop {
   checked: boolean;
   /** Read-only sync from loops.md History: true when a history goal matches. */
   done_in_history: boolean;
+  /**
+   * Stable, project-scoped loop ID `<prd-short-slug>/<loop-slug>`, parsed from
+   * a leading backtick token. Undefined for legacy ID-less items — those cannot
+   * be promoted. Titles are presentation; the ID is identity (Phase 3 join key).
+   */
+  id?: string;
 }
 
 /** Tab navigation within ProjectDetail. */

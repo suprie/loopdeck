@@ -20,7 +20,7 @@ use crate::paths;
 use crate::persist;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ── Frontmatter (strict; parsed via serde_yaml) ─────────────────────
@@ -118,6 +118,14 @@ pub struct PrdLoop {
     /// goal matches this loop's title. Title-drift is accepted (no fuzzy match).
     #[serde(default)]
     pub done_in_history: bool,
+    /// Stable, project-scoped loop ID of the form `<prd-short-slug>/<loop-slug>`,
+    /// parsed from a leading backtick token on the checklist item (e.g.
+    /// `structured-state/parse-loop-id`). `None` for legacy ID-less items and
+    /// for items whose leading token is not a well-formed ID — both stay
+    /// readable but cannot be promoted (Phase 1). Titles are presentation; the
+    /// ID is the identity the spec→execution bridge joins on (Phase 3).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub id: Option<String>,
 }
 
 // ── Public API ──────────────────────────────────────────────────────
@@ -178,6 +186,28 @@ pub fn parse_epics(repo_path: &Path) -> Vec<Epic> {
                     }
                 }
             }
+        }
+    }
+
+    // Surface stable-loop-ID problems (malformed / duplicate) as warnings. Non-
+    // fatal — the lenient aggregate ethos is preserved; a future reconciliation
+    // UI (Phase 5) renders these diagnostics. See `validate_loop_ids`.
+    for diag in validate_loop_ids(repo_path) {
+        match diag.kind {
+            LoopIdDiagKind::Malformed => tracing::warn!(
+                "malformed loop ID `{}` at docs/epics/{}:{} \
+                 (expected `<lowercase-kebab>/<lowercase-kebab>`)",
+                diag.id,
+                diag.file,
+                diag.line
+            ),
+            LoopIdDiagKind::Duplicate => tracing::warn!(
+                "duplicate loop ID `{}` at docs/epics/{}:{} \
+                 (an item with this ID is already defined)",
+                diag.id,
+                diag.file,
+                diag.line
+            ),
         }
     }
 
@@ -600,14 +630,48 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 /// Mirrors `memory.rs`'s section splitting: prepend a newline, split on
 /// `\n## `, locate the `Phases` block, then split that on `\n### ` for each
 /// phase. Missing `## Phases` → empty Vec (lenient, no panic).
+///
+/// **Fence-aware:** fenced blocks are blanked ([`blank_fenced_lines`]) before
+/// the heading search, so a PRD that documents the format with a fenced
+/// ```markdown `## Phases` example (prd-spec-layer does) does not shadow the
+/// real `## Phases` section. Real phase/loop bodies are checklists (never
+/// fenced), so blanking fences loses no phase content.
 fn parse_prd_phases(body: &str) -> Vec<PrdPhase> {
-    let normalized = format!("\n{body}");
+    let defenced = blank_fenced_lines(body);
+    let normalized = format!("\n{defenced}");
     for section in normalized.split("\n## ") {
         if let Some(rest) = section.strip_prefix("Phases") {
             return parse_phases_section(rest);
         }
     }
     Vec::new()
+}
+
+/// Replace each line inside a ``` / ~~~ fenced block with blank (preserving the
+/// newline so line structure is intact). Lets fenced format-examples be skipped
+/// during `## ` heading detection without disturbing the prose they document.
+fn blank_fenced_lines(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut fence: Option<&'static str> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let (next_fence, inside) = match fence {
+            Some(f) => {
+                // Inside a fence; a line starting with the same fence closes it.
+                let still_open = !trimmed.starts_with(f);
+                (if still_open { Some(f) } else { None }, true)
+            }
+            None if trimmed.starts_with("```") => (Some("```"), true),
+            None if trimmed.starts_with("~~~") => (Some("~~~"), true),
+            None => (None, false),
+        };
+        if !inside {
+            out.push_str(line);
+        }
+        out.push('\n');
+        fence = next_fence;
+    }
+    out
 }
 
 /// Parse the body of a `## Phases` section into phases.
@@ -629,29 +693,251 @@ fn parse_phases_section(section: &str) -> Vec<PrdPhase> {
 }
 
 /// Collect `- [ ]` / `- [x]` checklist items from a phase body, preserving
-/// the checked state.
+/// the checked state and a stable loop ID when present.
+///
+/// A leading `` `<prd-short-slug>/<loop-slug>` `` backtick token is the loop's
+/// stable ID; the trimmed remainder is the display title. A token that is not a
+/// well-formed ID (see [`is_valid_loop_id_shape`]) is left in the title and the
+/// item parses as ID-less — [`validate_loop_ids`] flags it separately. Legacy
+/// items without any backtick token parse unchanged (`id: None`).
 fn parse_phase_loops<'a, I: Iterator<Item = &'a str>>(lines: I) -> Vec<PrdLoop> {
     let mut loops: Vec<PrdLoop> = Vec::new();
     for line in lines {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-            loops.push(PrdLoop {
-                title: rest.to_string(),
-                checked: false,
-                done_in_history: false,
-            });
-        } else if let Some(rest) = trimmed
+        let (rest, checked) = if let Some(r) = trimmed.strip_prefix("- [ ] ") {
+            (r, false)
+        } else if let Some(r) = trimmed
             .strip_prefix("- [x] ")
             .or_else(|| trimmed.strip_prefix("- [X] "))
         {
-            loops.push(PrdLoop {
-                title: rest.to_string(),
-                checked: true,
-                done_in_history: false,
+            (r, true)
+        } else {
+            continue;
+        };
+        let (id, title) = split_loop_id(rest);
+        loops.push(PrdLoop {
+            title,
+            checked,
+            done_in_history: false,
+            id,
+        });
+    }
+    loops
+}
+
+/// If `rest` begins with a backtick-quoted token, return `(token, text_after)`,
+/// where `text_after` is everything past the closing backtick (untrimmed).
+/// Returns `None` when `rest` does not start with a complete `` `...` `` pair.
+fn split_leading_backtick(rest: &str) -> Option<(&str, &str)> {
+    let after = rest.strip_prefix('`')?;
+    let end = after.find('`')?;
+    Some((&after[..end], &after[end + 1..]))
+}
+
+/// Split a leading `` `<kebab>/<kebab>` `` stable-ID token from a checklist
+/// item body. Returns `(Some(id), title)` when a well-formed ID leads;
+/// otherwise `(None, rest)` (legacy item, or a malformed token left in place).
+fn split_loop_id(rest: &str) -> (Option<String>, String) {
+    match split_leading_backtick(rest) {
+        Some((id, after)) if is_valid_loop_id_shape(id) => {
+            (Some(id.to_string()), after.trim().to_string())
+        }
+        _ => (None, rest.to_string()),
+    }
+}
+
+/// A stable loop ID is `<lowercase-kebab>/<lowercase-kebab>` — exactly one `/`,
+/// non-empty segments, ASCII lowercase letters / digits / hyphens only.
+fn is_valid_loop_id_shape(id: &str) -> bool {
+    let Some((namespace, slug)) = id.split_once('/') else {
+        return false;
+    };
+    !namespace.is_empty()
+        && !slug.is_empty()
+        && !slug.contains('/')
+        && namespace.bytes().all(is_id_byte)
+        && slug.bytes().all(is_id_byte)
+}
+
+fn is_id_byte(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'
+}
+
+// ── Loop-ID validation ──────────────────────────────────────────────
+
+/// One stable-loop-ID validation finding, with the source file + 1-based line
+/// for remediation. Produced by [`validate_loop_ids`]; surfaced as `warn!`
+/// from [`parse_epics`] and reserved for a future reconciliation UI (Phase 5).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LoopIdDiagnostic {
+    /// PRD path relative to `docs/epics/`, e.g.
+    /// `support-project-management/prd-structured-execution-state.md`.
+    pub file: String,
+    /// 1-based line number of the offending checklist item.
+    pub line: usize,
+    /// The ID token as authored.
+    pub id: String,
+    pub kind: LoopIdDiagKind,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopIdDiagKind {
+    /// A backtick token is present but is not a well-formed `<kebab>/<kebab>` ID.
+    Malformed,
+    /// This well-formed ID is also defined on another checklist item.
+    Duplicate,
+}
+
+/// Validate stable loop IDs across every `prd-*.md` under `<repo>/docs/epics/`.
+///
+/// Considers **only checklist items inside a `## Phases` section and outside
+/// fenced blocks**, so prose and ```markdown``` examples that document the ID
+/// format are never flagged. Reports:
+/// - [`LoopIdDiagKind::Malformed`] — a leading backtick token that is not a
+///   well-formed `<kebab>/<kebab>` ID.
+/// - [`LoopIdDiagKind::Duplicate`] — a well-formed ID reused on 2+ items
+///   project-wide; one diagnostic per occurrence so every site is listed.
+///
+/// Legacy ID-less items are valid (not reported). Pure: reads files, returns
+/// diagnostics, never writes. Lenient: an unreadable `docs/epics/` returns `[]`.
+pub fn validate_loop_ids(repo_path: &Path) -> Vec<LoopIdDiagnostic> {
+    let mut diags: Vec<LoopIdDiagnostic> = Vec::new();
+    let mut occurrences: Vec<(String, usize, String)> = Vec::new(); // (file, line, id)
+
+    let epics_dir = repo_path.join("docs").join("epics");
+    let epic_entries = match std::fs::read_dir(&epics_dir) {
+        Ok(e) => e,
+        Err(_) => return diags,
+    };
+    for epic_entry in epic_entries.flatten() {
+        let epic_dir = epic_entry.path();
+        if !epic_dir.is_dir() {
+            continue;
+        }
+        let Some(epic_slug) = epic_dir.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        let prd_entries = match std::fs::read_dir(&epic_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for prd_entry in prd_entries.flatten() {
+            let path = prd_entry.path();
+            let Some(name) = path.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("prd-") || !name.ends_with(".md") {
+                continue;
+            }
+            let Ok(content) = limits::read_bounded_to_string(&path, limits::SPEC_MAX_BYTES) else {
+                continue;
+            };
+            let rel_file = format!("{epic_slug}/{name}");
+            scan_prd_loop_ids(&content, &rel_file, &mut diags, &mut occurrences);
+        }
+    }
+
+    // Duplicate pass: emit one Duplicate diagnostic per occurrence of any
+    // well-formed ID used on 2+ items project-wide.
+    let mut count_by_id: HashMap<&str, usize> = HashMap::new();
+    for (_, _, id) in &occurrences {
+        *count_by_id.entry(id.as_str()).or_default() += 1;
+    }
+    for (file, line, id) in &occurrences {
+        if count_by_id[id.as_str()] >= 2 {
+            diags.push(LoopIdDiagnostic {
+                file: file.clone(),
+                line: *line,
+                id: id.clone(),
+                kind: LoopIdDiagKind::Duplicate,
             });
         }
     }
-    loops
+
+    diags
+}
+
+/// Scan one PRD body's `## Phases` checklist items for loop-ID findings.
+///
+/// State machine over lines: skip the YAML frontmatter, skip fenced blocks,
+/// and only consider checklist items while inside the `## Phases` section.
+/// Appends malformed findings to `diags` and well-formed `(file, line, id)`
+/// occurrences to `occurrences` (the caller resolves duplicates).
+fn scan_prd_loop_ids(
+    content: &str,
+    rel_file: &str,
+    diags: &mut Vec<LoopIdDiagnostic>,
+    occurrences: &mut Vec<(String, usize, String)>,
+) {
+    let starts_with_fence = content
+        .lines()
+        .next()
+        .map(|l| l.trim() == "---")
+        .unwrap_or(false);
+    let mut after_frontmatter = !starts_with_fence;
+    let mut fence: Option<&'static str> = None;
+    let mut in_phases = false;
+
+    for (i, raw) in content.lines().enumerate() {
+        let line_no = i + 1;
+        let trimmed = raw.trim();
+        if !after_frontmatter {
+            if i > 0 && trimmed == "---" {
+                after_frontmatter = true;
+            }
+            continue;
+        }
+        // Fenced-block tracking (toggle on ``` / ~~~ openers; close on a line
+        // starting with the same fence).
+        if fence.is_none() && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+            fence = Some(if trimmed.starts_with("```") {
+                "```"
+            } else {
+                "~~~"
+            });
+            continue;
+        }
+        if let Some(f) = fence {
+            if trimmed.starts_with(f) {
+                fence = None;
+            }
+            continue;
+        }
+        // `## ` heading — track whether we are inside the Phases section.
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            in_phases = heading.starts_with("Phases");
+            continue;
+        }
+        if !in_phases {
+            continue;
+        }
+        let Some(rest) = trimmed
+            .strip_prefix("- [ ]")
+            .or_else(|| trimmed.strip_prefix("- [x]"))
+            .or_else(|| trimmed.strip_prefix("- [X]"))
+        else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some((token, _after)) = split_leading_backtick(rest) else {
+            continue; // no backtick token — legacy ID-less item, valid.
+        };
+        if is_valid_loop_id_shape(token) {
+            occurrences.push((rel_file.to_string(), line_no, token.to_string()));
+        } else if token.contains('/') {
+            // A `/`-bearing token is an ID attempt with the wrong shape
+            // (uppercase, underscore, dot, extra slashes). Flag it. A token
+            // with no `/` is an ordinary code identifier in prose
+            // (`get_epics`, `Bash`, `EpicsView.tsx`), not an ID attempt.
+            diags.push(LoopIdDiagnostic {
+                file: rel_file.to_string(),
+                line: line_no,
+                id: token.to_string(),
+                kind: LoopIdDiagKind::Malformed,
+            });
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -1122,7 +1408,7 @@ description: d
             });
 
         assert_eq!(epic.milestone, "0.2.0");
-        assert_eq!(epic.prds.len(), 4, "expected the four PRDs to parse");
+        assert_eq!(epic.prds.len(), 5, "expected the five PRDs to parse");
         for prd in &epic.prds {
             assert!(
                 !prd.phases.is_empty(),
@@ -1130,6 +1416,46 @@ description: d
                 prd.slug
             );
             assert_eq!(prd.epic, "support-project-management");
+        }
+
+        // Phase 1 dogfood — stable loop IDs parse on real repo content: the
+        // 0.2.1 PRD's loops carry IDs; the 0.2.0 PRDs' items are legacy (None).
+        let structured_state = epic
+            .prds
+            .iter()
+            .find(|p| p.slug == "prd-structured-execution-state")
+            .expect("0.2.1 structured-execution-state PRD should parse");
+        let all_ids: Vec<&str> = structured_state
+            .phases
+            .iter()
+            .flat_map(|ph| ph.loops.iter())
+            .filter_map(|l| l.id.as_deref())
+            .collect();
+        assert!(
+            all_ids
+                .iter()
+                .any(|id| *id == "structured-state/parse-loop-id"),
+            "0.2.1 PRD loops should expose parsed IDs, got {all_ids:?}"
+        );
+        assert!(
+            !all_ids.is_empty() && all_ids.iter().all(|id| !id.is_empty()),
+            "ID'd loops should have non-empty IDs, got {all_ids:?}"
+        );
+
+        // Every loop across all PRDs carries a stable ID — the repo is fully on
+        // the 0.2.1 format (the 0.2.0 PRDs were migrated). Legacy ID-less items
+        // live only in the unit-test fixtures, not in this repo's specs.
+        for prd in &epic.prds {
+            for ph in &prd.phases {
+                for l in &ph.loops {
+                    assert!(
+                        l.id.is_some(),
+                        "loop in {} should carry a stable ID: {:?}",
+                        prd.slug,
+                        l.title
+                    );
+                }
+            }
         }
     }
 
@@ -1476,5 +1802,196 @@ _No active loop._
         let dir = create_temp_repo();
         let err = write_spec_file(&dir, "../../etc/evil.md", "pwned");
         assert!(err.is_err());
+    }
+
+    // ── Stable loop-ID parsing tests ───────────────────────────────
+
+    #[test]
+    fn test_is_valid_loop_id_shape() {
+        for valid in ["a/b", "epics-view/promote-loop", "ns1/slug-2", "x/y"] {
+            assert!(is_valid_loop_id_shape(valid), "{valid} should be valid");
+        }
+        for invalid in [
+            "nodashnoslash", // no '/'
+            "/slug",         // empty namespace
+            "ns/",           // empty slug
+            "a/b/c",         // two slashes
+            "Upper/lower",   // uppercase
+            "ns/slu_g",      // underscore
+            "ns/slu.g",      // dot
+            "",
+        ] {
+            assert!(
+                !is_valid_loop_id_shape(invalid),
+                "{invalid} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_phase_loops_extracts_well_formed_id() {
+        let loops = parse_phase_loops(
+            "- [ ] `epics-view/promote-loop` Add the Promote button\n\
+             - [x] `epics-view/clobber-guard` Prevent replacing an active loop\n\
+             - [ ] Legacy item with no id\n"
+                .lines(),
+        );
+        assert_eq!(loops.len(), 3);
+        assert_eq!(loops[0].id.as_deref(), Some("epics-view/promote-loop"));
+        assert_eq!(loops[0].title, "Add the Promote button");
+        assert!(!loops[0].checked);
+        assert_eq!(loops[1].id.as_deref(), Some("epics-view/clobber-guard"));
+        assert_eq!(loops[1].title, "Prevent replacing an active loop");
+        assert!(loops[1].checked);
+        assert!(loops[2].id.is_none());
+        assert_eq!(loops[2].title, "Legacy item with no id");
+    }
+
+    #[test]
+    fn test_parse_phase_loops_malformed_id_falls_back_to_legacy() {
+        // Uppercase + underscore aren't valid ID bytes → the token stays in the
+        // title and the item parses as ID-less (validate_loop_ids flags it).
+        let loops = parse_phase_loops("- [ ] `Bad_ID/x` Do thing".lines());
+        assert_eq!(loops.len(), 1);
+        assert!(loops[0].id.is_none());
+        assert_eq!(loops[0].title, "`Bad_ID/x` Do thing");
+    }
+
+    #[test]
+    fn test_parse_prd_phases_ignores_fenced_phases_example() {
+        // A PRD that documents the format with a fenced ```markdown `## Phases`
+        // example must not have that fenced block shadow the real `## Phases`
+        // section (prd-spec-layer does exactly this).
+        let body = "\
+## Format
+
+```markdown
+## Phases
+
+### Phase 1 — Example
+- [ ] `ns/placebo` Not a real loop
+```
+
+## Phases
+
+### Phase 1 — Real
+- [ ] `ns/real-one` The real loop
+";
+        let phases = parse_prd_phases(body);
+        assert_eq!(
+            phases.len(),
+            1,
+            "only the real (unfenced) Phases section counts"
+        );
+        assert_eq!(phases[0].name, "Phase 1 — Real");
+        assert_eq!(phases[0].loops.len(), 1);
+        assert_eq!(phases[0].loops[0].id.as_deref(), Some("ns/real-one"));
+    }
+
+    // ── validate_loop_ids tests ────────────────────────────────────
+
+    #[test]
+    fn test_validate_loop_ids_clean() {
+        let dir = create_temp_repo();
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+             ## Phases\n\n### Phase 1 — P\n\
+             - [ ] `prd-a/one` One\n\
+             - [x] `prd-a/two` Two\n",
+        );
+        let diags = validate_loop_ids(&dir);
+        assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+    }
+
+    #[test]
+    fn test_validate_loop_ids_flags_malformed_with_file_and_line() {
+        let dir = create_temp_repo();
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+             ## Phases\n\n### Phase 1 — P\n\
+             - [ ] `Bad_ID/x` One\n\
+             - [ ] `prd-a/two` Two\n",
+        );
+        let diags = validate_loop_ids(&dir);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(diags[0].kind, LoopIdDiagKind::Malformed);
+        assert_eq!(diags[0].id, "Bad_ID/x");
+        assert_eq!(diags[0].file, "e/prd-a.md");
+        assert_eq!(diags[0].line, 12);
+    }
+
+    #[test]
+    fn test_validate_loop_ids_flags_duplicate_across_prds() {
+        let dir = create_temp_repo();
+        for filename in ["prd-a.md", "prd-b.md"] {
+            write_prd(
+                &dir,
+                "e",
+                filename,
+                "---\nprd: x\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+                 ## Phases\n\n### Phase 1 — P\n- [ ] `shared/loop` Do it\n",
+            );
+        }
+        let diags = validate_loop_ids(&dir);
+        let dups: Vec<_> = diags
+            .iter()
+            .filter(|d| d.kind == LoopIdDiagKind::Duplicate)
+            .collect();
+        assert_eq!(dups.len(), 2, "both occurrences should be reported");
+        let files: Vec<_> = dups.iter().map(|d| d.file.as_str()).collect();
+        assert!(files.contains(&"e/prd-a.md"));
+        assert!(files.contains(&"e/prd-b.md"));
+        assert!(dups.iter().all(|d| d.id == "shared/loop"));
+    }
+
+    #[test]
+    fn test_validate_loop_ids_ignores_prose_code_identifier() {
+        // A backtick token with no `/` is an ordinary code identifier in prose
+        // (`get_epics`, `Bash`, `EpicsView.tsx`), not an ID attempt — 0.2.0 PRDs
+        // legitimately write items like `` - [ ] `get_epics` enriches … ``.
+        let dir = create_temp_repo();
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+             ## Phases\n\n### Phase 1 — P\n\
+             - [ ] `get_epics` enriches each item\n\
+             - [ ] `EpicsView.tsx` renders the view\n",
+        );
+        let diags = validate_loop_ids(&dir);
+        assert!(
+            diags.is_empty(),
+            "prose code identifiers must not be flagged, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_loop_ids_ignores_legacy_and_fenced_examples() {
+        let dir = create_temp_repo();
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+             ## Authoring format\n\n\
+             ```markdown\n\
+             - [ ] `fenced/example` not a real loop\n\
+             ```\n\n\
+             ## Phases\n\n### Phase 1 — P\n\
+             - [ ] Legacy item with no id\n\
+             - [ ] `prd-a/real` Real\n",
+        );
+        let diags = validate_loop_ids(&dir);
+        assert!(
+            diags.is_empty(),
+            "fenced example + legacy item must be ignored, got {diags:?}"
+        );
     }
 }

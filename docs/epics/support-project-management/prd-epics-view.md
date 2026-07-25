@@ -92,32 +92,32 @@ marks it done after the loop completes and lands in History.
 
 ### Phase 1 — Cross-project `/epics` view, grouped by milestone
 
-- [x] `EpicsView.tsx` — load all projects' epics via `getEpicsByMilestone`, render milestone sections (collapsible)
-- [x] Milestone section: header with milestone label + epic count; epics grouped by project within the section
-- [x] Epic card: title, status badge, milestone, goal preview, PRD count, progress bar (done/total loops across PRDs)
-- [x] Expand-in-place: click epic → show PRD list; click PRD → show phase checklists
-- [x] Unmilestoned group for epics whose frontmatter omits `milestone`
-- [x] Empty / loading / error states (mirror `DecisionsView.tsx` patterns)
-- [x] Add `/epics` route in `router.tsx` + nav item in `AppShell.tsx`
+- [x] `epics-view/cross-project-view` `EpicsView.tsx` — load all projects' epics via `getEpicsByMilestone`, render milestone sections (collapsible)
+- [x] `epics-view/milestone-section` Milestone section: header with milestone label + epic count; epics grouped by project within the section
+- [x] `epics-view/epic-card` Epic card: title, status badge, milestone, goal preview, PRD count, progress bar (done/total loops across PRDs)
+- [x] `epics-view/expand-in-place` Expand-in-place: click epic → show PRD list; click PRD → show phase checklists
+- [x] `epics-view/unmilestoned-group` Unmilestoned group for epics whose frontmatter omits `milestone`
+- [x] `epics-view/empty-states` Empty / loading / error states (mirror `DecisionsView.tsx` patterns)
+- [x] `epics-view/route-and-nav` Add `/epics` route in `router.tsx` + nav item in `AppShell.tsx`
 
 ### Phase 2 — ProjectDetail Epics tab
 
-- [x] Add `epics` tab to `ProjectDetail.tsx` (sibling to Overview / Decisions / Loops / Agent)
-- [x] Render the open project's epics + PRD phase checklists with Promote action on each unchecked item
-- [x] Show which PRD's loop is currently in `loops.md ## Current` (highlight + disable other Promote buttons while one is active)
+- [x] `epics-view/project-detail-tab` Add `epics` tab to `ProjectDetail.tsx` (sibling to Overview / Decisions / Loops / Agent)
+- [x] `epics-view/promote-action` Render the open project's epics + PRD phase checklists with Promote action on each unchecked item
+- [x] `epics-view/current-loop-highlight` Show which PRD's loop is currently in `loops.md ## Current` (highlight + disable other Promote buttons while one is active)
 
 ### Phase 3 — Promote-to-loop bridge (backend)
 
-- [ ] `promote_epic_loop(project_path, epic_slug, prd_filename, loop_title) -> Result<()>` Tauri command
-- [ ] Clobber guard: refuse if `loops.md ## Current` is non-empty (`parse_loops` status check)
-- [ ] Write `## Current` block with `**Epic**`/`**PRD**` back-reference, preserving the rest of `loops.md`
-- [ ] Unit tests: empty current → success; non-empty current → `Conflict`; back-reference fields present
+- [ ] `epics-view/promote-command` `promote_epic_loop(project_path, epic_slug, prd_filename, loop_title) -> Result<()>` Tauri command
+- [ ] `epics-view/clobber-guard` Clobber guard: refuse if `loops.md ## Current` is non-empty (`parse_loops` status check)
+- [ ] `epics-view/current-backref` Write `## Current` block with `**Epic**`/`**PRD**` back-reference, preserving the rest of `loops.md`
+- [ ] `epics-view/promote-tests` Unit tests: empty current → success; non-empty current → `Conflict`; back-reference fields present
 
 ### Phase 4 — Done-visibility (read path)
 
-- [ ] `get_epics` enriches each PRD checklist item with `done_in_history: bool` by scanning `loops.md ## History` for entries whose `**Epic**`/`**PRD**` match and whose title matches the item
-- [ ] Render done items as checked in the UI (read-only sync from History → PRD display)
-- [ ] Manual "Mark done" action for cases where the title drifted (writes the check into the PRD file)
+- [ ] `epics-view/done-in-history` `get_epics` enriches each PRD checklist item with `done_in_history: bool` by scanning `loops.md ## History` for entries whose `**Epic**`/`**PRD**` match and whose title matches the item
+- [ ] `epics-view/render-done` Render done items as checked in the UI (read-only sync from History → PRD display)
+- [ ] `epics-view/manual-mark-done` Manual "Mark done" action for cases where the title drifted (writes the check into the PRD file)
 
 ## Open Questions
 

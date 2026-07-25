@@ -165,26 +165,26 @@ fires again. Logged, not silent.
 
 ### Phase 1 — Author the three new SKILL.md templates
 
-- [ ] Write `templates/skills/loopdeck-loop-runner/SKILL.md` — mechanics + read-context rule
-- [ ] Write `templates/skills/loopdeck-epic-author/SKILL.md` — elaboration pattern, clarifying-question set, posture rule, format contract with `prd-spec-layer.md`
-- [ ] Write `templates/skills/loopdeck-memory/SKILL.md` — decisions.md + loops.md write conventions (extracted from orchestrator)
+- [ ] `skill-split/loop-runner-skill` Write `templates/skills/loopdeck-loop-runner/SKILL.md` — mechanics + read-context rule
+- [ ] `skill-split/epic-author-skill` Write `templates/skills/loopdeck-epic-author/SKILL.md` — elaboration pattern, clarifying-question set, posture rule, format contract with `prd-spec-layer.md`
+- [ ] `skill-split/memory-skill` Write `templates/skills/loopdeck-memory/SKILL.md` — decisions.md + loops.md write conventions (extracted from orchestrator)
 
 ### Phase 2 — Rewire `skills.rs`
 
-- [ ] Add `include_str!` + `NAME_*` + `skill_content()` entries for the three new skills
-- [ ] Update `determine_skills`: always-insert the three new names; remove `NAME_ORCHESTRATOR`
-- [ ] Remove the `loopdeck-orchestrator` const + match arm + name constant
-- [ ] Add `SkillManifest` struct + read/write helpers (`.loopdeck-manifest.json`)
-- [ ] Replace the exists-check in `copy_skills` with the version-aware refresh rule
-- [ ] Add the one-time orchestrator-removal migration block
-- [ ] Update tests: `test_orchestrator_always_included` → `test_core_skills_always_included`; add version-refresh + migration tests
+- [ ] `skill-split/embed-skills` Add `include_str!` + `NAME_*` + `skill_content()` entries for the three new skills
+- [ ] `skill-split/determine-skills` Update `determine_skills`: always-insert the three new names; remove `NAME_ORCHESTRATOR`
+- [ ] `skill-split/remove-orchestrator-const` Remove the `loopdeck-orchestrator` const + match arm + name constant
+- [ ] `skill-split/skill-manifest` Add `SkillManifest` struct + read/write helpers (`.loopdeck-manifest.json`)
+- [ ] `skill-split/version-refresh` Replace the exists-check in `copy_skills` with the version-aware refresh rule
+- [ ] `skill-split/orchestrator-removal-migration` Add the one-time orchestrator-removal migration block
+- [ ] `skill-split/update-skill-tests` Update tests: `test_orchestrator_always_included` → `test_core_skills_always_included`; add version-refresh + migration tests
 
 ### Phase 3 — Expose refresh + dogfood
 
-- [ ] `refresh_skills(project_path)` IPC command (wraps version-aware `copy_skills`)
-- [ ] "Refresh skills" button in ProjectDetail Overview tab (next to Rescan)
-- [ ] Document the `loopdeck-` prefix convention in CONTRIBUTING (or a stub for 0.2.0)
-- [ ] Run Refresh on LoopDeck's own repo; verify the three new skills land and the old orchestrator is gone
+- [ ] `skill-split/refresh-skills-command` `refresh_skills(project_path)` IPC command (wraps version-aware `copy_skills`)
+- [ ] `skill-split/refresh-skills-button` "Refresh skills" button in ProjectDetail Overview tab (next to Rescan)
+- [ ] `skill-split/prefix-convention-doc` Document the `loopdeck-` prefix convention in CONTRIBUTING (or a stub for 0.2.0)
+- [ ] `skill-split/dogfood-refresh` Run Refresh on LoopDeck's own repo; verify the three new skills land and the old orchestrator is gone
 
 ## Open Questions
 

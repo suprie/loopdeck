@@ -407,6 +407,11 @@ function LoopItem({ loop }: { loop: PrdLoop }) {
       <span className={done ? "text-muted-foreground line-through" : ""}>
         {loop.title}
       </span>
+      {loop.id && (
+        <code className="ml-1 mt-0.5 shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground">
+          {loop.id}
+        </code>
+      )}
       {loop.done_in_history && !loop.checked && (
         <CircleDot
           size={10}
