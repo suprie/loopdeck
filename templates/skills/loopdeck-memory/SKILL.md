@@ -18,28 +18,59 @@ orchestrator (`loopdeck:orchestrator`) and the single-loop runner
 | File | Purpose | When to Write |
 |------|---------|---------------|
 | `.loopdeck/current-loop.md` | Active loop snapshot (one-line dashboard label) | When the active loop's high-level summary changes |
-| `.loopdeck/decisions.md` | Lightweight ADRs (architectural decision records) | After any significant design/architecture decision |
+| `.loopdeck/decisions.md` | **Index** of decisions — one short entry each, most recent ~15 live | After any significant design/architecture decision |
+| `.loopdeck/decisions-archive.md` | Overflow for `decisions.md` beyond the live window | When `decisions.md` exceeds ~15 live entries |
 | `.loopdeck/loops.md` | Current loop status, next steps, history | At the end of every session / loop |
+| `.loopdeck/loops-archive.md` | Overflow for `loops.md ## History` beyond the live window | When `## History` exceeds ~5 live entries |
+| `docs/decisions/<slug>.md` or `docs/epics/<epic>/adr-<n>.md` | Long-form rationale for a decision — alternatives considered, judgment calls, verification detail | When a decision's Context or Consequences can't fit in 1-2 sentences each |
+
+**decisions.md and loops.md are an index, not a diary.** They exist to be
+cheaply re-read by future sessions — every line in them is a token cost paid
+on every future read. Anything long-form (the "why we considered X and
+rejected it," "here's everything I verified," multi-paragraph postmortems)
+belongs in a linked file, a PR description, or a commit message — never
+inline in these two files. This is not a style preference: an earlier
+incident burned ~30M tokens/hour because these files grew unbounded and were
+re-read every turn (see the 2026-07-19 decision in `decisions.md`). The caps
+below are the fix; they are enforced by you, the writer, not by a parser.
 
 ## decisions.md Format
 
 Write decisions as level-2 headings with date and title, followed by key-value
-bullets and optional body text:
+bullets — **no body text beyond the three bullets**:
 
 ```markdown
 ## YYYY-MM-DD — Title of the decision
 - **Status**: proposed | accepted | superseded
-- **Context**: Why this decision was needed.
-- **Consequences**: What follows from this decision.
-
-Additional body text explaining the decision in more detail.
+- **Context**: Why this decision was needed, in one sentence.
+- **Consequences**: What changed, in one sentence.
 ```
+
+If the decision needs more than that to be understood — alternatives you
+weighed, judgment calls, what you verified, a multi-step rationale — **stop
+before you write it into `decisions.md`.** Instead:
+
+1. Write the long-form version to `docs/decisions/<slug>.md` (or, if the
+   decision belongs to an active epic, `docs/epics/<epic-slug>/adr-<n>.md`
+   alongside that epic's existing ADRs).
+2. Add the terse 3-bullet entry to `decisions.md` as normal, with a fourth
+   bullet: `- **Detail**: docs/decisions/<slug>.md`.
 
 **Rules:**
 - Use `## YYYY-MM-DD — Title` format (em dash preferred, hyphen accepted)
 - `Status` must be one of: `proposed`, `accepted`, `superseded`
 - **Append** new decisions — never delete or reorder old ones
 - `Context` explains the situation; `Consequences` captures what changed
+- **Hard cap: 3 bullets + 1 optional `**Detail**` link, nothing else.** No
+  paragraphs, no inline verification notes, no "also confirmed X, Y, Z" lists.
+  If you're tempted to add a fourth sentence to `Context` or `Consequences`,
+  that's the signal to write a `Detail` doc instead.
+- **When `decisions.md` holds more than ~15 entries**, move the oldest ones
+  to `decisions-archive.md` (create it with a `# Decisions Archive` heading
+  if absent), leaving a pointer at the top of `decisions.md`:
+  `_Older decisions archived to [decisions-archive.md](./decisions-archive.md)._`
+  Do this as part of the same write that would push the count over 15 —
+  don't wait for someone to notice the file is huge.
 
 ## current-loop.md Format
 
@@ -108,6 +139,7 @@ entries for historical loops:
 ### YYYY-MM-DD — Completed loop title
 - **Status**: completed
 - **Completed**: YYYY-MM-DD
+- **Summary**: One sentence — what shipped.
 ```
 
 ### Epic / PRD back-references (when a loop was promoted from the spec layer)
@@ -134,6 +166,17 @@ field that drives your work.
 - `## History` contains completed/abandoned loops as `### YYYY-MM-DD — Title` entries
 - At the end of every session, update the Current loop status and Next Steps
 - When a loop completes, move it to History and start a new Current loop
+- **Hard cap: `**Status**`, `**Completed**`, `**Summary**` (one sentence), nothing
+  else.** Do not add "what I verified," "judgment calls made," "follow-ups,"
+  or `cargo`/`tsc` gate results as bullets or prose under a History entry —
+  that detail belongs in the PR description (`loopdeck:open-pr` builds one
+  from the same context) or the commit message, not here. If a `**Summary**`
+  is growing past one sentence, that's the signal to trim it and let the PR
+  carry the rest.
+- **When `## History` holds more than ~5 entries**, move the older ones to
+  `loops-archive.md` (append under its existing heading, oldest-first as
+  already established there), leaving the 5 most recent live in `loops.md`.
+  Do this in the same write that would push the count over 5.
 
 ### On completion: check the origin PRD box
 
@@ -147,12 +190,20 @@ removed), skip silently — the human can check it manually in the UI.
 
 ## When to write
 
-- **After any architectural decision** → append to `decisions.md`
+- **After any architectural decision** → append the 3-bullet index entry to
+  `decisions.md`; if it needs more explanation than that, write the long form
+  to `docs/decisions/<slug>.md` first and link it back
 - **At the end of each session/loop** → update `loops.md` Current status + Next
-  Steps; move completed loops to History (and check the origin PRD box)
+  Steps; move completed loops to History as a `**Summary**` one-liner (and
+  check the origin PRD box)
 - **When the active-loop summary changes** → update `current-loop.md`
+- **Whenever a write would push `decisions.md` past ~15 live entries or
+  `loops.md ## History` past ~5** → archive the overflow in the same write
 
-Keep entries concise and factual. These files are read by humans, AI agents, and
-LoopDeck's parser — clarity beats volume. Large files cost tokens every time
-they are re-read, so prefer appending tight entries and archiving old History to
-`loops-archive.md` when `loops.md` grows past ~1500 lines.
+These files are read by humans, AI agents, and LoopDeck's parser on every
+session start — every line is a token cost paid repeatedly, not once. Treat
+them as an index you'd want to skim in ten seconds, not a log of everything
+that happened. If you find yourself writing more than 3-4 lines for one
+entry, that's not thoroughness — it's the file turning into a diary. Put the
+detail somewhere it's read once (an ADR file, a PR body, a commit message)
+instead of somewhere it's re-read every turn.
