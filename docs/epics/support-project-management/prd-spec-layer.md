@@ -162,22 +162,22 @@ the origin PRD as context.
 
 ### Phase 1 — Core structs and parser
 
-- [ ] Define `Epic`, `Prd`, `PrdPhase`, `PrdLoop` structs in `epic.rs` with serde derives; frontmatter fields via `serde_yaml`
-- [ ] Implement frontmatter extractor: split `---\n...\n---` from body, deserialize with `serde_yaml`
-- [ ] Implement `parse_epic_readme(path) -> Epic` — frontmatter + PRD Index table from body
-- [ ] Implement `parse_prd(path) -> Prd` — frontmatter + `### Phase N` sections into `Vec<PrdPhase>` with checklist items
-- [ ] Implement `parse_epics(project_path) -> Vec<Epic>` — walk `docs/epics/*/`, parse each README, attach parsed PRDs
-- [ ] Milestone grouping: `epics_by_milestone(project_path) -> BTreeMap<String, Vec<Epic>>` (ordered by milestone)
-- [ ] Lenient body edge cases: missing `## Scope`, missing PRD Index table, em dashes in prose, empty `docs/epics/`
-- [ ] Strict frontmatter: missing required field → parse error with the file path (not a panic)
-- [ ] Unit tests mirroring `memory.rs` coverage (≥15 tests) + frontmatter round-trip tests
+- [ ] `spec-layer/define-structs` Define `Epic`, `Prd`, `PrdPhase`, `PrdLoop` structs in `epic.rs` with serde derives; frontmatter fields via `serde_yaml`
+- [ ] `spec-layer/frontmatter-extractor` Implement frontmatter extractor: split `---\n...\n---` from body, deserialize with `serde_yaml`
+- [ ] `spec-layer/parse-epic-readme` Implement `parse_epic_readme(path) -> Epic` — frontmatter + PRD Index table from body
+- [ ] `spec-layer/parse-prd` Implement `parse_prd(path) -> Prd` — frontmatter + `### Phase N` sections into `Vec<PrdPhase>` with checklist items
+- [ ] `spec-layer/parse-epics` Implement `parse_epics(project_path) -> Vec<Epic>` — walk `docs/epics/*/`, parse each README, attach parsed PRDs
+- [ ] `spec-layer/milestone-grouping` Milestone grouping: `epics_by_milestone(project_path) -> BTreeMap<String, Vec<Epic>>` (ordered by milestone)
+- [ ] `spec-layer/lenient-body-edge-cases` Lenient body edge cases: missing `## Scope`, missing PRD Index table, em dashes in prose, empty `docs/epics/`
+- [ ] `spec-layer/strict-frontmatter` Strict frontmatter: missing required field → parse error with the file path (not a panic)
+- [ ] `spec-layer/unit-tests` Unit tests mirroring `memory.rs` coverage (≥15 tests) + frontmatter round-trip tests
 
 ### Phase 2 — Bootstrap and integration
 
-- [ ] Add `docs/epics/` to the bootstrap path in `project.rs` (create-on-absent, idempotent)
-- [ ] Register `get_epics(project_path)` + `get_epics_by_milestone(project_path)` Tauri commands in `commands.rs` + `lib.rs`
-- [ ] Typed `getEpics` / `getEpicsByMilestone` wrappers in `src/lib/tauri.ts` + `Epic`/`Prd`/`PrdPhase`/`PrdLoop` types in `src/types/index.ts`
-- [ ] Verify LoopDeck's own `docs/epics/support-project-management/` parses cleanly (dogfood)
+- [ ] `spec-layer/bootstrap-path` Add `docs/epics/` to the bootstrap path in `project.rs` (create-on-absent, idempotent)
+- [ ] `spec-layer/register-commands` Register `get_epics(project_path)` + `get_epics_by_milestone(project_path)` Tauri commands in `commands.rs` + `lib.rs`
+- [ ] `spec-layer/typed-wrappers` Typed `getEpics` / `getEpicsByMilestone` wrappers in `src/lib/tauri.ts` + `Epic`/`Prd`/`PrdPhase`/`PrdLoop` types in `src/types/index.ts`
+- [ ] `spec-layer/dogfood-parse` Verify LoopDeck's own `docs/epics/support-project-management/` parses cleanly (dogfood)
 
 ## Open Questions
 

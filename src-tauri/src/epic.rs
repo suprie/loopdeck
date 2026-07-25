@@ -630,14 +630,48 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 /// Mirrors `memory.rs`'s section splitting: prepend a newline, split on
 /// `\n## `, locate the `Phases` block, then split that on `\n### ` for each
 /// phase. Missing `## Phases` → empty Vec (lenient, no panic).
+///
+/// **Fence-aware:** fenced blocks are blanked ([`blank_fenced_lines`]) before
+/// the heading search, so a PRD that documents the format with a fenced
+/// ```markdown `## Phases` example (prd-spec-layer does) does not shadow the
+/// real `## Phases` section. Real phase/loop bodies are checklists (never
+/// fenced), so blanking fences loses no phase content.
 fn parse_prd_phases(body: &str) -> Vec<PrdPhase> {
-    let normalized = format!("\n{body}");
+    let defenced = blank_fenced_lines(body);
+    let normalized = format!("\n{defenced}");
     for section in normalized.split("\n## ") {
         if let Some(rest) = section.strip_prefix("Phases") {
             return parse_phases_section(rest);
         }
     }
     Vec::new()
+}
+
+/// Replace each line inside a ``` / ~~~ fenced block with blank (preserving the
+/// newline so line structure is intact). Lets fenced format-examples be skipped
+/// during `## ` heading detection without disturbing the prose they document.
+fn blank_fenced_lines(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut fence: Option<&'static str> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let (next_fence, inside) = match fence {
+            Some(f) => {
+                // Inside a fence; a line starting with the same fence closes it.
+                let still_open = !trimmed.starts_with(f);
+                (if still_open { Some(f) } else { None }, true)
+            }
+            None if trimmed.starts_with("```") => (Some("```"), true),
+            None if trimmed.starts_with("~~~") => (Some("~~~"), true),
+            None => (None, false),
+        };
+        if !inside {
+            out.push_str(line);
+        }
+        out.push('\n');
+        fence = next_fence;
+    }
+    out
 }
 
 /// Parse the body of a `## Phases` section into phases.
@@ -1408,16 +1442,15 @@ description: d
             "ID'd loops should have non-empty IDs, got {all_ids:?}"
         );
 
-        // 0.2.0 PRDs predate stable IDs: none of their loops carry one.
+        // Every loop across all PRDs carries a stable ID — the repo is fully on
+        // the 0.2.1 format (the 0.2.0 PRDs were migrated). Legacy ID-less items
+        // live only in the unit-test fixtures, not in this repo's specs.
         for prd in &epic.prds {
-            if prd.slug == "prd-structured-execution-state" {
-                continue;
-            }
             for ph in &prd.phases {
                 for l in &ph.loops {
                     assert!(
-                        l.id.is_none(),
-                        "0.2.0 PRD {} loop should be legacy (no ID): {:?}",
+                        l.id.is_some(),
+                        "loop in {} should carry a stable ID: {:?}",
                         prd.slug,
                         l.title
                     );
@@ -1822,6 +1855,37 @@ _No active loop._
         assert_eq!(loops.len(), 1);
         assert!(loops[0].id.is_none());
         assert_eq!(loops[0].title, "`Bad_ID/x` Do thing");
+    }
+
+    #[test]
+    fn test_parse_prd_phases_ignores_fenced_phases_example() {
+        // A PRD that documents the format with a fenced ```markdown `## Phases`
+        // example must not have that fenced block shadow the real `## Phases`
+        // section (prd-spec-layer does exactly this).
+        let body = "\
+## Format
+
+```markdown
+## Phases
+
+### Phase 1 — Example
+- [ ] `ns/placebo` Not a real loop
+```
+
+## Phases
+
+### Phase 1 — Real
+- [ ] `ns/real-one` The real loop
+";
+        let phases = parse_prd_phases(body);
+        assert_eq!(
+            phases.len(),
+            1,
+            "only the real (unfenced) Phases section counts"
+        );
+        assert_eq!(phases[0].name, "Phase 1 — Real");
+        assert_eq!(phases[0].loops.len(), 1);
+        assert_eq!(phases[0].loops[0].id.as_deref(), Some("ns/real-one"));
     }
 
     // ── validate_loop_ids tests ────────────────────────────────────
