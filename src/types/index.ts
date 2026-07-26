@@ -169,6 +169,7 @@ export interface AppError {
 
 /** Global agent configuration (mirrors Rust AgentConfig). */
 export interface AgentConfig {
+  harness?: "claude" | "codex";
   auth_token?: string;
   base_url?: string;
   model?: string;
