@@ -16,7 +16,7 @@
 //!   (seconds–minutes). Different projects take different inner locks, so
 //!   they run in true parallel.
 
-use crate::claude_session::{InterruptSlot, PermissionSlot, QuestionSlot};
+use crate::claude_session::{InterruptSlot, PermissionSlot, PlanSlot, QuestionSlot};
 use crate::config::{AgentConfig, AgentHarness, GlobalConfig, ProjectEntry, RunState};
 use crate::conversation;
 use crate::error::AppError;
@@ -48,6 +48,13 @@ pub struct AppState {
     /// `agent_answer_permission` command pops the sender here to deliver the
     /// user's Allow/Deny and wake the parked turn. Mirrors `pending_answers`.
     pub pending_permissions: Mutex<HashMap<PathBuf, PermissionSlot>>,
+    /// Per-project pending `ExitPlanMode` slots. When the agent (running under
+    /// `plan` permission mode) finishes planning and asks to leave plan mode,
+    /// the read loop parks on the slot's oneshot receiver; the
+    /// `agent_answer_plan` command pops the sender here to deliver the user's
+    /// Approve/Reject verdict and wake the parked turn. Mirrors
+    /// `pending_permissions`.
+    pub pending_plans: Mutex<HashMap<PathBuf, PlanSlot>>,
     /// Per-project interrupt slots for graceful Stop. The streaming read loop
     /// installs a fresh oneshot sender per turn and `select!`s on the
     /// receiver; `agent_interrupt` pops + fires the sender, the loop wakes and
@@ -272,6 +279,24 @@ pub(crate) fn permission_slot(state: &AppState, path: &Path) -> Result<Permissio
         .clone())
 }
 
+/// Get (or create) the per-project `ExitPlanMode` approval slot.
+///
+/// The plan-approval counterpart of `permission_slot`: one `PlanSlot` per
+/// project path, shared between the read loop (stores the oneshot sender when
+/// the agent asks to leave plan mode) and the `agent_answer_plan` command
+/// (pops the sender to deliver the verdict). Persistent across turns; always
+/// `None` outside a pending plan approval.
+pub(crate) fn plan_slot(state: &AppState, path: &Path) -> Result<PlanSlot, AppError> {
+    let mut guard = state
+        .pending_plans
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone())
+}
+
 /// Get (or create) the per-project graceful-interrupt slot.
 ///
 /// The streaming read loop installs a oneshot sender here at turn start and
@@ -292,9 +317,10 @@ pub(crate) fn interrupt_slot(state: &AppState, path: &Path) -> Result<InterruptS
 /// Derive the ephemeral `RunState` for each project from live `AppState`.
 ///
 /// Strict live state (no recency heuristic):
-/// - `Waiting` — there is a pending manual-approval (`pending_permissions`) or
-///   a pending `AskUserQuestion` (`pending_answers`) for the project path. The
-///   in-flight turn is parked awaiting the user.
+/// - `Waiting` — there is a pending manual-approval (`pending_permissions`), a
+///   pending `AskUserQuestion` (`pending_answers`), or a pending plan approval
+///   (`pending_plans`) for the project path. The in-flight turn is parked
+///   awaiting the user.
 /// - `Working` — a `claude_sessions` entry exists for the path AND its inner
 ///   `tokio::Mutex` is currently held (a turn is streaming). We check by
 ///   `try_lock`; success ⇒ idle, failure ⇒ busy.
@@ -315,11 +341,17 @@ pub(crate) fn derive_run_states(state: &AppState, projects: &mut [ProjectEntry])
             .pending_answers
             .lock()
             .map_err(|_| AppError::LockError);
-        let (Ok(perms), Ok(answers)) = (perms, answers) else {
+        let plans = state.pending_plans.lock().map_err(|_| AppError::LockError);
+        let (Ok(perms), Ok(answers), Ok(plans)) = (perms, answers, plans) else {
             // If we can't observe pending state, leave everything as-is.
             return;
         };
-        perms.keys().chain(answers.keys()).cloned().collect()
+        perms
+            .keys()
+            .chain(answers.keys())
+            .chain(plans.keys())
+            .cloned()
+            .collect()
     };
 
     for entry in projects.iter_mut() {

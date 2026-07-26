@@ -1,13 +1,13 @@
-//! Agent / Claude session commands — the 16 `agent_*` IPC handlers plus their
+//! Agent / Claude session commands — the 19 `agent_*` IPC handlers plus their
 //! private helpers (retry wrappers, transcript-recording pipelines, the
 //! fresh-start pipeline, and the loop-prompt builder).
 
 use super::state::{
-    interrupt_slot, permission_slot, project_busy, question_slot, resolve_agent_config,
+    interrupt_slot, permission_slot, plan_slot, project_busy, question_slot, resolve_agent_config,
     resolve_permission_policy, resolve_root, with_session, AppState,
 };
 use crate::agents::{AgentResponse, ClaudeEvent};
-use crate::claude_session::QuestionAnswers;
+use crate::claude_session::{ParkSlots, QuestionAnswers};
 use crate::conversation::{self, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
 use crate::harness::HarnessSession;
@@ -114,17 +114,24 @@ pub async fn agent_start_loop_streaming(
 /// Returns `()` rather than `AgentResponse` — the terminal result event
 /// (`ClaudeEvent::Result`) carries the full aggregated response, so the
 /// frontend doesn't need to await the return value.
+///
+/// `plan_mode`: when true, the turn runs under the CLI's `plan` permission
+/// mode (mirrors Claude Code's own shift-tab toggle) — the agent is
+/// restricted to read-only tools plus `ExitPlanMode`, which surfaces a
+/// `ClaudeEvent::PlanApproval` card for the user to approve/reject instead of
+/// letting the agent edit anything.
 #[tauri::command]
 pub async fn agent_send_message_streaming(
     path: String,
     prompt: String,
     on_event: Channel<ClaudeEvent>,
+    plan_mode: bool,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
-    debug!("agent_send_message_streaming called for path: {path}");
+    debug!("agent_send_message_streaming called for path: {path}, plan_mode: {plan_mode}");
     let root = resolve_root(&state, &path)?;
 
-    send_and_record_streaming(&state, &root, &prompt, &on_event).await?;
+    send_and_record_streaming(&state, &root, &prompt, &on_event, plan_mode).await?;
     info!("agent_send_message_streaming complete for: {path}");
     Ok(())
 }
@@ -423,6 +430,116 @@ pub async fn agent_answer_permission(
     Ok(())
 }
 
+/// Wire shape of the user's plan-approval verdict, as sent by the frontend
+/// (`agent_answer_plan`'s `decision` arg). Structurally identical to
+/// `ApprovalWire` — `approve: true` lets the agent leave plan mode and start
+/// executing; `approve: false` keeps it in plan mode, with `feedback`
+/// surfaced to the model so it can revise. Kept as its own type (rather than
+/// reusing `ApprovalWire`) so the plan-approval and tool-approval wire shapes
+/// can evolve independently.
+#[derive(Debug, Deserialize)]
+pub struct PlanApprovalWire {
+    pub approve: bool,
+    #[serde(default)]
+    pub feedback: Option<String>,
+}
+
+/// Resolve a pending `ExitPlanMode` request for the given project.
+///
+/// Called by the frontend when the user clicks Approve or Reject on the plan
+/// card. Pops the oneshot sender from the per-project `pending_plans` slot and
+/// sends the `Decision` — this wakes the read loop (parked in
+/// `ClaudeSession::answer_plan_approval`), which writes the matching
+/// `control_response`. On approve, the CLI's own `ExitPlanMode` handler
+/// reverts the process out of plan mode and the agent starts executing; on
+/// reject, the model is expected to revise the plan and call `ExitPlanMode`
+/// again within the same turn.
+///
+/// Returns an error if no plan approval is pending for this project (the user
+/// clicked after the turn ended/timed out, or there was never a prompt), OR if
+/// `request_id` doesn't match the currently-parked plan. The mismatch case
+/// matters because the model can revise and re-propose a plan mid-turn: if the
+/// frontend's card is stale (a missed `plan_approval` channel event) and the
+/// user clicks Approve/Reject on request A while the backend is now parked on
+/// revised plan B, blindly taking the sender would apply the user's verdict —
+/// which they gave after reading plan A — to plan B instead. Checking the ID
+/// first, and leaving the slot untouched on a mismatch, means a stale click
+/// errors instead of silently approving/rejecting a plan the user never saw.
+#[tauri::command]
+pub async fn agent_answer_plan(
+    path: String,
+    request_id: String,
+    decision: PlanApprovalWire,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!(
+        "agent_answer_plan called for path: {path}, request_id: {request_id}, approve: {}",
+        decision.approve
+    );
+    let repo_path = PathBuf::from(&path);
+
+    // Validate the request_id BEFORE taking the sender — a mismatch leaves
+    // the slot untouched (the still-pending, newer plan keeps waiting for its
+    // own answer) rather than consuming it on behalf of a stale request.
+    let sender = {
+        let guard = state
+            .pending_plans
+            .lock()
+            .map_err(|_| AppError::LockError)?;
+        let slot = guard.get(&repo_path).ok_or_else(|| {
+            AppError::Agent(
+                "no pending plan approval for this project (it may have timed out or already been answered)".into(),
+            )
+        })?;
+        let mut slot_guard = slot.lock().map_err(|_| AppError::LockError)?;
+        match slot_guard.as_ref() {
+            None => {
+                return Err(AppError::Agent(
+                    "no pending plan approval for this project (it may have timed out or already been answered)".into(),
+                ));
+            }
+            Some(pending) if pending.request_id != request_id => {
+                return Err(AppError::Agent(format!(
+                    "this plan approval is stale — the agent is now waiting on a different plan (request_id {}); reload and answer the current one",
+                    pending.request_id
+                )));
+            }
+            Some(_) => {}
+        }
+        // IDs match — safe to take. The slot entry is cleared entirely so
+        // `agent_pending_plan` stops reporting it as pending.
+        slot_guard
+            .take()
+            .and_then(|pending| pending.sender)
+            .ok_or_else(|| {
+                AppError::Agent(
+                    "the pending plan approval is no longer waiting for an answer (turn ended)"
+                        .into(),
+                )
+            })?
+    };
+
+    let verdict = if decision.approve {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Deny(
+            decision
+                .feedback
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| String::from("the user rejected this plan")),
+        )
+    };
+
+    sender.send(verdict).map_err(|_| {
+        AppError::Agent(
+            "the pending plan approval is no longer waiting for an answer (turn ended)".into(),
+        )
+    })?;
+
+    info!("agent_answer_plan delivered for: {path}");
+    Ok(())
+}
+
 /// Persist a permission allow-rule into the project's `.claude/settings.local.json`.
 ///
 /// "Always allow" affordance for the manual-approval card: alongside the
@@ -587,6 +704,14 @@ pub struct PendingQuestionInfo {
     pub questions: Vec<crate::agents::AskUserQuestionSpec>,
 }
 
+/// Serializable payload for a pending `ExitPlanMode` request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPlanInfo {
+    pub request_id: String,
+    pub plan: String,
+}
+
 /// One project's pending `AskUserQuestion`, surfaced across the whole registry
 /// by `list_pending_questions`. Carries the project `path` (so the frontend can
 /// route the answer) alongside the same payload as `PendingQuestionInfo`.
@@ -613,6 +738,20 @@ pub struct PendingPermissionEntry {
     pub request_id: String,
     pub tool_name: String,
     pub input: String,
+}
+
+/// One project's pending `ExitPlanMode` request, surfaced across the whole
+/// registry by `list_pending_plans`. Carries the project `path` (so the
+/// frontend can route the verdict) alongside the same payload as
+/// `PendingPlanInfo`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPlanEntry {
+    /// Canonical registered project path — the key into `pending_plans` and
+    /// the value the frontend echoes back to `agent_answer_plan`.
+    pub path: String,
+    pub request_id: String,
+    pub plan: String,
 }
 
 /// Collect every project that currently has a pending `AskUserQuestion`, across
@@ -682,6 +821,33 @@ pub(crate) fn collect_pending_permissions(
                 request_id: p.request_id.clone(),
                 tool_name: p.tool_name.clone(),
                 input: p.input.clone(),
+            })
+        });
+        if let Some(entry) = entry {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
+/// Collect every project that currently has a pending `ExitPlanMode` request,
+/// across the whole registry. The plan-side mirror of
+/// [`collect_pending_permissions`].
+///
+/// Fully synchronous and lock-bounded like `agent_pending_plan`: each inner
+/// slot is locked only long enough to clone the payload, and the outer map
+/// guard is dropped before returning.
+pub(crate) fn collect_pending_plans(
+    pending: &std::sync::Mutex<HashMap<PathBuf, crate::claude_session::PlanSlot>>,
+) -> Result<Vec<PendingPlanEntry>, AppError> {
+    let guard = pending.lock().map_err(|_| AppError::LockError)?;
+    let mut out = Vec::new();
+    for (path, slot) in guard.iter() {
+        let entry = slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingPlanEntry {
+                path: path.to_string_lossy().into_owned(),
+                request_id: p.request_id.clone(),
+                plan: p.plan.clone(),
             })
         });
         if let Some(entry) = entry {
@@ -771,6 +937,41 @@ pub async fn list_pending_permissions(
     state: State<'_, AppState>,
 ) -> Result<Vec<PendingPermissionEntry>, AppError> {
     collect_pending_permissions(&state.pending_permissions)
+}
+
+/// Read the pending `ExitPlanMode` payload for a project, if any.
+///
+/// Does NOT consume the sender — only the payload. The frontend uses this to
+/// re-render the plan-approval card after navigating away and back. Returns
+/// `None` when no plan approval is pending.
+#[tauri::command]
+pub async fn agent_pending_plan(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PendingPlanInfo>, AppError> {
+    let repo_path = PathBuf::from(&path);
+    let guard = state
+        .pending_plans
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard.get(&repo_path).and_then(|slot| {
+        slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|p| PendingPlanInfo {
+                request_id: p.request_id.clone(),
+                plan: p.plan.clone(),
+            })
+        })
+    }))
+}
+
+/// List every project with a pending `ExitPlanMode` request, across the whole
+/// registry. The cross-project aggregate of `agent_pending_plan`, and the
+/// plan-side mirror of `list_pending_permissions`.
+#[tauri::command]
+pub async fn list_pending_plans(
+    state: State<'_, AppState>,
+) -> Result<Vec<PendingPlanEntry>, AppError> {
+    collect_pending_plans(&state.pending_plans)
 }
 
 // ── Loop-prompt builder ─────────────────────────────────────────────────────
@@ -868,8 +1069,7 @@ fn next_unchecked_loop_step(path: &Path) -> Option<String> {
 async fn send_with_retry(
     session: &mut HarnessSession,
     prompt: &str,
-    question_slot: &crate::claude_session::QuestionSlot,
-    permission_slot: &crate::claude_session::PermissionSlot,
+    slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
 ) -> Result<AgentResponse, AppError> {
     // `attempt` is the 0-based index of the attempt that just ran. `elapsed_ms`
@@ -879,9 +1079,7 @@ async fn send_with_retry(
     let mut attempt: u32 = 0;
     let mut elapsed_ms: u64 = 0;
     loop {
-        let response = session
-            .send_message(prompt, question_slot, permission_slot, interrupt_slot)
-            .await?;
+        let response = session.send_message(prompt, slots, interrupt_slot).await?;
 
         // Done unless this is a retryable transient overload.
         if !(response.is_error && retry::is_overloaded(&response.result)) {
@@ -930,21 +1128,15 @@ async fn send_streaming_with_retry(
     session: &mut HarnessSession,
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
-    question_slot: &crate::claude_session::QuestionSlot,
-    permission_slot: &crate::claude_session::PermissionSlot,
+    slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
+    plan_mode: bool,
 ) -> Result<AgentResponse, AppError> {
     let mut attempt: u32 = 0;
     let mut elapsed_ms: u64 = 0;
     loop {
         let response = session
-            .send_message_streaming(
-                prompt,
-                channel,
-                question_slot,
-                permission_slot,
-                interrupt_slot,
-            )
+            .send_message_streaming(prompt, channel, slots, interrupt_slot, plan_mode)
             .await?;
 
         if !(response.is_error && retry::is_overloaded(&response.result)) {
@@ -1053,7 +1245,13 @@ async fn send_and_record(
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
+    let plnslot = plan_slot(state, path)?;
     let islot = interrupt_slot(state, path)?;
+    let slots = ParkSlots {
+        question: &qslot,
+        permission: &pslot,
+        plan: &plnslot,
+    };
 
     // 1. Record the user turn first (crash-safety: intent survives).
     if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
@@ -1067,7 +1265,7 @@ async fn send_and_record(
     //    an orphan. The `Err` path skips that recording, leaving the user turn
     //    from step 1 dangling; reconcile it to a truthful `interrupted` state
     //    before re-propagating so the transcript never hangs unanswered.
-    let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
+    let response = match send_with_retry(&mut session, prompt, &slots, &islot).await {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
@@ -1121,12 +1319,19 @@ async fn send_and_record_streaming(
     path: &Path,
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
+    plan_mode: bool,
 ) -> Result<(), AppError> {
     let session_arc = with_session(state, path).await?;
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
+    let plnslot = plan_slot(state, path)?;
     let islot = interrupt_slot(state, path)?;
+    let slots = ParkSlots {
+        question: &qslot,
+        permission: &pslot,
+        plan: &plnslot,
+    };
 
     // 1. Record the user turn first (crash-safety: intent survives).
     if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
@@ -1137,22 +1342,16 @@ async fn send_and_record_streaming(
     //    non-streaming pipelines for the interruption-recovery rationale: a
     //    transport/child failure (`Err`) orphans the user turn from step 1, so
     //    we reconcile it to `interrupted` before re-propagating the error.
-    let response = match send_streaming_with_retry(
-        &mut session,
-        prompt,
-        channel,
-        &qslot,
-        &pslot,
-        &islot,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            mark_turn_terminal(path, &e);
-            return Err(e);
-        }
-    };
+    let response =
+        match send_streaming_with_retry(&mut session, prompt, channel, &slots, &islot, plan_mode)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                mark_turn_terminal(path, &e);
+                return Err(e);
+            }
+        };
 
     // 3. Record the assistant turn (best-effort). Includes thinking + tool
     //    calls so the persisted transcript captures the full reasoning trail,
@@ -1275,7 +1474,13 @@ async fn start_fresh_and_record(
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
+    let plnslot = plan_slot(state, path)?;
     let islot = interrupt_slot(state, path)?;
+    let slots = ParkSlots {
+        question: &qslot,
+        permission: &pslot,
+        plan: &plnslot,
+    };
 
     // 1. Record the user turn first (crash-safety: intent survives).
     //    Marked `user_loop` — this prompt was auto-built from
@@ -1299,7 +1504,7 @@ async fn start_fresh_and_record(
     //    an orphan. The `Err` path skips that recording, leaving the user turn
     //    from step 1 dangling; reconcile it to a truthful `interrupted` state
     //    before re-propagating so the transcript never hangs unanswered.
-    let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
+    let response = match send_with_retry(&mut session, prompt, &slots, &islot).await {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
@@ -1344,7 +1549,13 @@ async fn start_fresh_and_record_streaming(
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
+    let plnslot = plan_slot(state, path)?;
     let islot = interrupt_slot(state, path)?;
+    let slots = ParkSlots {
+        question: &qslot,
+        permission: &pslot,
+        plan: &plnslot,
+    };
 
     // 1. Record the user turn first (crash-safety: intent survives).
     //    Marked `user_loop` (see `start_fresh_and_record` for rationale).
@@ -1362,22 +1573,17 @@ async fn start_fresh_and_record_streaming(
     //    non-streaming pipelines for the interruption-recovery rationale: a
     //    transport/child failure (`Err`) orphans the user turn from step 1, so
     //    we reconcile it to `interrupted` before re-propagating the error.
-    let response = match send_streaming_with_retry(
-        &mut session,
-        prompt,
-        channel,
-        &qslot,
-        &pslot,
-        &islot,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            mark_turn_terminal(path, &e);
-            return Err(e);
-        }
-    };
+    // Start never runs under plan mode — it's the auto-built next-loop prompt,
+    // not a human follow-up with the composer's Plan-mode toggle.
+    let response =
+        match send_streaming_with_retry(&mut session, prompt, channel, &slots, &islot, false).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                mark_turn_terminal(path, &e);
+                return Err(e);
+            }
+        };
 
     // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
     let assistant_turn = ConversationTurn::assistant(

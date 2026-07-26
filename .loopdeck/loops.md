@@ -20,6 +20,7 @@
 ## Next Steps
 
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/11 (0.2.1 Phase 4 — migrate legacy loops.md to execution.yaml)
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/12 (agent execution-plan approval — `ExitPlanMode` interception + plan-mode toggle, unrelated ad-hoc work — see the 2026-07-26 decision). Gates green (fmt/clippy -D/test 418/tsc/build); not yet verified against a live `claude` session (no API credentials in the dev environment) — manual GUI dogfood (toggle Plan mode, send a message, confirm the plan card + Approve/Reject round-trip) is the remaining step before merge.
 
 ### Milestone 0.2.0 — Support Project Management
 

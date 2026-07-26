@@ -9,7 +9,7 @@ use crate::agents::{
     UsageInfo,
 };
 use crate::claude_session::{
-    InterruptSlot, PendingPermission, PendingQuestion, PermissionSlot, QuestionAnswers,
+    InterruptSlot, ParkSlots, PendingPermission, PendingQuestion, PermissionSlot, QuestionAnswers,
     QuestionSlot,
 };
 use crate::config::AgentConfig;
@@ -109,30 +109,37 @@ impl CodexSession {
         })
     }
 
+    /// `slots.plan` is unused here — Codex has no `ExitPlanMode` concept (its
+    /// own approval model is always `readOnly` + `on-request`), so only the
+    /// question/permission slots this session actually parks on are threaded
+    /// down to `send_turn`. `ParkSlots` is accepted (rather than separate
+    /// `question_slot`/`permission_slot` params) purely so `HarnessSession`
+    /// can hand the same bundle to either backend.
     pub async fn send_message(
         &mut self,
         text: &str,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
-        self.send_turn(text, None, question_slot, permission_slot, interrupt_slot)
+        self.send_turn(text, None, slots.question, slots.permission, interrupt_slot)
             .await
     }
 
+    /// See `send_message` for why `slots.plan` goes unused. No `plan_mode`
+    /// parameter either — that flag is Claude-only; `HarnessSession` simply
+    /// doesn't forward it to this method.
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
         channel: &Channel<ClaudeEvent>,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
             text,
             Some(channel),
-            question_slot,
-            permission_slot,
+            slots.question,
+            slots.permission,
             interrupt_slot,
         )
         .await

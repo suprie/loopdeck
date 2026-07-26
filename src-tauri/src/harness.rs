@@ -7,7 +7,7 @@
 //! approval UI behave identically for both harnesses.
 
 use crate::agents::{AgentResponse, ClaudeEvent};
-use crate::claude_session::{ClaudeSession, InterruptSlot, PermissionSlot, QuestionSlot};
+use crate::claude_session::{ClaudeSession, InterruptSlot, ParkSlots};
 use crate::codex_session::CodexSession;
 use crate::config::{AgentConfig, AgentHarness};
 use crate::error::AppError;
@@ -53,53 +53,49 @@ impl HarnessSession {
     pub async fn send_message(
         &mut self,
         text: &str,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
         match self {
-            Self::Claude(session) => {
-                session
-                    .send_message(text, question_slot, permission_slot, interrupt_slot)
-                    .await
-            }
-            Self::Codex(session) => {
-                session
-                    .send_message(text, question_slot, permission_slot, interrupt_slot)
-                    .await
-            }
+            Self::Claude(session) => session.send_message(text, slots, interrupt_slot).await,
+            Self::Codex(session) => session.send_message(text, slots, interrupt_slot).await,
         }
     }
 
+    /// `plan_mode` only has meaning for Claude — it toggles the CLI's `plan`
+    /// permission mode, entirely a Claude-CLI concept (`ExitPlanMode`, the
+    /// `PlanSlot` carried inside `slots`). Codex has its own approval model
+    /// (always `readOnly` + `on-request` — see the harness-boundary decision
+    /// in `.loopdeck/decisions.md`) with no equivalent read-only-until-approved
+    /// gate, so `plan_mode: true` against a Codex session is a hard error
+    /// rather than a silently-dropped flag: Codex would otherwise start the
+    /// turn with its normal `workspace-write` access despite the caller
+    /// believing it asked for a plan-first review. This is the single choke
+    /// point for that guarantee — any caller (not just the current frontend
+    /// toggle, which separately fails closed while the harness is unknown)
+    /// gets the same rejection.
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
         channel: &Channel<ClaudeEvent>,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
         match self {
             Self::Claude(session) => {
                 session
-                    .send_message_streaming(
-                        text,
-                        channel,
-                        question_slot,
-                        permission_slot,
-                        interrupt_slot,
-                    )
+                    .send_message_streaming(text, channel, slots, interrupt_slot, plan_mode)
                     .await
             }
             Self::Codex(session) => {
+                if plan_mode {
+                    return Err(AppError::Agent(
+                        "plan mode is a Claude-only feature and is not supported by the Codex harness".into(),
+                    ));
+                }
                 session
-                    .send_message_streaming(
-                        text,
-                        channel,
-                        question_slot,
-                        permission_slot,
-                        interrupt_slot,
-                    )
+                    .send_message_streaming(text, channel, slots, interrupt_slot)
                     .await
             }
         }

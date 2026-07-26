@@ -9,6 +9,7 @@ import type {
   AskUserQuestionAnswers,
   ConversationSummary,
   ApprovalDecision,
+  PlanApprovalDecision,
 } from "../../types";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
@@ -128,10 +129,62 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // truth for "is anything actually waiting" (see `agent_answer_*` commands).
   const pendingQuestion = usePendingInteractions((s) => s.questions[projectPath] ?? null);
   const pendingPermission = usePendingInteractions((s) => s.permissions[projectPath] ?? null);
+  const pendingPlan = usePendingInteractions((s) => s.plans[projectPath] ?? null);
   const setPendingQuestion = usePendingInteractions((s) => s.setQuestion);
   const clearPendingQuestion = usePendingInteractions((s) => s.clearQuestion);
   const setPendingPermission = usePendingInteractions((s) => s.setPermission);
   const clearPendingPermission = usePendingInteractions((s) => s.clearPermission);
+  const setPendingPlan = usePendingInteractions((s) => s.setPlan);
+  const clearPendingPlan = usePendingInteractions((s) => s.clearPlan);
+
+  // ── Plan-mode toggle ──
+  // Local UI intent: "should the NEXT sent message run under the CLI's `plan`
+  // permission mode". Not navigation-stable (unlike the streaming/pending
+  // state above) — it's a one-shot compose-time choice, not something a
+  // parked backend turn needs to survive a remount. Reset to false right
+  // after firing a send so a subsequent follow-up defaults back to normal
+  // mode, mirroring Claude Code's own shift-tab behavior (plan mode reverts
+  // once you leave it).
+  const [planMode, setPlanMode] = useState(false);
+
+  // Plan mode is a Claude-CLI-specific concept (`set_permission_mode` +
+  // `ExitPlanMode`) — Codex has no equivalent and always runs with
+  // `workspace-write` (see the harness-boundary decision in
+  // `.loopdeck/decisions.md`), so it would edit immediately despite the UI
+  // promising a plan-first review. `AgentConfig.harness` is a single global
+  // setting (not per-project), fetched once here so the toggle can be hidden
+  // entirely for Codex rather than silently accepted and ignored.
+  // `null` means "not yet known" — covers both the initial pre-fetch window
+  // and a fetch failure. Deliberately NOT defaulted to "claude": that would
+  // fail OPEN (the toggle usable while the real harness is unknown, or
+  // wrongly assumed after a probe error), letting a fast toggle-then-send
+  // during the loading window — or any `getAgentConfig` failure — submit
+  // `plan_mode: true` against what might actually be a Codex session.
+  const [harness, setHarness] = useState<"claude" | "codex" | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAgentConfig()
+      .then((cfg) => {
+        if (!cancelled) setHarness(cfg?.harness ?? "claude");
+      })
+      .catch(() => {
+        // Fail closed: leave `harness` at `null` (unknown) rather than
+        // guessing "claude" on a probe error — see the comment above.
+        if (!cancelled) setHarness(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // Explicit allow-list (`=== "claude"`), not a deny-list (`!== "codex"`) —
+  // `null` (unknown/loading/failed) must resolve to "not usable", the same
+  // as "codex", not silently fall through to usable. Belt-and-suspenders
+  // alongside the backend's own rejection of `plan_mode: true` for Codex
+  // (`HarnessSession::send_message_streaming`): even if this check were
+  // somehow bypassed, the backend still refuses rather than silently
+  // dropping the flag.
+  const planModeUsable = harness === "claude";
 
   // ── pendingAgentStart — auto-fire Start when landed from dashboard CTA ──
   const pendingAgentStart = useAppStore((s) => s.pendingAgentStart);
@@ -265,7 +318,9 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       // this just makes the UI honest about it up front).
       const pending = usePendingInteractions.getState();
       const hasPendingParking =
-        !!pending.permissions[projectPath] || !!pending.questions[projectPath];
+        !!pending.permissions[projectPath] ||
+        !!pending.questions[projectPath] ||
+        !!pending.plans[projectPath];
       if (hasPendingParking) {
         setBusy(true);
         busyRef.current = true;
@@ -298,9 +353,10 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       if (!cancelled) {
         try {
           const pendingStore = usePendingInteractions.getState();
-          const [perm, q] = await Promise.all([
+          const [perm, q, plan] = await Promise.all([
             api.agentPendingPermission(projectPath),
             api.agentPendingQuestion(projectPath),
+            api.agentPendingPlan(projectPath),
           ]);
           if (perm && !pendingStore.permissions[projectPath]) {
             setPendingPermission(projectPath, {
@@ -321,6 +377,22 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           } else if (!q && pendingStore.questions[projectPath]) {
             clearPendingQuestion(projectPath);
           }
+          // Unlike the permission/question checks above, also refresh when
+          // the backend's pending request_id has moved on — the model can
+          // revise and re-call ExitPlanMode mid-turn, so a stored plan A
+          // whose request_id no longer matches the backend's snapshot is
+          // stale, not merely "already seeded". Without this, a missed
+          // `plan_approval` channel event would leave the superseded plan A
+          // on screen while the backend is actually parked on plan B.
+          const storedPlan = pendingStore.plans[projectPath];
+          if (plan && (!storedPlan || storedPlan.requestId !== plan.requestId)) {
+            setPendingPlan(projectPath, {
+              requestId: plan.requestId,
+              plan: plan.plan,
+            });
+          } else if (!plan && storedPlan) {
+            clearPendingPlan(projectPath);
+          }
         } catch {
           // Best-effort reconciliation — don't fail the mount on a probe error.
         }
@@ -331,7 +403,8 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       // a non-parked in-flight turn.
       const hasPendingParkingAfter =
         !!usePendingInteractions.getState().permissions[projectPath] ||
-        !!usePendingInteractions.getState().questions[projectPath];
+        !!usePendingInteractions.getState().questions[projectPath] ||
+        !!usePendingInteractions.getState().plans[projectPath];
 
       // Reconcile a turn that's in flight but NOT parked on the user. This
       // happens when the previous mount unmounted mid-streaming: the Tauri
@@ -434,8 +507,11 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
    * @param prompt  If `undefined`, starts the next loop (prompt built
    *                server-side from `.loopdeck/loops.md`).  If a string,
    *                sends it as a free-form follow-up.
+   * @param usePlanMode  Only meaningful when `prompt` is set — runs the turn
+   *                under the CLI's `plan` permission mode. Loop starts never
+   *                use this (no prompt ⇒ always a normal turn).
    */
-  async function runStreamingTurn(prompt?: string) {
+  async function runStreamingTurn(prompt?: string, usePlanMode = false) {
     // Synchronous busy guard — closes the double-send race that React state
     // can't (two rapid sends both see `busy === false` before re-render).
     if (busyRef.current) return;
@@ -567,6 +643,24 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           });
           break;
         }
+        case "plan_approval": {
+          // Same pending/resolved shape as permission_request, but for
+          // ExitPlanMode: "pending" parks the turn and surfaces the plan
+          // card; "allow"/"deny"/"auto-allow" is the resolved verdict — if it
+          // matches the pending request, the card clears.
+          if (event.decision === "pending") {
+            setPendingPlan(projectPath, {
+              requestId: event.request_id,
+              plan: event.plan,
+            });
+          } else {
+            const cur = usePendingInteractions.getState().plans[projectPath];
+            if (cur && cur.requestId === event.request_id) {
+              clearPendingPlan(projectPath);
+            }
+          }
+          break;
+        }
         case "retrying": {
           // A transient gateway overload (e.g. 529) was hit and the backend is
           // retrying after a backoff. Without surfacing this the UI looks frozen
@@ -603,6 +697,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           // errored or timed out while parked). Clear so the cards disappear.
           clearPendingQuestion(projectPath);
           clearPendingPermission(projectPath);
+          clearPendingPlan(projectPath);
 
           // Surface model-level errors (e.g. "Not logged in") in the banner.
           if (event.is_error) {
@@ -643,7 +738,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
 
     try {
       if (prompt !== undefined) {
-        await api.agentSendMessageStreaming(projectPath, prompt, channel);
+        await api.agentSendMessageStreaming(projectPath, prompt, channel, usePlanMode);
       } else {
         await api.agentStartLoopStreaming(projectPath, channel);
       }
@@ -657,6 +752,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         setBusy(false);
         clearPendingQuestion(projectPath);
         clearPendingPermission(projectPath);
+        clearPendingPlan(projectPath);
         busyRef.current = false;
         void reload();
       }
@@ -672,6 +768,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       setBusy(false);
       clearPendingQuestion(projectPath);
       clearPendingPermission(projectPath);
+      clearPendingPlan(projectPath);
       busyRef.current = false;
       // Best-effort reload — a failed turn may still have been partially
       // recorded (user turn appended before send).
@@ -744,7 +841,17 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     // `turns` after reload and this field clears in the same cleanup pass.
     useStreamingState.getState().patch(projectPath, { pendingUserText: text });
 
-    await runStreamingTurn(text);
+    // Snapshot + reset the toggle before the `await` below — a one-shot
+    // compose-time choice, not a standing mode. Resetting eagerly (rather
+    // than after the turn completes) means the composer honestly reflects
+    // "plan mode is off again" the instant the message is sent, matching
+    // Claude Code's own shift-tab behavior. Gated on `planModeUsable` so a
+    // harness switch to Codex landing between "toggle on" and "send" can't
+    // request a plan-mode turn the active harness can't honor.
+    const usePlanMode = planMode && planModeUsable;
+    setPlanMode(false);
+
+    await runStreamingTurn(text, usePlanMode);
   }
 
   /**
@@ -787,6 +894,27 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
       if (mountedRef.current) {
         setError(describeError(err));
         clearPendingPermission(projectPath);
+      }
+    }
+  }
+
+  /**
+   * Resolve a pending plan approval (Approve / Reject). Delivers the verdict
+   * to the backend's parked read loop; on approve the agent starts
+   * executing, on reject it revises the plan and calls `ExitPlanMode` again.
+   * Mirrors `handleAnswerPermission`: keeps the card up until the resolved
+   * `plan_approval` event arrives, so the pending marker's ✓/✗ transition
+   * matches the same flow as auto-decided tools.
+   */
+  async function handleAnswerPlan(decision: PlanApprovalDecision) {
+    if (!pendingPlan) return;
+    const requestId = pendingPlan.requestId;
+    try {
+      await api.agentAnswerPlan(projectPath, requestId, decision);
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(describeError(err));
+        clearPendingPlan(projectPath);
       }
     }
   }
@@ -1054,6 +1182,17 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         } : null}
         onAnswerPermission={handleAnswerPermission}
         onAlwaysAllow={handleAlwaysAllow}
+        pendingPlan={pendingPlan ? { plan: pendingPlan.plan } : null}
+        onAnswerPlan={handleAnswerPlan}
+        // Omitted entirely (not just disabled) when the active harness can't
+        // honor plan mode — Chat.tsx hides the toggle button whenever
+        // `onTogglePlanMode` is undefined, per its documented prop contract.
+        {...(planModeUsable
+          ? {
+              planMode,
+              onTogglePlanMode: () => setPlanMode((v) => !v),
+            }
+          : {})}
       />
       </div>
     </div>

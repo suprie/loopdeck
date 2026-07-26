@@ -21,6 +21,8 @@ import type {
   AskUserQuestionSpec,
   PendingQuestionEntry,
   PendingPermissionEntry,
+  PendingPlanEntry,
+  PlanApprovalDecision,
   SkillEntry,
   LogInfo,
 } from "../types";
@@ -374,19 +376,26 @@ export async function agentStartLoopStreaming(
  * `ClaudeEvent::Result` carries the full aggregated response (usage, duration,
  * session_id, etc.), so the caller doesn't need to await a return value.
  *
+ * `planMode`: when true, the turn runs under the CLI's `plan` permission mode
+ * (mirrors Claude Code's shift-tab toggle) — the agent is restricted to
+ * read-only tools plus `ExitPlanMode`, which surfaces a `plan_approval`
+ * channel event instead of letting the agent edit anything.
+ *
  * Rust: agent_send_message_streaming(
- *   path: String, prompt: String, on_event: Channel<ClaudeEvent>
+ *   path: String, prompt: String, on_event: Channel<ClaudeEvent>, plan_mode: bool
  * ) -> Result<(), AppError>
  */
 export async function agentSendMessageStreaming(
   path: string,
   prompt: string,
   onEvent: Channel<ClaudeEvent>,
+  planMode: boolean = false,
 ): Promise<void> {
   return invoke<void>("agent_send_message_streaming", {
     path,
     prompt,
     onEvent,
+    planMode,
   });
 }
 
@@ -505,6 +514,31 @@ export async function agentAnswerPermission(
   decision: ApprovalDecision,
 ): Promise<void> {
   return invoke<void>("agent_answer_permission", {
+    path,
+    requestId,
+    decision,
+  });
+}
+
+/**
+ * Resolve a pending `ExitPlanMode` request (Approve / Reject).
+ *
+ * Called when the user clicks Approve or Reject on the plan card. Delivers
+ * the verdict to the backend's parked read loop, which writes the matching
+ * `control_response`. On approve, the CLI reverts out of plan mode and the
+ * agent starts executing; on reject, the model is expected to revise the
+ * plan and call `ExitPlanMode` again.
+ *
+ * Rust: agent_answer_plan(
+ *   path: String, request_id: String, decision: PlanApprovalWire
+ * ) -> Result<(), AppError>
+ */
+export async function agentAnswerPlan(
+  path: string,
+  requestId: string,
+  decision: PlanApprovalDecision,
+): Promise<void> {
+  return invoke<void>("agent_answer_plan", {
     path,
     requestId,
     decision,
@@ -631,6 +665,30 @@ export async function listPendingQuestions(): Promise<PendingQuestionEntry[]> {
  */
 export async function listPendingPermissions(): Promise<PendingPermissionEntry[]> {
   return invoke<PendingPermissionEntry[]>("list_pending_permissions");
+}
+
+/**
+ * Read the pending `ExitPlanMode` payload for a project, if any.
+ *
+ * Counterpart of `agentPendingPermission` for the plan-approval card. Does
+ * NOT consume the sender.
+ * Rust: agent_pending_plan(path: String) -> Result<Option<PendingPlanInfo>, AppError>
+ */
+export async function agentPendingPlan(
+  path: string,
+): Promise<{ requestId: string; plan: string } | null> {
+  return invoke<{ requestId: string; plan: string } | null>("agent_pending_plan", { path });
+}
+
+/**
+ * List every project with a pending `ExitPlanMode` request, across the whole
+ * registry. The cross-project aggregate of `agentPendingPlan`, and the
+ * plan-side mirror of `listPendingPermissions`.
+ *
+ * Rust: list_pending_plans() -> Result<Vec<PendingPlanEntry>, AppError>
+ */
+export async function listPendingPlans(): Promise<PendingPlanEntry[]> {
+  return invoke<PendingPlanEntry[]>("list_pending_plans");
 }
 
 /**

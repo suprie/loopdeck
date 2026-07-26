@@ -427,6 +427,7 @@ export type ClaudeEvent =
   | { type: "task_update"; task: TaskRecord }
   | { type: "permission_request" } & PermissionDecision
   | { type: "ask_user_question"; request_id: string; tool_name: string; questions: AskUserQuestionSpec[] }
+  | { type: "plan_approval" } & PlanApprovalEvent
   | {
       type: "retrying";
       /** 1-based index of the attempt about to run (e.g. 2 for the first retry). */
@@ -593,6 +594,44 @@ export interface PermissionDecision {
   decision: "allow" | "deny" | "pending";
   /** Why LoopDeck allowed/denied. Empty for pending and plain allows. */
   reason: string;
+}
+
+/**
+ * An `ExitPlanMode` approval decision. Mirrors Rust `ClaudeEvent::PlanApproval`
+ * — same pending/resolved shape as `PermissionDecision`, but carries the
+ * proposed plan text instead of a tool name/input.
+ */
+export interface PlanApprovalEvent {
+  /** Matches the originating control_request; echoed back in `agentAnswerPlan`. */
+  request_id: string;
+  /** The plan text Claude wrote (markdown), as passed to `ExitPlanMode`. */
+  plan: string;
+  /** `"pending"` (awaiting user), `"allow"` / `"deny"` (resolved), or
+   *  `"auto-allow"` (an autonomous project skipped the human review). */
+  decision: "allow" | "deny" | "pending" | "auto-allow";
+  /** The user's feedback on a reject, surfaced to the model. Empty otherwise. */
+  reason: string;
+}
+
+/**
+ * One project's pending `ExitPlanMode` request, surfaced across the whole
+ * registry by `listPendingPlans`. Mirrors Rust `PendingPlanEntry`.
+ */
+export interface PendingPlanEntry {
+  /** Canonical registered project path. */
+  path: string;
+  requestId: string;
+  plan: string;
+}
+
+/**
+ * The user's verdict on a pending plan approval, sent back via
+ * `agentAnswerPlan`. `approve: false` keeps the agent in plan mode; `feedback`
+ * is surfaced to the model so it can revise.
+ */
+export interface PlanApprovalDecision {
+  approve: boolean;
+  feedback?: string;
 }
 
 /**

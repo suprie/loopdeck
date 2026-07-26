@@ -168,6 +168,35 @@ pub enum ClaudeEvent {
         /// The questions to surface, in order.
         questions: Vec<AskUserQuestionSpec>,
     },
+    /// An `ExitPlanMode` tool call — Claude finished planning (while running
+    /// under the CLI's `plan` permission mode, entered via
+    /// `ClaudeSession::send_message_streaming`'s `plan_mode` flag) and wants to
+    /// leave plan mode to start executing. Mirrors `PermissionRequest`'s
+    /// pending/resolved shape rather than `AskUserQuestion`'s: there's no
+    /// structured answer to feed back, just an allow/deny verdict, identical to
+    /// a manual tool approval.
+    ///
+    /// **Four states for `decision`**, matching `PermissionRequest`:
+    /// - `"pending"` — parked, awaiting the human's Approve/Reject via
+    ///   `agent_answer_plan`. Emitted BEFORE the `control_response` is written.
+    /// - `"allow"` — the human approved; the CLI's own `ExitPlanMode` handler
+    ///   reverts the process out of plan mode.
+    /// - `"deny"` — the human rejected (with optional feedback in `reason`);
+    ///   the model stays in plan mode and is expected to revise and call
+    ///   `ExitPlanMode` again.
+    /// - `"auto-allow"` — an autonomous-mode project skipped the human review
+    ///   entirely (same posture as `PermissionRequest`'s autonomous auto-allow).
+    PlanApproval {
+        request_id: String,
+        /// The plan text Claude wrote, as passed to `ExitPlanMode`'s `plan`
+        /// input field (markdown). Empty if the call was malformed.
+        plan: String,
+        /// `"pending"`, `"allow"`, `"deny"`, or `"auto-allow"`.
+        decision: String,
+        /// The human's feedback on a deny, surfaced to the model so it can
+        /// revise the plan. Empty otherwise.
+        reason: String,
+    },
     /// The terminal event signalling the turn is complete. Carries the full
     /// aggregated `AgentResponse` so the UI can reconcile its streamed deltas
     /// and display usage/duration in a single payload.
@@ -253,6 +282,21 @@ pub(crate) fn parse_ask_user_questions(input: &serde_json::Value) -> Vec<AskUser
         .collect()
 }
 
+/// Extract the plan text out of an `ExitPlanMode` tool input (`{"plan": "…"}`).
+///
+/// Returns `None` when the field is absent, non-string, or blank — the caller
+/// (`ClaudeSession::answer_plan_approval`) falls back to an empty plan rather
+/// than failing the whole request, since a malformed plan is still worth
+/// surfacing to the user (better an empty card than a silent deny with no
+/// explanation).
+pub(crate) fn parse_exit_plan(input: &serde_json::Value) -> Option<String> {
+    let plan = input.get("plan")?.as_str()?.trim();
+    if plan.is_empty() {
+        return None;
+    }
+    Some(plan.to_string())
+}
+
 // ── NDJSON stream event types (internal) ───────────────────────────────────
 //
 // The `--output-format stream-json` flag produces one JSON object per line.
@@ -320,6 +364,34 @@ pub(crate) enum StreamEvent {
         /// ignores the rest (permission_suggestions, display_name, …).
         request: ControlRequestBody,
     },
+
+    /// A `control_response` line — claude's reply to a `control_request`
+    /// **we** sent. Only `set_permission_mode` currently reads this back
+    /// (`ClaudeSession::write_set_permission_mode`); the `interrupt` subtype
+    /// we also send has no reply and is fire-and-forget. Modeled so a
+    /// CLI-side rejection (the installed CLI has explicit reject paths for
+    /// `set_permission_mode`, e.g. "onSetPermissionMode callback not
+    /// registered") surfaces as an error instead of being silently assumed
+    /// to have succeeded once the request_id write itself didn't error.
+    #[serde(rename = "control_response")]
+    ControlResponse { response: ControlResponseBody },
+}
+
+/// The body of a `control_response` line — the inner `response` object.
+///
+/// Wire shape: `{"subtype":"success","request_id":"…"}` on success, or
+/// `{"subtype":"error","request_id":"…","error":"…"}` on rejection. Lenient
+/// on missing fields (defaults to empty/`None`) so a shape we don't fully
+/// recognize still deserializes rather than being silently dropped as an
+/// unparseable line.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlResponseBody {
+    #[serde(default)]
+    pub(crate) subtype: String,
+    #[serde(default)]
+    pub(crate) request_id: String,
+    #[serde(default)]
+    pub(crate) error: Option<String>,
 }
 
 /// The body of a `control_request`. Only the `permission`/`can_use_tool`
@@ -824,6 +896,13 @@ impl ResponseAccumulator {
             // never carry assistant content and are never terminal, so this arm
             // is a no-op that exists to keep the match exhaustive.
             StreamEvent::ControlRequest { .. } => false,
+            // A `control_response` line — the reply to a `control_request` we
+            // sent. `write_set_permission_mode` consumes these directly via
+            // its own dedicated read, ahead of the accumulator ever seeing
+            // stream lines for a turn; this arm exists only to keep the match
+            // exhaustive (a response line seen here — e.g. a stray echo
+            // outside that dedicated wait — is harmless to ignore).
+            StreamEvent::ControlResponse { .. } => false,
             // A `type: "user"` tool-result line. We only act on the
             // task-bearing shape: extract the structured task via the shared
             // helper (same one the streaming path uses for the live event) and
@@ -1153,6 +1232,66 @@ mod tests {
         }
     }
 
+    // ── control protocol (control_response — claude's reply to OUR requests) ──
+
+    /// Regression guard for the "write succeeded ⇒ assume the mode switch
+    /// succeeded" gap: a `control_response` with `subtype: "success"` must
+    /// parse into `StreamEvent::ControlResponse` with the matching
+    /// `request_id`, so `write_set_permission_mode` can confirm it against
+    /// the request it just sent.
+    #[test]
+    fn test_parse_control_response_success() {
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"set-mode-abc"}}"#;
+        let event = parse_stream_line(line).expect("control_response must parse");
+        match event {
+            StreamEvent::ControlResponse { response } => {
+                assert_eq!(response.subtype, "success");
+                assert_eq!(response.request_id, "set-mode-abc");
+                assert!(response.error.is_none());
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
+        }
+    }
+
+    /// The installed CLI has explicit `set_permission_mode` rejection paths
+    /// (e.g. "onSetPermissionMode callback not registered") that reply with
+    /// `subtype: "error"` + a human-readable `error` string — this must
+    /// parse so `write_set_permission_mode` can surface the real reason
+    /// instead of assuming success.
+    #[test]
+    fn test_parse_control_response_error_carries_reason() {
+        let line = r#"{"type":"control_response","response":{"subtype":"error","request_id":"set-mode-xyz","error":"onSetPermissionMode callback not registered"}}"#;
+        let event = parse_stream_line(line).expect("control_response must parse");
+        match event {
+            StreamEvent::ControlResponse { response } => {
+                assert_eq!(response.subtype, "error");
+                assert_eq!(response.request_id, "set-mode-xyz");
+                assert_eq!(
+                    response.error.as_deref(),
+                    Some("onSetPermissionMode callback not registered")
+                );
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
+        }
+    }
+
+    /// A minimal/malformed control_response (missing fields) must still
+    /// parse — lenient defaults so an unrecognized shape can't panic the
+    /// read loop, mirroring `test_parse_control_request_lenient_on_missing_fields`.
+    #[test]
+    fn test_parse_control_response_lenient_on_missing_fields() {
+        let line = r#"{"type":"control_response","response":{}}"#;
+        let event = parse_stream_line(line).expect("control_response must parse");
+        match event {
+            StreamEvent::ControlResponse { response } => {
+                assert_eq!(response.subtype, "");
+                assert_eq!(response.request_id, "");
+                assert!(response.error.is_none());
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_control_response_allow_shape_matches_protocol() {
         // The exact wire shape Claude expects (PRD "Sample → Response").
@@ -1274,6 +1413,31 @@ mod tests {
         let specs = parse_ask_user_questions(&mixed);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].question, "ok");
+    }
+
+    // ── ExitPlanMode parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_exit_plan_extracts_plan_text() {
+        let input = serde_json::json!({ "plan": "1. Read the file\n2. Edit it" });
+        assert_eq!(
+            parse_exit_plan(&input).as_deref(),
+            Some("1. Read the file\n2. Edit it")
+        );
+    }
+
+    #[test]
+    fn test_parse_exit_plan_trims_whitespace() {
+        let input = serde_json::json!({ "plan": "  do the thing  \n" });
+        assert_eq!(parse_exit_plan(&input).as_deref(), Some("do the thing"));
+    }
+
+    #[test]
+    fn test_parse_exit_plan_none_on_missing_or_blank() {
+        assert!(parse_exit_plan(&serde_json::json!({})).is_none());
+        assert!(parse_exit_plan(&serde_json::json!({"plan": ""})).is_none());
+        assert!(parse_exit_plan(&serde_json::json!({"plan": "   "})).is_none());
+        assert!(parse_exit_plan(&serde_json::json!({"plan": 42})).is_none());
     }
 
     // ── tool-result task parsing ───────────────────────────────────────
