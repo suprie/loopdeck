@@ -1,4 +1,4 @@
-//! Absolute, vetted resolution of subprocess binaries (`claude`, `git`).
+//! Absolute, vetted resolution of subprocess binaries (`claude`, `codex`, `git`).
 //!
 //! `Command::new("git")` / `Command::new("claude")` hand a bare name to the
 //! OS, which searches `$PATH` at spawn time. That has two weaknesses this
@@ -153,6 +153,18 @@ pub(crate) fn claude() -> Result<&'static Path, AppError> {
         }
         let resolved = resolve_command("claude")?;
         let _ = CLAUDE.set(resolved);
+    }
+}
+
+/// Cached resolution of the `codex` binary — see [`git`] for caching semantics.
+pub(crate) fn codex() -> Result<&'static Path, AppError> {
+    static CODEX: OnceLock<PathBuf> = OnceLock::new();
+    loop {
+        if let Some(p) = CODEX.get() {
+            return Ok(p.as_path());
+        }
+        let resolved = resolve_command("codex")?;
+        let _ = CODEX.set(resolved);
     }
 }
 

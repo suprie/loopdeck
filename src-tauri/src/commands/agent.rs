@@ -7,9 +7,10 @@ use super::state::{
     resolve_permission_policy, resolve_root, with_session, AppState,
 };
 use crate::agents::{AgentResponse, ClaudeEvent};
-use crate::claude_session::{ClaudeSession, ParkSlots, QuestionAnswers};
+use crate::claude_session::{ParkSlots, QuestionAnswers};
 use crate::conversation::{self, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
+use crate::harness::HarnessSession;
 use crate::limits;
 use crate::permission::Decision as PermissionDecision;
 use crate::retry;
@@ -1066,7 +1067,7 @@ fn next_unchecked_loop_step(path: &Path) -> Option<String> {
 /// attempt overloaded or the failure was non-transient — the caller decides
 /// whether to propagate that as an `Err`.
 async fn send_with_retry(
-    session: &mut ClaudeSession,
+    session: &mut HarnessSession,
     prompt: &str,
     slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
@@ -1124,7 +1125,7 @@ async fn send_with_retry(
 /// `Result{is_error:true}` followed, silently, by a second `Result`. The final
 /// `Result` event (success or terminal failure) remains authoritative.
 async fn send_streaming_with_retry(
-    session: &mut ClaudeSession,
+    session: &mut HarnessSession,
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
     slots: &ParkSlots<'_>,
@@ -1407,7 +1408,7 @@ async fn send_and_record_streaming(
 async fn spawn_fresh(
     state: &AppState,
     path: &Path,
-) -> Result<Arc<tokio::sync::Mutex<ClaudeSession>>, AppError> {
+) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
     // ── Phase 1: try_lock the existing arc to prove it's idle. ──
     // Scoped so the map's std Mutex guard is dropped before we await anything.
     {
@@ -1450,7 +1451,7 @@ async fn spawn_fresh(
     let agent_config = resolve_agent_config(state)?;
     let policy = resolve_permission_policy(state, path);
 
-    let session = ClaudeSession::spawn(&path.to_path_buf(), &agent_config, None, policy)?;
+    let session = HarnessSession::spawn(path, &agent_config, None, policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state
         .claude_sessions

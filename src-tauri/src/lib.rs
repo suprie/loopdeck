@@ -1,6 +1,7 @@
 mod agents;
 mod binary;
 mod claude_session;
+mod codex_session;
 mod commands;
 mod config;
 mod conversation;
@@ -9,6 +10,7 @@ mod error;
 mod execution;
 mod git;
 mod graphify;
+mod harness;
 mod limits;
 mod logging;
 mod memory;

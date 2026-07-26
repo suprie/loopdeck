@@ -20,14 +20,14 @@ import {
 } from "../../lib/tauri";
 import type { AgentConfig, LogInfo } from "../../types";
 
-const EFFORT_OPTIONS = [
+const CLAUDE_EFFORT_OPTIONS = [
   { value: "low", label: "Low — fastest, least thorough" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
   { value: "max", label: "Max — slowest, most thorough" },
 ] as const;
 
-const MODEL_PRESETS = [
+const CLAUDE_MODEL_PRESETS = [
   "claude-sonnet-4-6",
   "claude-opus-4-8",
   "claude-haiku-4-5",
@@ -35,6 +35,7 @@ const MODEL_PRESETS = [
 ] as const;
 
 const INITIAL_FORM: AgentConfig = {
+  harness: "claude",
   auth_token: "",
   base_url: "",
   model: "",
@@ -60,6 +61,7 @@ export function Settings() {
         const existing = await getAgentConfig();
         if (!cancelled && existing) {
           setForm({
+            harness: existing.harness ?? "claude",
             // Never pre-fill the plaintext token — it isn't returned over IPC.
             // The field stays empty; `hasToken` drives the "stored" affordance.
             auth_token: "",
@@ -96,6 +98,7 @@ export function Settings() {
       // omitted entirely so the backend preserves the existing stored token
       // rather than clearing it.
       const toSave: AgentConfig = {};
+      toSave.harness = form.harness ?? "claude";
       if (form.auth_token) toSave.auth_token = form.auth_token;
       if (form.base_url) toSave.base_url = form.base_url;
       if (form.model) toSave.model = form.model;
@@ -152,107 +155,173 @@ export function Settings() {
           </div>
 
           <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-sm)]">
-            {/* Auth Token */}
             <Field
-              label="Auth Token"
-              hint="Your API key, stored locally in an owner-only file — never written to the registry. Leave blank to keep the stored token; type a new value to replace it."
+              label="Agent Harness"
+              hint="Choose the local CLI LoopDeck uses for conversations, tools, approvals, and resume."
             >
-              <div className="relative">
-                <Input
-                  type={showKey ? "text" : "password"}
-                  value={form.auth_token ?? ""}
-                  onChange={(e) => handleChange("auth_token", e.target.value)}
-                  placeholder={
-                    hasToken ? "•••••••• (stored — type to replace)" : "sk-abc123..."
-                  }
-                  className="pr-9 font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey((s) => !s)}
-                  title={showKey ? "Hide token" : "Show token"}
-                  className="absolute right-2 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                </button>
-              </div>
-              {hasToken && !form.auth_token ? (
-                <div className="mt-2 flex items-center justify-between rounded-md border border-success/30 bg-success/5 px-2.5 py-1.5">
-                  <span className="inline-flex items-center gap-1.5 text-[11px] text-success">
-                    <Check className="size-3.5" /> Token stored locally
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleClearToken}
-                    disabled={clearing}
-                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
-                  >
-                    {clearing ? <Loader2 className="size-3 animate-spin" /> : null}
-                    Clear stored token
-                  </button>
-                </div>
-              ) : null}
+              <Select
+                value={form.harness ?? "claude"}
+                onValueChange={(v) => {
+                  setForm((previous) => ({
+                    ...previous,
+                    harness: v as "claude" | "codex",
+                    model: "",
+                    // Codex effort support is advertised per model. Do not
+                    // carry a Claude-specific override across providers.
+                    effort: v === "codex" ? "" : "high",
+                  }));
+                  setSaved(false);
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="claude">Claude Code</SelectItem>
+                  <SelectItem value="codex">Codex</SelectItem>
+                </SelectContent>
+              </Select>
             </Field>
 
-            {/* Base URL */}
-            <Field label="Base URL" hint="Provider endpoint. Leave blank for default Anthropic API.">
-              <Input
-                type="text"
-                value={form.base_url ?? ""}
-                onChange={(e) => handleChange("base_url", e.target.value)}
-                placeholder="https://api.anthropic.com"
-              />
-            </Field>
+            {form.harness === "codex" ? (
+              <div className="mb-5 rounded-md border border-border bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
+                Codex uses the account and provider settings from your installed Codex CLI.
+              </div>
+            ) : (
+              <>
+                {/* Auth Token */}
+                <Field
+                  label="Auth Token"
+                  hint="Your API key, stored locally in an owner-only file — never written to the registry. Leave blank to keep the stored token; type a new value to replace it."
+                >
+                  <div className="relative">
+                    <Input
+                      type={showKey ? "text" : "password"}
+                      value={form.auth_token ?? ""}
+                      onChange={(e) => handleChange("auth_token", e.target.value)}
+                      placeholder={
+                        hasToken ? "•••••••• (stored — type to replace)" : "sk-abc123..."
+                      }
+                      className="pr-9 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((s) => !s)}
+                      title={showKey ? "Hide token" : "Show token"}
+                      className="absolute right-2 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      {showKey ? (
+                        <EyeOff className="size-3.5" />
+                      ) : (
+                        <Eye className="size-3.5" />
+                      )}
+                    </button>
+                  </div>
+                  {hasToken && !form.auth_token ? (
+                    <div className="mt-2 flex items-center justify-between rounded-md border border-success/30 bg-success/5 px-2.5 py-1.5">
+                      <span className="inline-flex items-center gap-1.5 text-[11px] text-success">
+                        <Check className="size-3.5" /> Token stored locally
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleClearToken}
+                        disabled={clearing}
+                        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
+                      >
+                        {clearing ? <Loader2 className="size-3 animate-spin" /> : null}
+                        Clear stored token
+                      </button>
+                    </div>
+                  ) : null}
+                </Field>
+
+                {/* Base URL */}
+                <Field label="Base URL" hint="Provider endpoint. Leave blank for default Anthropic API.">
+                  <Input
+                    type="text"
+                    value={form.base_url ?? ""}
+                    onChange={(e) => handleChange("base_url", e.target.value)}
+                    placeholder="https://api.anthropic.com"
+                  />
+                </Field>
+              </>
+            )}
 
             {/* Model + Effort row */}
             <div className="grid grid-cols-2 gap-4">
-              <Field label="Model" hint="Model ID. Pick a preset or type your own.">
-                <Select
-                  value={form.model ?? ""}
-                  onValueChange={(v) => handleChange("model", v === "__custom__" ? "" : v)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select a model…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {MODEL_PRESETS.map((m) => (
-                      <SelectItem key={m} value={m}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                    <SelectItem value="__custom__">Custom (type below)</SelectItem>
-                  </SelectContent>
-                </Select>
-                {/* Free-text override when "Custom" is selected, or when the
-                    current value isn't one of the presets. */}
-                {(form.model ?? "") === "" ||
-                !MODEL_PRESETS.includes(form.model as (typeof MODEL_PRESETS)[number]) ? (
+              <Field
+                label="Model"
+                hint={
+                  form.harness === "codex"
+                    ? "Leave blank to use the Codex CLI default, or enter a model ID."
+                    : "Model ID. Pick a preset or type your own."
+                }
+              >
+                {form.harness !== "codex" ? (
+                  <Select
+                    value={form.model ?? ""}
+                    onValueChange={(v) => handleChange("model", v === "__custom__" ? "" : v)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select a model…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CLAUDE_MODEL_PRESETS.map((m) => (
+                        <SelectItem key={m} value={m}>
+                          {m}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="__custom__">Custom (type below)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                ) : null}
+                {form.harness === "codex" ||
+                (form.model ?? "") === "" ||
+                !CLAUDE_MODEL_PRESETS.some((model) => model === form.model) ? (
                   <Input
                     type="text"
                     value={form.model ?? ""}
                     onChange={(e) => handleChange("model", e.target.value)}
-                    placeholder="claude-sonnet-4-6"
-                    className="mt-2"
+                    placeholder={
+                      form.harness === "codex" ? "Use Codex default" : "claude-sonnet-4-6"
+                    }
+                    className={form.harness === "codex" ? "" : "mt-2"}
                   />
                 ) : null}
               </Field>
 
-              <Field label="Effort Level" hint="Higher effort = more thorough reasoning, slower responses.">
-                <Select
-                  value={form.effort ?? "high"}
-                  onValueChange={(v) => handleChange("effort", v)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {EFFORT_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <Field
+                label="Effort Level"
+                hint={
+                  form.harness === "codex"
+                    ? "Leave blank to use the model default. Supported values depend on the selected Codex model."
+                    : "Higher effort = more thorough reasoning, slower responses."
+                }
+              >
+                {form.harness === "codex" ? (
+                  <Input
+                    type="text"
+                    value={form.effort ?? ""}
+                    onChange={(e) => handleChange("effort", e.target.value)}
+                    placeholder="Use model default"
+                  />
+                ) : (
+                  <Select
+                    value={form.effort ?? "high"}
+                    onValueChange={(v) => handleChange("effort", v)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CLAUDE_EFFORT_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </Field>
             </div>
           </div>

@@ -6,8 +6,22 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 
 // ── Public response types ──────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentHarness {
+    #[default]
+    Claude,
+    Codex,
+}
+
+fn is_default_harness(harness: &AgentHarness) -> bool {
+    *harness == AgentHarness::Claude
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "is_default_harness")]
+    pub harness: AgentHarness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +47,7 @@ pub struct AgentConfig {
 impl std::fmt::Debug for AgentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentConfig")
+            .field("harness", &self.harness)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field(
@@ -761,9 +776,33 @@ projects:
     }
 
     #[test]
+    fn agent_config_defaults_legacy_files_to_claude_harness() {
+        let agent: AgentConfig = serde_yaml::from_str(
+            "model: claude-sonnet-4-6\n\
+             effort: high\n",
+        )
+        .unwrap();
+        assert_eq!(agent.harness, AgentHarness::Claude);
+    }
+
+    #[test]
+    fn agent_config_persists_codex_harness() {
+        let agent = AgentConfig {
+            harness: AgentHarness::Codex,
+            model: Some("gpt-test".into()),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&agent).unwrap();
+        assert!(yaml.contains("harness: codex"));
+        let decoded: AgentConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(decoded.harness, AgentHarness::Codex);
+    }
+
+    #[test]
     fn test_agent_config_serialize_skips_none() {
         // Only set model — other fields should be absent from YAML output
         let agent = AgentConfig {
+            harness: AgentHarness::Claude,
             auth_token: None,
             base_url: None,
             model: Some("claude-haiku-4-5".into()),
@@ -823,6 +862,7 @@ projects:
         // = "is_false"` it is omitted when false — and every save path leaves it
         // false. Verify a saved config carries no `has_auth_token` key.
         let agent = AgentConfig {
+            harness: AgentHarness::Claude,
             auth_token: None,
             base_url: Some("https://api.anthropic.com".into()),
             model: Some("claude-sonnet-4-5".into()),
@@ -843,6 +883,7 @@ projects:
         // On the IPC wire (serde_json) the flag CAN be true so the frontend
         // learns a token is stored. It deserializes back faithfully here.
         let agent = AgentConfig {
+            harness: AgentHarness::Claude,
             auth_token: None,
             base_url: None,
             model: Some("claude-sonnet-4-5".into()),
@@ -883,6 +924,7 @@ agent:
     fn migrate_noop_when_token_none() {
         let mut config = GlobalConfig {
             agent: Some(AgentConfig {
+                harness: AgentHarness::Claude,
                 auth_token: None,
                 base_url: Some("https://api.anthropic.com".into()),
                 model: Some("claude-sonnet-4-5".into()),
@@ -899,6 +941,7 @@ agent:
     fn migrate_noop_when_token_empty() {
         let mut config = GlobalConfig {
             agent: Some(AgentConfig {
+                harness: AgentHarness::Claude,
                 auth_token: Some(String::new()),
                 base_url: None,
                 model: None,
@@ -1061,6 +1104,7 @@ created_at: "2025-01-01T00:00:00Z"
         let mut config = GlobalConfig::load_from_path(&primary).unwrap();
         // Mutate + save.
         config.agent = Some(AgentConfig {
+            harness: AgentHarness::Claude,
             base_url: None,
             model: Some("new-model".into()),
             auth_token: None,
