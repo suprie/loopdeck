@@ -14,6 +14,9 @@ import {
   ShieldPlus,
   Repeat,
   RotateCw,
+  ListChecks,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
 import type {
   ConversationTurn,
@@ -23,6 +26,7 @@ import type {
   AskUserQuestionSpec,
   AskUserQuestionAnswers,
   ApprovalDecision,
+  PlanApprovalDecision,
 } from "../../types";
 import { Markdown } from "../shared/Markdown";
 import { FileMentionMenu, useFileMention } from "./FileMentionMenu";
@@ -149,6 +153,29 @@ export interface ChatProps {
    * again. Optional — when omitted, the button is hidden.
    */
   onAlwaysAllow?: (toolName: string, input: string) => void;
+  /**
+   * A pending `ExitPlanMode` request from the agent — when non-null, the
+   * plan-approval card is rendered above the composer (same pinned strip as
+   * the question/permission cards) and the composer is disabled. The agent
+   * turn is parked until the user Approves or Rejects the plan.
+   */
+  pendingPlan?: { plan: string } | null;
+  /**
+   * Called when the user clicks Approve / Reject on the plan card. The parent
+   * forwards the verdict to the backend, which writes the control_response —
+   * approve lets the agent start executing, reject (with optional feedback)
+   * keeps it in plan mode to revise.
+   */
+  onAnswerPlan?: (decision: PlanApprovalDecision) => void;
+  /**
+   * Whether the NEXT message sent from the composer should run under the
+   * CLI's `plan` permission mode (mirrors Claude Code's shift-tab toggle).
+   * Omitted entirely (rather than defaulting) hides the toggle button — a
+   * parent that doesn't wire plan mode gets the pre-existing composer as-is.
+   */
+  planMode?: boolean;
+  /** Called when the user clicks the Plan-mode toggle button. */
+  onTogglePlanMode?: () => void;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -916,6 +943,82 @@ export function PermissionApprovalCard({
 }
 
 /**
+ * The plan-approval card — pinned above the composer when the agent has
+ * finished planning (`ExitPlanMode`) and is waiting for the human to review
+ * before it starts executing.
+ *
+ * Structurally mirrors `PermissionApprovalCard` (pending strip, optional
+ * feedback-on-reject textarea, action row) but renders the plan as markdown
+ * rather than a raw tool-input summary, and uses Approve/Reject language
+ * instead of Allow/Deny to match the mental model (this is a go/no-go on a
+ * multi-step plan, not a single tool call).
+ */
+export function PlanApprovalCard({
+  plan,
+  disabled,
+  onDecide,
+}: {
+  plan: string;
+  disabled?: boolean;
+  onDecide: (decision: PlanApprovalDecision) => void;
+}) {
+  const [feedback, setFeedback] = useState("");
+
+  return (
+    <div className="my-2 rounded-lg border border-primary/30 bg-[color-mix(in_oklab,var(--primary)_5%,transparent)] p-3 space-y-3">
+      <div className="flex items-center gap-2 text-xs font-medium text-primary">
+        <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
+        <span>The agent has a plan ready for review</span>
+      </div>
+
+      <div className="rounded-md border border-border bg-input/60 px-3 py-2 max-h-64 overflow-y-auto text-sm">
+        <Markdown>{plan}</Markdown>
+      </div>
+
+      <details className="text-xs text-muted-foreground">
+        <summary className="cursor-pointer hover:text-foreground transition-colors select-none">
+          Add feedback (optional, reject only)
+        </summary>
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          disabled={disabled}
+          rows={2}
+          placeholder="What should the agent change? (shown to the agent)"
+          className="mt-2 w-full resize-none rounded-md border border-border bg-input px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+        />
+      </details>
+
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() =>
+            onDecide({
+              approve: false,
+              feedback: feedback.trim() || undefined,
+            })
+          }
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-[color-mix(in_oklab,var(--destructive)_40%,transparent)] text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_10%,transparent)] transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <XCircle className="size-3.5" />
+          Reject
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onDecide({ approve: true })}
+          className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <CheckCircle2 className="size-3.5" />
+          Approve & execute
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Streaming-aware chat UI component.
  *
  * Renders a conversation transcript with:
@@ -952,6 +1055,10 @@ export function Chat({
   pendingPermission,
   onAnswerPermission,
   onAlwaysAllow,
+  pendingPlan,
+  onAnswerPlan,
+  planMode,
+  onTogglePlanMode,
 }: ChatProps) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -973,7 +1080,7 @@ export function Chat({
     // Disable while parked on an approval/question, busy, read-only, etc. —
     // mirrors the composer's own `composerDisabled` gate below.
     disabled:
-      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission,
+      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission || !!pendingPlan,
   });
 
   // ── `/`-skill discovery ──
@@ -988,7 +1095,7 @@ export function Chat({
     setDraft,
     setCaret,
     disabled:
-      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission,
+      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission || !!pendingPlan,
   });
 
   // Whether auto-scroll is armed — i.e. the user is parked at the bottom and
@@ -1046,13 +1153,19 @@ export function Chat({
     onSend(text);
   }
 
-  // Whether either parking affordance is active — the composer is disabled
+  // Whether any parking affordance is active — the composer is disabled
   // while the agent waits on the user (not free-form input).
   const hasPendingQuestion =
     pendingQuestion != null && pendingQuestion.length > 0;
   const hasPendingPermission = pendingPermission != null;
+  const hasPendingPlan = pendingPlan != null;
   const composerDisabled =
-    disabled || busy || readOnly || hasPendingQuestion || hasPendingPermission;
+    disabled ||
+    busy ||
+    readOnly ||
+    hasPendingQuestion ||
+    hasPendingPermission ||
+    hasPendingPlan;
 
   const isEmpty = turns.length === 0 && !isStreaming && !busy;
 
@@ -1220,7 +1333,7 @@ export function Chat({
           (shrink-0, max-h with internal overflow only when a card is huge) so
           the card stays anchored at the bottom of the visible area, right
           above the composer where the user's attention already is. */}
-      {(hasPendingQuestion || hasPendingPermission) && (
+      {(hasPendingQuestion || hasPendingPermission || hasPendingPlan) && (
         <div className="shrink-0 pt-2">
           {hasPendingQuestion && onAnswerQuestion && (
             <div className="max-h-[45vh] overflow-y-auto">
@@ -1246,6 +1359,13 @@ export function Chat({
                       )
                   : undefined
               }
+            />
+          )}
+          {hasPendingPlan && pendingPlan && onAnswerPlan && (
+            <PlanApprovalCard
+              plan={pendingPlan.plan}
+              disabled={disabled}
+              onDecide={onAnswerPlan}
             />
           )}
         </div>
@@ -1287,6 +1407,25 @@ export function Chat({
               onHover={skills.setSelectedIndex}
               onPick={skills.pick}
             />
+            {onTogglePlanMode && (
+              <button
+                type="button"
+                onClick={onTogglePlanMode}
+                disabled={composerDisabled}
+                title={
+                  planMode
+                    ? "Plan mode is ON — the next message runs read-only until you approve the agent's plan. Click to turn off."
+                    : "Plan mode — have the agent propose a plan and wait for your approval before it edits anything."
+                }
+                className={`inline-flex items-center justify-center size-9 shrink-0 rounded-md border transition disabled:opacity-50 disabled:cursor-not-allowed ${
+                  planMode
+                    ? "bg-primary/15 border-primary/40 text-primary"
+                    : "bg-muted border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
+              >
+                <ListChecks className="size-4" />
+              </button>
+            )}
             <textarea
               ref={inputRef}
               value={draft}
@@ -1312,9 +1451,11 @@ export function Chat({
                 }
               }}
               placeholder={
-                turns.length === 0
-                  ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
-                  : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
+                planMode
+                  ? "Describe what you want planned… (the agent will propose a plan for your approval before editing anything)"
+                  : turns.length === 0
+                    ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
+                    : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
               }
               rows={2}
               disabled={composerDisabled}

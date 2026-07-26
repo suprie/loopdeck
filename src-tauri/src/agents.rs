@@ -168,6 +168,35 @@ pub enum ClaudeEvent {
         /// The questions to surface, in order.
         questions: Vec<AskUserQuestionSpec>,
     },
+    /// An `ExitPlanMode` tool call — Claude finished planning (while running
+    /// under the CLI's `plan` permission mode, entered via
+    /// `ClaudeSession::send_message_streaming`'s `plan_mode` flag) and wants to
+    /// leave plan mode to start executing. Mirrors `PermissionRequest`'s
+    /// pending/resolved shape rather than `AskUserQuestion`'s: there's no
+    /// structured answer to feed back, just an allow/deny verdict, identical to
+    /// a manual tool approval.
+    ///
+    /// **Four states for `decision`**, matching `PermissionRequest`:
+    /// - `"pending"` — parked, awaiting the human's Approve/Reject via
+    ///   `agent_answer_plan`. Emitted BEFORE the `control_response` is written.
+    /// - `"allow"` — the human approved; the CLI's own `ExitPlanMode` handler
+    ///   reverts the process out of plan mode.
+    /// - `"deny"` — the human rejected (with optional feedback in `reason`);
+    ///   the model stays in plan mode and is expected to revise and call
+    ///   `ExitPlanMode` again.
+    /// - `"auto-allow"` — an autonomous-mode project skipped the human review
+    ///   entirely (same posture as `PermissionRequest`'s autonomous auto-allow).
+    PlanApproval {
+        request_id: String,
+        /// The plan text Claude wrote, as passed to `ExitPlanMode`'s `plan`
+        /// input field (markdown). Empty if the call was malformed.
+        plan: String,
+        /// `"pending"`, `"allow"`, `"deny"`, or `"auto-allow"`.
+        decision: String,
+        /// The human's feedback on a deny, surfaced to the model so it can
+        /// revise the plan. Empty otherwise.
+        reason: String,
+    },
     /// The terminal event signalling the turn is complete. Carries the full
     /// aggregated `AgentResponse` so the UI can reconcile its streamed deltas
     /// and display usage/duration in a single payload.
@@ -251,6 +280,21 @@ pub(crate) fn parse_ask_user_questions(input: &serde_json::Value) -> Vec<AskUser
     arr.iter()
         .filter_map(|q| serde_json::from_value::<AskUserQuestionSpec>(q.clone()).ok())
         .collect()
+}
+
+/// Extract the plan text out of an `ExitPlanMode` tool input (`{"plan": "…"}`).
+///
+/// Returns `None` when the field is absent, non-string, or blank — the caller
+/// (`ClaudeSession::answer_plan_approval`) falls back to an empty plan rather
+/// than failing the whole request, since a malformed plan is still worth
+/// surfacing to the user (better an empty card than a silent deny with no
+/// explanation).
+pub(crate) fn parse_exit_plan(input: &serde_json::Value) -> Option<String> {
+    let plan = input.get("plan")?.as_str()?.trim();
+    if plan.is_empty() {
+        return None;
+    }
+    Some(plan.to_string())
 }
 
 // ── NDJSON stream event types (internal) ───────────────────────────────────
@@ -1274,6 +1318,31 @@ mod tests {
         let specs = parse_ask_user_questions(&mixed);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].question, "ok");
+    }
+
+    // ── ExitPlanMode parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_exit_plan_extracts_plan_text() {
+        let input = serde_json::json!({ "plan": "1. Read the file\n2. Edit it" });
+        assert_eq!(
+            parse_exit_plan(&input).as_deref(),
+            Some("1. Read the file\n2. Edit it")
+        );
+    }
+
+    #[test]
+    fn test_parse_exit_plan_trims_whitespace() {
+        let input = serde_json::json!({ "plan": "  do the thing  \n" });
+        assert_eq!(parse_exit_plan(&input).as_deref(), Some("do the thing"));
+    }
+
+    #[test]
+    fn test_parse_exit_plan_none_on_missing_or_blank() {
+        assert!(parse_exit_plan(&serde_json::json!({})).is_none());
+        assert!(parse_exit_plan(&serde_json::json!({"plan": ""})).is_none());
+        assert!(parse_exit_plan(&serde_json::json!({"plan": "   "})).is_none());
+        assert!(parse_exit_plan(&serde_json::json!({"plan": 42})).is_none());
     }
 
     // ── tool-result task parsing ───────────────────────────────────────

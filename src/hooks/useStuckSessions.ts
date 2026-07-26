@@ -17,23 +17,26 @@ import { usePendingInteractions } from "../store/pendingInteractions";
 const STUCK_TOAST_DURATION = Infinity;
 
 /**
- * Reconcile "stuck" parked prompts across the whole registry — both
- * `AskUserQuestion` prompts AND manual tool approvals.
+ * Reconcile "stuck" parked prompts across the whole registry —
+ * `AskUserQuestion` prompts, manual tool approvals, AND plan approvals
+ * (`ExitPlanMode`).
  *
  * A LoopDeck-spawned agent parks one oneshot per pending prompt in
- * `AppState.pending_answers` / `AppState.pending_permissions`; the per-project
- * cards (`AgentPanel`) only reconcile their own project's slot when its tab
- * mounts. So if the user is on another view — or the Mac was locked / focus
- * moved away when the prompt arrived — the card never renders and the agent
- * freezes silently. For approvals that meant a 10-minute auto-deny on
- * `PARKED_SLOT_TIMEOUT`, surfacing as a generic "Interrupted" bubble the user
- * couldn't explain (the recurring bug this hook was extended to close).
+ * `AppState.pending_answers` / `AppState.pending_permissions` /
+ * `AppState.pending_plans`; the per-project cards (`AgentPanel`) only
+ * reconcile their own project's slot when its tab mounts. So if the user is
+ * on another view — or the Mac was locked / focus moved away when the prompt
+ * arrived — the card never renders and the agent freezes silently. For
+ * approvals that meant a 10-minute auto-deny on `PARKED_SLOT_TIMEOUT`,
+ * surfacing as a generic "Interrupted" bubble the user couldn't explain (the
+ * recurring bug this hook was extended to close).
  *
  * This hook closes that gap. `reconcileStuckSessions` pulls every pending
- * prompt of BOTH kinds from the backend (`listPendingQuestions` +
- * `listPendingPermissions`), writes them into the navigation-stable
- * `usePendingInteractions` store (replacing the whole map so resolved prompts
- * are dropped), and fires **one** toast per prompt that is newly-detected
+ * prompt of all three kinds from the backend (`listPendingQuestions` +
+ * `listPendingPermissions` + `listPendingPlans`), writes them into the
+ * navigation-stable `usePendingInteractions` store (replacing the whole map
+ * so resolved prompts are dropped), and fires **one** toast per prompt that
+ * is newly-detected
  * since the last reconcile — not on every focus.
  *
  * Uses the exported `router` instance (not `useNavigate`) so it works from
@@ -49,15 +52,19 @@ export function useStuckSessions() {
    * transient backend hiccup never breaks the focus listener.
    */
   const reconcileStuckSessions = useCallback(async () => {
-    // Fetch both kinds in parallel — they're independent backend reads. A
-    // failure of either is swallowed so the other still reconciles.
-    const [questions, permissions] = await Promise.all([
+    // Fetch all three kinds in parallel — they're independent backend reads. A
+    // failure of any is swallowed so the others still reconcile.
+    const [questions, permissions, plans] = await Promise.all([
       api.listPendingQuestions().catch((err) => {
         console.warn("listPendingQuestions failed", err);
         return [];
       }),
       api.listPendingPermissions().catch((err) => {
         console.warn("listPendingPermissions failed", err);
+        return [];
+      }),
+      api.listPendingPlans().catch((err) => {
+        console.warn("listPendingPlans failed", err);
         return [];
       }),
     ]);
@@ -106,6 +113,18 @@ export function useStuckSessions() {
         description: inputSnippet ? `${tool}: ${inputSnippet}` : tool,
         duration: STUCK_TOAST_DURATION,
         action: { label: "Approve", onClick: () => goTo(path) },
+      });
+    }
+
+    // ── Plan approvals ──
+    const newlyStuckPlans = usePendingInteractions.getState().reconcilePlans(plans);
+    for (const path of newlyStuckPlans) {
+      const entry = plans.find((e) => e.path === path);
+      const planSnippet = (entry?.plan ?? "").trim().slice(0, 120);
+      toast.warning(`Agent in ${nameFor(path)} has a plan ready for review`, {
+        description: planSnippet || undefined,
+        duration: STUCK_TOAST_DURATION,
+        action: { label: "Review", onClick: () => goTo(path) },
       });
     }
   }, []);

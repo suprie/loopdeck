@@ -1,7 +1,7 @@
 use crate::agents::{
-    apply_agent_config, parse_ask_user_questions, parse_stream_line, AgentResponse,
-    AskUserQuestionSpec, ClaudeEvent, ContentBlock, ControlRequestBody, ControlResponsePayload,
-    ResponseAccumulator, StreamEvent,
+    apply_agent_config, parse_ask_user_questions, parse_exit_plan, parse_stream_line,
+    AgentResponse, AskUserQuestionSpec, ClaudeEvent, ContentBlock, ControlRequestBody,
+    ControlResponsePayload, ResponseAccumulator, StreamEvent,
 };
 use crate::config::AgentConfig;
 use crate::error::AppError;
@@ -67,6 +67,13 @@ const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// question can be surfaced to the human instead of auto-allowed with empty
 /// answers.
 const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// The tool name Claude uses to leave `plan` permission mode once it has
+/// finished planning. Intercepted with the same precedence as
+/// `ASK_USER_QUESTION_TOOL` — before the destructive floor / manual-approval /
+/// auto-policy arms — since it's neither a mutating tool call nor a floor
+/// candidate, just a request for the human to review the plan.
+const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
 
 /// Outcome of racing a stdout read against an interrupt in the streaming loop.
 ///
@@ -319,6 +326,40 @@ pub struct PendingPermission {
 /// Shared wrapper around `Option<PendingPermission>`. See `PendingPermission`.
 pub type PermissionSlot = Arc<StdMutex<Option<PendingPermission>>>;
 
+/// A pending `ExitPlanMode` request parked in the read loop, awaiting the
+/// user's Approve / Reject verdict. The plan-approval counterpart of
+/// `PendingPermission` — kept as its own slot (rather than reusing
+/// `PermissionSlot`) so a plan approval and an unrelated tool approval can
+/// never collide, even though both carry the same `Decision` payload.
+///
+/// Carries the oneshot `Sender` (which `agent_answer_plan` pops to deliver the
+/// verdict) AND the request payload (`request_id`, `plan`) so a
+/// freshly-mounted frontend can reconcile the card via `agent_pending_plan`
+/// after navigation.
+pub struct PendingPlan {
+    /// Correlates the verdict with the originating control_request.
+    pub request_id: String,
+    /// The plan text Claude wrote, as passed to `ExitPlanMode`.
+    pub plan: String,
+    /// Resolves the parked turn. `None` after `agent_answer_plan` consumed it.
+    pub sender: Option<oneshot::Sender<Decision>>,
+}
+
+/// Shared wrapper around `Option<PendingPlan>`. See `PendingPlan`.
+pub type PlanSlot = Arc<StdMutex<Option<PendingPlan>>>;
+
+/// The three per-project "answer this control_request" oneshot slots that
+/// `answer_control_request` may park a turn on, bundled into one struct so it
+/// and `send_message[_streaming]` don't each carry three separate slot
+/// parameters (clippy's `too_many_arguments`). Distinct from `InterruptSlot`,
+/// which serves an unrelated purpose (the Stop button) and is threaded
+/// separately.
+pub struct ParkSlots<'a> {
+    pub question: &'a QuestionSlot,
+    pub permission: &'a PermissionSlot,
+    pub plan: &'a PlanSlot,
+}
+
 /// Shared, single-slot bridge between the read loop and the
 /// `agent_interrupt` IPC command.
 ///
@@ -357,6 +398,13 @@ pub struct ClaudeSession {
     // (see `permission.rs`) — the decision is written back to stdin as a
     // `control_response` and surfaced via `ClaudeEvent::PermissionRequest`.
     policy: PermissionPolicy,
+    // Whether we last told the live process to run in `plan` permission mode
+    // (via a `set_permission_mode` control_request — see
+    // `ensure_permission_mode`). Tracked here, not just inferred from the
+    // per-call `plan_mode` flag, so a turn that leaves plan mode without ever
+    // approving `ExitPlanMode` (Stop, error, or the model just answering
+    // directly) is still defensively reset to `default` on the next send.
+    plan_mode_active: bool,
 }
 
 impl ClaudeSession {
@@ -491,6 +539,7 @@ impl ClaudeSession {
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
             policy,
+            plan_mode_active: false,
         })
     }
 
@@ -504,8 +553,13 @@ impl ClaudeSession {
     /// therefore inherently race-free: there is never more than one outstanding
     /// request at a time, so no queue or request map is needed (PRD R3/R4).
     ///
-    /// **Three arms, evaluated in order:**
-    /// 1. `AskUserQuestion` is intercepted first. The read loop parks on
+    /// **Five arms, evaluated in order:**
+    /// 0. `ExitPlanMode` is intercepted first — Claude wants to leave `plan`
+    ///    permission mode. The read loop parks on `plan_slot`'s oneshot
+    ///    receiver until the frontend resolves it via `agent_answer_plan`,
+    ///    then writes a plain `allow`/`deny` (no `updatedInput`). Autonomous
+    ///    projects skip the park (see `answer_plan_approval`).
+    /// 1. `AskUserQuestion` is intercepted next. The read loop parks on
     ///    `question_slot`'s oneshot receiver until the frontend resolves it via
     ///    `agent_answer_question`, then writes back an `allow` with
     ///    `updatedInput` carrying the user's answers.
@@ -522,8 +576,8 @@ impl ClaudeSession {
     /// `channel` is `Some` only on the streaming path, where each decision is
     /// also surfaced to the UI as a `ClaudeEvent` (PermissionRequest for
     /// permissions — `decision: "pending"` while parked, then the resolved
-    /// allow/deny; AskUserQuestion for questions). The non-streaming path
-    /// logs the decision only.
+    /// allow/deny; AskUserQuestion for questions; PlanApproval for
+    /// ExitPlanMode). The non-streaming path logs the decision only.
     ///
     /// Every permission decision is logged at `info` (tool, input, behavior,
     /// reason) per PRD R6 — both for debugging and so the demo can narrate it.
@@ -532,10 +586,19 @@ impl ClaudeSession {
         request_id: &str,
         request: &ControlRequestBody,
         channel: Option<&Channel<ClaudeEvent>>,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         turn_deadline: tokio::time::Instant,
     ) -> Result<(), AppError> {
+        // ── Arm 0: ExitPlanMode — surface the plan for human approval. ──
+        // Checked first, same precedence rationale as AskUserQuestion below:
+        // it's neither a mutating tool nor a floor candidate, just a request
+        // to leave plan mode.
+        if request.tool_name == EXIT_PLAN_MODE_TOOL {
+            return self
+                .answer_plan_approval(request_id, request, channel, slots.plan, turn_deadline)
+                .await;
+        }
+
         // ── Arm 1: AskUserQuestion — defer to the human via its dedicated path. ──
         if request.tool_name == ASK_USER_QUESTION_TOOL {
             return self
@@ -543,7 +606,7 @@ impl ClaudeSession {
                     request_id,
                     request,
                     channel,
-                    question_slot,
+                    slots.question,
                     turn_deadline,
                 )
                 .await;
@@ -578,7 +641,7 @@ impl ClaudeSession {
                     request,
                     &input_str,
                     channel,
-                    permission_slot,
+                    slots.permission,
                     turn_deadline,
                 )
                 .await;
@@ -635,6 +698,138 @@ impl ClaudeSession {
                 } else {
                     decision.behavior().to_string()
                 },
+                reason: decision.reason().to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Handle an `ExitPlanMode` control request by parking the read loop until
+    /// the user approves or rejects the plan via `agent_answer_plan`.
+    ///
+    /// Mirrors `answer_manual_permission`'s park-then-write shape (same
+    /// `Decision` payload, plain allow/deny — no `updatedInput`), but keyed on
+    /// the dedicated `plan_slot` so a plan approval can never collide with an
+    /// unrelated tool approval, and with its own autonomous short-circuit.
+    ///
+    /// **Autonomous projects skip the park.** The entire point of autonomous
+    /// mode is unattended operation (see `PermissionPolicy::is_autonomous`);
+    /// stopping for a plan review would just reintroduce the manual gate that
+    /// mode exists to remove. The plan is still narrated via
+    /// `ClaudeEvent::PlanApproval { decision: "auto-allow" }` so the morning
+    /// review can see what the agent decided to do.
+    ///
+    /// On `Decision::Allow`, the CLI's own `ExitPlanMode` handler reverts the
+    /// process's permission mode back to whatever preceded `plan` — we only
+    /// need to clear `plan_mode_active` so `ensure_permission_mode` doesn't
+    /// defensively re-send a mode that already reverted. On `Decision::Deny`,
+    /// the model is expected to revise the plan and call `ExitPlanMode` again
+    /// within the same turn — since the slot is single-use (overwritten on
+    /// each call), that second call parks here again exactly like the first.
+    ///
+    /// On the non-streaming path (no channel) there's no UI surface to answer
+    /// from, so we reclaim the sender and deny instead of parking forever —
+    /// same stance as `answer_ask_user_question` / `answer_manual_permission`.
+    async fn answer_plan_approval(
+        &mut self,
+        request_id: &str,
+        request: &ControlRequestBody,
+        channel: Option<&Channel<ClaudeEvent>>,
+        plan_slot: &PlanSlot,
+        turn_deadline: tokio::time::Instant,
+    ) -> Result<(), AppError> {
+        let plan = parse_exit_plan(&request.input).unwrap_or_default();
+
+        if self.policy.is_autonomous() {
+            self.plan_mode_active = false;
+            tracing::info!(
+                request_id = %request_id,
+                "ExitPlanMode auto-allowed (autonomous mode)",
+            );
+            self.write_allow(request_id).await?;
+            if let Some(channel) = channel {
+                let _ = channel.send(ClaudeEvent::PlanApproval {
+                    request_id: request_id.to_string(),
+                    plan,
+                    decision: String::from("auto-allow"),
+                    reason: String::new(),
+                });
+            }
+            return Ok(());
+        }
+
+        // Surface the pending plan to the UI BEFORE parking, mirroring the
+        // manual-approval arm's "pending" narration.
+        if let Some(channel) = channel {
+            let _ = channel.send(ClaudeEvent::PlanApproval {
+                request_id: request_id.to_string(),
+                plan: plan.clone(),
+                decision: String::from("pending"),
+                reason: String::new(),
+            });
+        }
+
+        let (tx, rx) = oneshot::channel::<Decision>();
+        {
+            let mut guard = plan_slot.lock().map_err(|_| AppError::LockError)?;
+            *guard = Some(PendingPlan {
+                request_id: request_id.to_string(),
+                plan: plan.clone(),
+                sender: Some(tx),
+            });
+        }
+
+        tracing::info!(
+            request_id = %request_id,
+            "ExitPlanMode received — parking for user approval",
+        );
+
+        if channel.is_none() {
+            let _ = plan_slot.lock().ok().and_then(|mut g| g.take());
+            tracing::warn!("ExitPlanMode on non-streaming path — no way to surface; denying");
+            return self
+                .write_deny(request_id, "plan approval is not supported on this path")
+                .await;
+        }
+
+        // Park until the user decides, bounded by the absolute turn deadline —
+        // same backstop and rationale as the question/permission arms.
+        let decision = match park_until(turn_deadline, rx).await {
+            ParkOutcome::Answered(d) => d,
+            ParkOutcome::Cancelled => {
+                return Err(AppError::Agent(
+                    "plan approval cancelled — answer channel closed".into(),
+                ));
+            }
+            ParkOutcome::Expired => {
+                self.write_interrupt_control_request().await;
+                return Err(turn_deadline_expired_error());
+            }
+        };
+
+        tracing::info!(
+            request_id = %request_id,
+            behavior = decision.behavior(),
+            reason = decision.reason(),
+            "plan approval decided",
+        );
+
+        match &decision {
+            Decision::Allow => {
+                self.plan_mode_active = false;
+                self.write_allow(request_id).await?;
+            }
+            Decision::Deny(reason) => {
+                self.write_deny(request_id, reason).await?;
+            }
+        }
+
+        if let Some(channel) = channel {
+            let _ = channel.send(ClaudeEvent::PlanApproval {
+                request_id: request_id.to_string(),
+                plan,
+                decision: decision.behavior().to_string(),
                 reason: decision.reason().to_string(),
             });
         }
@@ -1002,6 +1197,29 @@ impl ClaudeSession {
         Ok(())
     }
 
+    /// Write a plain allow control_response to stdin. Factored out for the
+    /// plan-approval arm, which (unlike the question/permission arms) never
+    /// needs `updatedInput` — mirrors `write_deny`.
+    async fn write_allow(&mut self, request_id: &str) -> Result<(), AppError> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
+        let payload = ControlResponsePayload::allow(request_id);
+        let mut line = payload.to_json().to_string();
+        line.push('\n');
+        tracing::debug!(target: "loopdeck::claude_wire", "→ control_response: {}", line.trim());
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| AppError::Agent(format!("control_response write failed: {}", e)))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| AppError::Agent(format!("control_response flush failed: {}", e)))?;
+        Ok(())
+    }
+
     /// Write a graceful `interrupt` control_request to the live process.
     ///
     /// Called from the streaming read loop when it observes the interrupt
@@ -1036,6 +1254,63 @@ impl ClaudeSession {
         }
     }
 
+    /// Enter or leave the CLI's `plan` permission mode for the upcoming turn.
+    ///
+    /// `plan_mode` mirrors Claude Code's own shift-tab toggle: when true, the
+    /// CLI restricts the model to read-only tools plus `ExitPlanMode` (which
+    /// `answer_plan_approval` intercepts) for the duration of plan mode —
+    /// entirely client-enforced, not something LoopDeck's permission layer has
+    /// to police.
+    ///
+    /// Tracks the last mode we asked for in `plan_mode_active` so this is a
+    /// no-op when nothing changed, and — importantly — so a turn that leaves
+    /// plan mode without ever calling `ExitPlanMode` (Stop, an error, or the
+    /// model just answering directly without proposing anything) is
+    /// defensively reset to `default` the next time a normal (non-plan) send
+    /// goes out. Without this, a stuck `plan_mode_active` would silently keep
+    /// every later turn read-only-restricted with no visible cause. An
+    /// approved `ExitPlanMode` clears the flag itself (the CLI reverts
+    /// internally), so the common path never re-sends here.
+    async fn ensure_permission_mode(&mut self, plan_mode: bool) {
+        if plan_mode == self.plan_mode_active {
+            return;
+        }
+        self.write_set_permission_mode(if plan_mode { "plan" } else { "default" })
+            .await;
+        self.plan_mode_active = plan_mode;
+    }
+
+    /// Write a `set_permission_mode` control_request to the live process.
+    ///
+    /// Fire-and-forget, like `write_interrupt_control_request`: the CLI
+    /// processes stdin lines strictly in order, so this always takes effect
+    /// before the next line we write (the user turn, written immediately
+    /// after by the caller). The CLI does reply with a `control_response`
+    /// here (unlike `interrupt`), but we never read it out-of-band — any
+    /// stray echo is silently skipped by the read loop the same way every
+    /// other unrecognized `type` is (`parse_stream_line` returns `None`).
+    async fn write_set_permission_mode(&mut self, mode: &str) {
+        let Some(stdin) = self.stdin.as_mut() else {
+            tracing::debug!("set_permission_mode: stdin already closed — nothing to write");
+            return;
+        };
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": format!("set-mode-{}", uuid::Uuid::new_v4()),
+            "request": { "subtype": "set_permission_mode", "mode": mode },
+        });
+        let mut full = line.to_string();
+        full.push('\n');
+        tracing::info!(target: "loopdeck::claude_wire", "→ set_permission_mode control_request: {full}");
+        if let Err(e) = stdin.write_all(full.as_bytes()).await {
+            tracing::warn!("set_permission_mode control_request write failed: {e}");
+            return;
+        }
+        if let Err(e) = stdin.flush().await {
+            tracing::warn!("set_permission_mode control_request flush failed: {e}");
+        }
+    }
+
     /// Send one user turn and block until claude emits its `result` event.
     ///
     /// Returns the aggregated `AgentResponse` for the whole turn. Output is
@@ -1051,8 +1326,7 @@ impl ClaudeSession {
     pub async fn send_message(
         &mut self,
         text: &str,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         _interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
         // Active reading is bounded per-`read_line` by READ_LINE_TIMEOUT (a
@@ -1152,8 +1426,7 @@ impl ClaudeSession {
                             &request_id,
                             &request,
                             None,
-                            question_slot,
-                            permission_slot,
+                            slots,
                             turn_deadline,
                         )
                         .await?;
@@ -1177,8 +1450,9 @@ impl ClaudeSession {
         // timed-out turn. Best-effort; locks can't deadlock (no await).
         // Done unconditionally on every exit (success or error) so a phantom
         // prompt can't survive into the next turn.
-        let _ = question_slot.lock().ok().and_then(|mut g| g.take());
-        let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
+        let _ = slots.question.lock().ok().and_then(|mut g| g.take());
+        let _ = slots.permission.lock().ok().and_then(|mut g| g.take());
+        let _ = slots.plan.lock().ok().and_then(|mut g| g.take());
 
         result
     }
@@ -1199,9 +1473,9 @@ impl ClaudeSession {
         &mut self,
         text: &str,
         channel: &Channel<ClaudeEvent>,
-        question_slot: &QuestionSlot,
-        permission_slot: &PermissionSlot,
+        slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
         // Active reading is bounded per-`read_line` by READ_LINE_TIMEOUT (in
         // the select below); the parked phase — which that select excludes —
@@ -1209,6 +1483,11 @@ impl ClaudeSession {
         // threaded into `answer_control_request`. See `send_message` for the
         // full rationale.
         let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
+        // Enter/leave `plan` permission mode BEFORE writing the user turn line
+        // below — the CLI processes stdin strictly in order, so the mode is
+        // guaranteed to apply to this turn's generation. See
+        // `ensure_permission_mode` for why this covers both directions.
+        self.ensure_permission_mode(plan_mode).await;
         let result = async {
             // ---- write the user turn to stdin ----
             let stdin = self
@@ -1354,8 +1633,7 @@ impl ClaudeSession {
                         request_id,
                         request,
                         Some(channel),
-                        question_slot,
-                        permission_slot,
+                        slots,
                         turn_deadline,
                     )
                     .await?;
@@ -1470,8 +1748,9 @@ impl ClaudeSession {
         // oneshot will never resolve. Without this, agent_pending_* would keep
         // reporting a phantom prompt. Runs on every exit (Ok and Err).
         let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
-        let _ = question_slot.lock().ok().and_then(|mut g| g.take());
-        let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
+        let _ = slots.question.lock().ok().and_then(|mut g| g.take());
+        let _ = slots.permission.lock().ok().and_then(|mut g| g.take());
+        let _ = slots.plan.lock().ok().and_then(|mut g| g.take());
 
         result
     }
@@ -1629,6 +1908,14 @@ mod tests {
     /// sender is pre-disconnected so a pending approval immediately errors the
     /// turn rather than hanging — see `disconnected_pslot`.
     fn pslot() -> PermissionSlot {
+        Arc::new(StdMutex::new(None))
+    }
+
+    /// A fresh empty plan-approval slot for tests — the `ExitPlanMode`
+    /// counterpart of `pslot`. The ignored integration tests below never enter
+    /// `plan` permission mode, so `ExitPlanMode` is never called and an empty
+    /// slot stands in for "no pending plan".
+    fn plan_slot() -> PlanSlot {
         Arc::new(StdMutex::new(None))
     }
 
@@ -1790,7 +2077,15 @@ mod tests {
             .expect("failed to spawn claude session");
 
             let response = session
-                .send_message("reply with exactly: hello", &qslot(), &pslot(), &islot())
+                .send_message(
+                    "reply with exactly: hello",
+                    &ParkSlots {
+                        question: &qslot(),
+                        permission: &pslot(),
+                        plan: &plan_slot(),
+                    },
+                    &islot(),
+                )
                 .await
                 .expect("send_message failed");
 
@@ -1827,7 +2122,7 @@ mod tests {
             .expect("failed to spawn claude session");
 
         let response = session
-            .send_message("is there a Cargo.toml in this directory, response with YES or NO only, No preamble", &qslot(), &pslot(), &islot())
+            .send_message("is there a Cargo.toml in this directory, response with YES or NO only, No preamble", &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
             .await
             .expect("send_message failed");
 
@@ -1865,14 +2160,14 @@ mod tests {
         // Turn 1 — plant a distinctive fact the model could only repeat by
         // remembering it (not by guessing from turn 2's question alone).
         let first = session
-            .send_message("I'm telling you a secret codeword. The codeword is: ZUCCHINI. Reply with exactly: understood.", &qslot(), &pslot(), &islot())
+            .send_message("I'm telling you a secret codeword. The codeword is: ZUCCHINI. Reply with exactly: understood.", &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
             .await
             .expect("turn 1 (send_message) failed");
         assert!(!first.is_error, "turn 1 should not error, got: {:?}", first);
 
         // Turn 2 — recall it. Same process, same session, no --resume.
         let second = session
-            .send_message("What is the secret codeword I just told you? Reply with only the codeword, nothing else.", &qslot(), &pslot(), &islot())
+            .send_message("What is the secret codeword I just told you? Reply with only the codeword, nothing else.", &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
             .await
             .expect("turn 2 (send_message) failed");
 
@@ -1927,7 +2222,15 @@ mod tests {
             .expect("failed to spawn claude session");
 
             let response = session
-                .send_message("reply with: hello", &qslot(), &pslot(), &islot())
+                .send_message(
+                    "reply with: hello",
+                    &ParkSlots {
+                        question: &qslot(),
+                        permission: &pslot(),
+                        plan: &plan_slot(),
+                    },
+                    &islot(),
+                )
                 .await
                 .expect("send_message should complete even on auth failure");
 
@@ -1976,8 +2279,11 @@ mod tests {
                 .send_message(
                     "I'm telling you a secret codeword. The codeword is: EGGPLANT. \
                      Reply with exactly: understood.",
-                    &qslot(),
-                    &pslot(),
+                    &ParkSlots {
+                        question: &qslot(),
+                        permission: &pslot(),
+                        plan: &plan_slot(),
+                    },
                     &islot(),
                 )
                 .await
@@ -2010,8 +2316,11 @@ mod tests {
                 .send_message(
                     "What is the secret codeword I told you earlier? \
                      Reply with only the codeword, nothing else.",
-                    &qslot(),
-                    &pslot(),
+                    &ParkSlots {
+                        question: &qslot(),
+                        permission: &pslot(),
+                        plan: &plan_slot(),
+                    },
                     &islot(),
                 )
                 .await
@@ -2071,8 +2380,11 @@ mod tests {
                 .send_message(
                     "Use the Read tool to read the file `Cargo.toml` in the current directory, \
                      then report the package name in one short sentence.",
-                    &qslot(),
-                    &pslot(),
+                    &ParkSlots {
+                        question: &qslot(),
+                        permission: &pslot(),
+                        plan: &plan_slot(),
+                    },
                     &islot(),
                 )
                 .await
@@ -2120,8 +2432,11 @@ mod tests {
                 .send_message(
                     "Try to read the file `Cargo.toml` with the Read tool. \
                      If it's blocked, that's fine — just say so in one sentence.",
-                    &qslot(),
-                    &pslot(),
+                    &ParkSlots {
+                        question: &qslot(),
+                        permission: &pslot(),
+                        plan: &plan_slot(),
+                    },
                     &islot(),
                 )
                 .await

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AskUserQuestionSpec,
   PendingPermissionEntry,
+  PendingPlanEntry,
   PendingQuestionEntry,
 } from "../types";
 
@@ -28,6 +29,20 @@ export interface PendingPermission {
 export interface PendingQuestion {
   requestId: string;
   questions: AskUserQuestionSpec[];
+}
+
+/**
+ * The payload of a pending `ExitPlanMode` request, surfaced as a plan-approval
+ * card.
+ *
+ * Set when a `plan_approval` event with `decision: "pending"` arrives;
+ * cleared when the user answers, when the resolved allow/deny event arrives,
+ * or when the turn ends. Mirrors the Rust `ClaudeEvent::PlanApproval`
+ * pending-variant fields.
+ */
+export interface PendingPlan {
+  requestId: string;
+  plan: string;
 }
 
 /**
@@ -60,12 +75,16 @@ interface PendingInteractionState {
   permissions: Record<string, PendingPermission>;
   /** Per-project pending question, keyed by absolute project path. */
   questions: Record<string, PendingQuestion>;
+  /** Per-project pending plan approval, keyed by absolute project path. */
+  plans: Record<string, PendingPlan>;
 
   // ── Actions ──
   setPermission: (path: string, pending: PendingPermission) => void;
   clearPermission: (path: string) => void;
   setQuestion: (path: string, pending: PendingQuestion) => void;
   clearQuestion: (path: string) => void;
+  setPlan: (path: string, pending: PendingPlan) => void;
+  clearPlan: (path: string) => void;
   /**
    * Replace the entire `questions` map from a fresh backend snapshot
    * (`listPendingQuestions`). Entries absent from the snapshot are stale (the
@@ -87,11 +106,17 @@ interface PendingInteractionState {
   reconcilePermissions: (
     entries: PendingPermissionEntry[],
   ) => string[];
+  /**
+   * Replace the entire `plans` map from a fresh backend snapshot
+   * (`listPendingPlans`). The plan-side mirror of `reconcilePermissions`.
+   */
+  reconcilePlans: (entries: PendingPlanEntry[]) => string[];
 }
 
 export const usePendingInteractions = create<PendingInteractionState>((set) => ({
   permissions: {},
   questions: {},
+  plans: {},
 
   setPermission: (path, pending) =>
     set((s) => ({ permissions: { ...s.permissions, [path]: pending } })),
@@ -113,6 +138,17 @@ export const usePendingInteractions = create<PendingInteractionState>((set) => (
       const next = { ...s.questions };
       delete next[path];
       return { questions: next };
+    }),
+
+  setPlan: (path, pending) =>
+    set((s) => ({ plans: { ...s.plans, [path]: pending } })),
+
+  clearPlan: (path) =>
+    set((s) => {
+      if (!s.plans[path]) return s;
+      const next = { ...s.plans };
+      delete next[path];
+      return { plans: next };
     }),
 
   reconcileQuestions: (entries) => {
@@ -144,6 +180,19 @@ export const usePendingInteractions = create<PendingInteractionState>((set) => (
       if (!prev[e.path]) newlyStuck.push(e.path);
     }
     set({ permissions: next });
+    return newlyStuck;
+  },
+  reconcilePlans: (entries) => {
+    // Plan-side mirror of `reconcilePermissions`. Same diff-before-mutate
+    // shape: build the fresh map, record newly-pending paths, then swap.
+    const prev = usePendingInteractions.getState().plans;
+    const next: Record<string, PendingPlan> = {};
+    const newlyStuck: string[] = [];
+    for (const e of entries) {
+      next[e.path] = { requestId: e.requestId, plan: e.plan };
+      if (!prev[e.path]) newlyStuck.push(e.path);
+    }
+    set({ plans: next });
     return newlyStuck;
   },
 }));

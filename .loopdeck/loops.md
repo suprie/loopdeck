@@ -18,6 +18,7 @@
 ## Next Steps
 
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/11 (0.2.1 Phase 4 — migrate legacy loops.md to execution.yaml)
+- [ ] Manual GUI dogfood + ship: agent execution-plan approval (branch `claude/agent-execution-plan-approval-396750`, unrelated ad-hoc work — see the 2026-07-26 decision). Implementation-complete (`ExitPlanMode` interception, plan-mode toggle, full IPC/UI parity with the question/permission cards); gates green (fmt/clippy -D/test 418/tsc/build). Not yet verified against a live `claude` session (no API credentials in the dev environment) — needs a human to toggle Plan mode, send a message, and confirm the plan card + Approve/Reject round-trip actually work before commit/PR.
 
 ### Milestone 0.2.0 — Support Project Management
 

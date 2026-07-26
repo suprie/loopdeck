@@ -106,6 +106,7 @@ pub fn run() {
             claude_sessions: Mutex::new(HashMap::new()),
             pending_answers: Mutex::new(HashMap::new()),
             pending_permissions: Mutex::new(HashMap::new()),
+            pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
@@ -164,13 +165,16 @@ pub fn run() {
             commands::agent::agent_reset_session,
             commands::agent::agent_answer_question,
             commands::agent::agent_answer_permission,
+            commands::agent::agent_answer_plan,
             commands::agent::agent_add_allow_rule,
             commands::agent::agent_interrupt,
             commands::agent::agent_is_busy,
             commands::agent::agent_pending_permission,
             commands::agent::agent_pending_question,
+            commands::agent::agent_pending_plan,
             commands::agent::list_pending_questions,
             commands::agent::list_pending_permissions,
+            commands::agent::list_pending_plans,
         ])
         .run(tauri::generate_context!())
     {
