@@ -238,23 +238,13 @@ impl CodexSession {
             .clone()
             .ok_or_else(|| AppError::Agent("Codex thread was not initialized".into()))?;
         let request_id = self.next_id();
-        let mut params = json!({
-            "threadId": thread_id,
-            "input": [{ "type": "text", "text": text }],
-            "cwd": self.cwd,
-            "approvalPolicy": "on-request",
-            "sandboxPolicy": {
-                "type": "workspaceWrite",
-                "writableRoots": [self.cwd],
-                "networkAccess": false
-            }
-        });
-        if let Some(model) = &self.model {
-            params["model"] = Value::String(model.clone());
-        }
-        if let Some(effort) = &self.effort {
-            params["effort"] = Value::String(effort.clone());
-        }
+        let params = turn_start_params(
+            &thread_id,
+            text,
+            &self.cwd,
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        );
         self.write_message(json!({
             "method": "turn/start",
             "id": request_id,
@@ -569,22 +559,7 @@ impl CodexSession {
                 .await?;
             }
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                let item_id = params
-                    .get("itemId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let fallback = if method.contains("commandExecution") {
-                    (
-                        "Bash".to_owned(),
-                        json!({
-                            "command": params.get("command").cloned().unwrap_or(Value::Null),
-                            "cwd": params.get("cwd").cloned().unwrap_or(Value::Null),
-                        }),
-                    )
-                } else {
-                    ("Edit".to_owned(), json!({ "itemId": item_id }))
-                };
-                let (tool_name, input) = item_tools.get(item_id).cloned().unwrap_or(fallback);
+                let (tool_name, input) = approval_tool_context(method, &params, item_tools);
                 let decision = self
                     .resolve_permission(request_id, tool_name, input, channel, permission_slot)
                     .await?;
@@ -649,14 +624,16 @@ impl CodexSession {
         channel: Option<&Channel<ClaudeEvent>>,
         permission_slot: &PermissionSlot,
     ) -> Result<Decision, AppError> {
-        let floor_decision = self.policy.decide(&tool_name, &input);
-        if let Decision::Deny(reason) = floor_decision {
-            emit_permission(channel, &request_id, &tool_name, &input, "deny", &reason);
-            return Ok(Decision::Deny(reason));
-        }
-        if self.policy.is_autonomous() {
-            emit_permission(channel, &request_id, &tool_name, &input, "auto-allow", "");
-            return Ok(Decision::Allow);
+        if let Some(decision) = automatic_permission_decision(&self.policy, &tool_name, &input) {
+            match &decision {
+                Decision::Deny(reason) => {
+                    emit_permission(channel, &request_id, &tool_name, &input, "deny", reason);
+                }
+                Decision::Allow => {
+                    emit_permission(channel, &request_id, &tool_name, &input, "auto-allow", "");
+                }
+            }
+            return Ok(decision);
         }
 
         let (sender, receiver) = oneshot::channel::<Decision>();
@@ -867,6 +844,92 @@ fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     }
 }
 
+/// Build the per-turn security boundary and optional model overrides.
+///
+/// `readOnly` is intentional even for autonomous projects. It makes Codex
+/// request approval before commands or edits, allowing LoopDeck's
+/// `PermissionPolicy` to decide whether to park for the user or auto-allow,
+/// while always retaining the destructive-command floor.
+fn turn_start_params(
+    thread_id: &str,
+    text: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": [{ "type": "text", "text": text }],
+        "cwd": cwd,
+        "approvalPolicy": "on-request",
+        "sandboxPolicy": {
+            "type": "readOnly"
+        }
+    });
+    if let Some(model) = model.filter(|value| !value.is_empty()) {
+        params["model"] = Value::String(model.to_owned());
+    }
+    if let Some(effort) = effort.filter(|value| !value.is_empty()) {
+        params["effort"] = Value::String(effort.to_owned());
+    }
+    params
+}
+
+/// Resolve the approval card's tool and context.
+///
+/// App-server documents `item/started` before its approval request, so the
+/// item map is authoritative. The request-only fallback keeps all context the
+/// approval payload itself exposes if a future server violates that ordering.
+fn approval_tool_context(
+    method: &str,
+    params: &Value,
+    item_tools: &HashMap<String, (String, Value)>,
+) -> (String, Value) {
+    let item_id = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(context) = item_tools.get(item_id) {
+        return context.clone();
+    }
+
+    if method.contains("commandExecution") {
+        (
+            "Bash".to_owned(),
+            json!({
+                "command": params.get("command").cloned().unwrap_or(Value::Null),
+                "cwd": params.get("cwd").cloned().unwrap_or(Value::Null),
+                "reason": params.get("reason").cloned().unwrap_or(Value::Null),
+            }),
+        )
+    } else {
+        (
+            "Edit".to_owned(),
+            json!({
+                "itemId": item_id,
+                "reason": params.get("reason").cloned().unwrap_or(Value::Null),
+                "grantRoot": params.get("grantRoot").cloned().unwrap_or(Value::Null),
+            }),
+        )
+    }
+}
+
+/// Return an immediate policy decision, or `None` when the user must decide.
+///
+/// The destructive floor is evaluated before autonomous mode so autonomy can
+/// never bypass LoopDeck's hard-deny rules.
+fn automatic_permission_decision(
+    policy: &PermissionPolicy,
+    tool_name: &str,
+    input: &Value,
+) -> Option<Decision> {
+    match policy.decide(tool_name, input) {
+        denied @ Decision::Deny(_) => Some(denied),
+        Decision::Allow if policy.is_autonomous() => Some(Decision::Allow),
+        Decision::Allow => None,
+    }
+}
+
 fn display_request_id(id: &Value) -> String {
     id.as_str()
         .map(ToOwned::to_owned)
@@ -925,5 +988,105 @@ mod tests {
     fn request_ids_preserve_strings_and_numbers() {
         assert_eq!(display_request_id(&json!("req-1")), "req-1");
         assert_eq!(display_request_id(&json!(42)), "42");
+    }
+
+    #[test]
+    fn turn_start_routes_commands_and_edits_through_loopdeck_approval() {
+        let params = turn_start_params(
+            "thread-1",
+            "Make the change",
+            Path::new("/repo"),
+            Some("gpt-test"),
+            Some("high"),
+        );
+
+        assert_eq!(params["approvalPolicy"], "on-request");
+        assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(params["model"], "gpt-test");
+        assert_eq!(params["effort"], "high");
+    }
+
+    #[test]
+    fn turn_start_omits_empty_model_and_effort_overrides() {
+        let params = turn_start_params(
+            "thread-1",
+            "Inspect",
+            Path::new("/repo"),
+            Some(""),
+            Some(""),
+        );
+
+        assert!(params.get("model").is_none());
+        assert!(params.get("effort").is_none());
+    }
+
+    #[test]
+    fn file_approval_uses_proposed_changes_from_started_item() {
+        let mut item_tools = HashMap::new();
+        item_tools.insert(
+            "item-1".to_owned(),
+            (
+                "Edit".to_owned(),
+                json!({ "changes": [{ "path": "src/main.rs", "kind": "update" }] }),
+            ),
+        );
+
+        let (name, input) = approval_tool_context(
+            "item/fileChange/requestApproval",
+            &json!({
+                "itemId": "item-1",
+                "reason": "Apply the requested fix"
+            }),
+            &item_tools,
+        );
+
+        assert_eq!(name, "Edit");
+        assert_eq!(input["changes"][0]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn file_approval_fallback_preserves_request_context() {
+        let (name, input) = approval_tool_context(
+            "item/fileChange/requestApproval",
+            &json!({
+                "itemId": "item-1",
+                "reason": "Write outside the current root",
+                "grantRoot": "/other"
+            }),
+            &HashMap::new(),
+        );
+
+        assert_eq!(name, "Edit");
+        assert_eq!(input["reason"], "Write outside the current root");
+        assert_eq!(input["grantRoot"], "/other");
+    }
+
+    #[test]
+    fn confirm_changes_parks_safe_codex_requests_for_the_user() {
+        let decision = automatic_permission_decision(
+            &PermissionPolicy::confirm_changes(),
+            "Bash",
+            &json!({ "command": "cargo test" }),
+        );
+
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn autonomous_mode_auto_allows_safe_codex_requests() {
+        let policy = PermissionPolicy::with_mode(crate::permission::PermissionMode::Autonomous);
+        let decision =
+            automatic_permission_decision(&policy, "Bash", &json!({ "command": "cargo test" }));
+
+        assert_eq!(decision, Some(Decision::Allow));
+    }
+
+    #[test]
+    fn autonomous_mode_cannot_bypass_destructive_floor() {
+        let policy = PermissionPolicy::with_mode(crate::permission::PermissionMode::Autonomous);
+        let decision =
+            automatic_permission_decision(&policy, "Bash", &json!({ "command": "rm -rf /" }));
+
+        assert!(matches!(decision, Some(Decision::Deny(_))));
     }
 }

@@ -20,7 +20,7 @@ import {
 } from "../../lib/tauri";
 import type { AgentConfig, LogInfo } from "../../types";
 
-const EFFORT_OPTIONS = [
+const CLAUDE_EFFORT_OPTIONS = [
   { value: "low", label: "Low — fastest, least thorough" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
@@ -166,6 +166,9 @@ export function Settings() {
                     ...previous,
                     harness: v as "claude" | "codex",
                     model: "",
+                    // Codex effort support is advertised per model. Do not
+                    // carry a Claude-specific override across providers.
+                    effort: v === "codex" ? "" : "high",
                   }));
                   setSaved(false);
                 }}
@@ -287,22 +290,38 @@ export function Settings() {
                 ) : null}
               </Field>
 
-              <Field label="Effort Level" hint="Higher effort = more thorough reasoning, slower responses.">
-                <Select
-                  value={form.effort ?? "high"}
-                  onValueChange={(v) => handleChange("effort", v)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {EFFORT_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <Field
+                label="Effort Level"
+                hint={
+                  form.harness === "codex"
+                    ? "Leave blank to use the model default. Supported values depend on the selected Codex model."
+                    : "Higher effort = more thorough reasoning, slower responses."
+                }
+              >
+                {form.harness === "codex" ? (
+                  <Input
+                    type="text"
+                    value={form.effort ?? ""}
+                    onChange={(e) => handleChange("effort", e.target.value)}
+                    placeholder="Use model default"
+                  />
+                ) : (
+                  <Select
+                    value={form.effort ?? "high"}
+                    onValueChange={(v) => handleChange("effort", v)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CLAUDE_EFFORT_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </Field>
             </div>
           </div>

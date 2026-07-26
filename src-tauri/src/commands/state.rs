@@ -17,7 +17,7 @@
 //!   they run in true parallel.
 
 use crate::claude_session::{InterruptSlot, PermissionSlot, QuestionSlot};
-use crate::config::{AgentConfig, GlobalConfig, ProjectEntry, RunState};
+use crate::config::{AgentConfig, AgentHarness, GlobalConfig, ProjectEntry, RunState};
 use crate::conversation;
 use crate::error::AppError;
 use crate::harness::HarnessSession;
@@ -205,11 +205,8 @@ pub(crate) async fn with_session(
         // Apply a changed harness as soon as the existing session is idle. If
         // a turn is still running, preserve the live process; the next send
         // after it completes will replace it.
-        if let Ok(session) = arc.try_lock() {
-            if session.harness() == desired_harness {
-                return Ok(Arc::clone(&arc));
-            }
-            drop(session);
+        let current_harness = arc.try_lock().ok().map(|session| session.harness());
+        if should_replace_cached_session(current_harness, desired_harness) {
             map_guard.remove(path);
         } else {
             return Ok(Arc::clone(&arc));
@@ -226,6 +223,17 @@ pub(crate) async fn with_session(
     map_guard.insert(path.to_path_buf(), Arc::clone(&arc));
     // ── map_guard (std Mutex) dropped here as this scope ends. ──
     Ok(arc)
+}
+
+/// Replace only an idle cached session whose provider no longer matches.
+///
+/// `None` means the inner mutex is busy, so the in-flight provider must be
+/// preserved until the next send.
+fn should_replace_cached_session(
+    current_harness: Option<AgentHarness>,
+    desired_harness: AgentHarness,
+) -> bool {
+    matches!(current_harness, Some(current) if current != desired_harness)
 }
 
 /// Get (or create) the per-project `AskUserQuestion` slot.
@@ -345,5 +353,31 @@ pub(crate) fn project_busy(state: &AppState, path: &Path) -> bool {
     match session_arc {
         Some(arc) => arc.try_lock().is_err(),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_cached_session_is_reused_when_harness_matches() {
+        assert!(!should_replace_cached_session(
+            Some(AgentHarness::Codex),
+            AgentHarness::Codex,
+        ));
+    }
+
+    #[test]
+    fn idle_cached_session_is_replaced_when_harness_changes() {
+        assert!(should_replace_cached_session(
+            Some(AgentHarness::Claude),
+            AgentHarness::Codex,
+        ));
+    }
+
+    #[test]
+    fn busy_cached_session_is_preserved_until_next_send() {
+        assert!(!should_replace_cached_session(None, AgentHarness::Codex,));
     }
 }
