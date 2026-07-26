@@ -16,10 +16,11 @@
 //!   (seconds–minutes). Different projects take different inner locks, so
 //!   they run in true parallel.
 
-use crate::claude_session::{ClaudeSession, InterruptSlot, PermissionSlot, QuestionSlot};
+use crate::claude_session::{InterruptSlot, PermissionSlot, QuestionSlot};
 use crate::config::{AgentConfig, GlobalConfig, ProjectEntry, RunState};
 use crate::conversation;
 use crate::error::AppError;
+use crate::harness::HarnessSession;
 use crate::paths;
 use crate::permission::PermissionPolicy;
 use crate::secrets;
@@ -34,7 +35,7 @@ use std::sync::{Arc, Mutex};
 /// `claude_sessions`.
 pub struct AppState {
     pub config: Mutex<GlobalConfig>,
-    pub claude_sessions: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<ClaudeSession>>>>,
+    pub claude_sessions: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<HarnessSession>>>>,
     /// Per-project pending `AskUserQuestion` slots. When Claude asks a
     /// question mid-turn, the read loop parks on the slot's oneshot receiver;
     /// the `agent_answer_question` command pops the sender here to deliver the
@@ -188,30 +189,39 @@ pub(crate) fn resolve_permission_policy(state: &AppState, path: &Path) -> Permis
 pub(crate) async fn with_session(
     state: &AppState,
     path: &Path,
-) -> Result<Arc<tokio::sync::Mutex<ClaudeSession>>, AppError> {
+) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
+    // Resolve before taking the session-map lock so lock ordering remains
+    // config → sessions everywhere (project listing uses the same order).
+    let agent_config = resolve_agent_config(state)?;
+    let desired_harness = agent_config.harness;
+
     // ── Outer (map) lock: held only to read/insert the Arc. ──
     let mut map_guard = state
         .claude_sessions
         .lock()
         .map_err(|_| AppError::LockError)?;
 
-    if let Some(arc) = map_guard.get(path) {
-        // Existing live session — clone the Arc and reuse it. No .await here.
-        return Ok(Arc::clone(arc));
+    if let Some(arc) = map_guard.get(path).cloned() {
+        // Apply a changed harness as soon as the existing session is idle. If
+        // a turn is still running, preserve the live process; the next send
+        // after it completes will replace it.
+        if let Ok(session) = arc.try_lock() {
+            if session.harness() == desired_harness {
+                return Ok(Arc::clone(&arc));
+            }
+            drop(session);
+            map_guard.remove(path);
+        } else {
+            return Ok(Arc::clone(&arc));
+        }
     }
 
-    // No live session — spawn one. Read agent config + resume id while we
-    // still hold the map lock cheaply (still no .await in this scope).
-    let agent_config = resolve_agent_config(state)?;
+    // No compatible live session — spawn one. The config was resolved before
+    // the map lock to avoid nested lock-order inversions.
     let policy = resolve_permission_policy(state, path);
 
     let resume_id = conversation::last_session_id(path);
-    let session = ClaudeSession::spawn(
-        &path.to_path_buf(),
-        &agent_config,
-        resume_id.as_deref(),
-        policy,
-    )?;
+    let session = HarnessSession::spawn(path, &agent_config, resume_id.as_deref(), policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     map_guard.insert(path.to_path_buf(), Arc::clone(&arc));
     // ── map_guard (std Mutex) dropped here as this scope ends. ──
