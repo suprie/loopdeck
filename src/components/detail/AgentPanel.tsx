@@ -147,6 +147,35 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // once you leave it).
   const [planMode, setPlanMode] = useState(false);
 
+  // Plan mode is a Claude-CLI-specific concept (`set_permission_mode` +
+  // `ExitPlanMode`) — Codex has no equivalent and always runs with
+  // `workspace-write` (see the harness-boundary decision in
+  // `.loopdeck/decisions.md`), so it would edit immediately despite the UI
+  // promising a plan-first review. `AgentConfig.harness` is a single global
+  // setting (not per-project), fetched once here so the toggle can be hidden
+  // entirely for Codex rather than silently accepted and ignored.
+  const [harness, setHarness] = useState<"claude" | "codex">("claude");
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAgentConfig()
+      .then((cfg) => {
+        if (!cancelled) setHarness(cfg?.harness ?? "claude");
+      })
+      .catch(() => {
+        // Best-effort — default to "claude" so the toggle degrades to its
+        // pre-Codex behavior on a probe failure rather than disappearing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // Defense in depth alongside hiding the toggle below: even if `planMode`
+  // somehow ended up true while Codex is active (e.g. a harness switch
+  // landing between toggling on and sending), never actually request plan
+  // mode for a harness that can't honor it.
+  const planModeUsable = harness !== "codex";
+
   // ── pendingAgentStart — auto-fire Start when landed from dashboard CTA ──
   const pendingAgentStart = useAppStore((s) => s.pendingAgentStart);
   const setPendingAgentStart = useAppStore((s) => s.setPendingAgentStart);
@@ -806,8 +835,10 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     // compose-time choice, not a standing mode. Resetting eagerly (rather
     // than after the turn completes) means the composer honestly reflects
     // "plan mode is off again" the instant the message is sent, matching
-    // Claude Code's own shift-tab behavior.
-    const usePlanMode = planMode;
+    // Claude Code's own shift-tab behavior. Gated on `planModeUsable` so a
+    // harness switch to Codex landing between "toggle on" and "send" can't
+    // request a plan-mode turn the active harness can't honor.
+    const usePlanMode = planMode && planModeUsable;
     setPlanMode(false);
 
     await runStreamingTurn(text, usePlanMode);
@@ -1143,8 +1174,15 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         onAlwaysAllow={handleAlwaysAllow}
         pendingPlan={pendingPlan ? { plan: pendingPlan.plan } : null}
         onAnswerPlan={handleAnswerPlan}
-        planMode={planMode}
-        onTogglePlanMode={() => setPlanMode((v) => !v)}
+        // Omitted entirely (not just disabled) when the active harness can't
+        // honor plan mode — Chat.tsx hides the toggle button whenever
+        // `onTogglePlanMode` is undefined, per its documented prop contract.
+        {...(planModeUsable
+          ? {
+              planMode,
+              onTogglePlanMode: () => setPlanMode((v) => !v),
+            }
+          : {})}
       />
       </div>
     </div>

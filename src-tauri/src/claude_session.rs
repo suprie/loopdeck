@@ -766,15 +766,21 @@ impl ClaudeSession {
         let plan = parse_exit_plan(&request.input).unwrap_or_default();
 
         if self.policy.is_autonomous() {
-            // The CLI's own ExitPlanMode handler reverts out of plan
-            // mode internally on allow — this is confirmed, not merely
-            // assumed, so `Some(false)` is correct here.
-            self.plan_mode_active = Some(false);
+            // Mark unknown until `write_allow` actually succeeds — the CLI's
+            // ExitPlanMode handler only reverts out of plan mode once it
+            // *receives* our allow, so a write/flush failure here means the
+            // approval was never delivered and the live process may still be
+            // in plan mode. Recording `Some(false)` before that would claim
+            // a confirmed state we don't actually have.
+            self.plan_mode_active = None;
             tracing::info!(
                 request_id = %request_id,
                 "ExitPlanMode auto-allowed (autonomous mode)",
             );
             self.write_allow(request_id).await?;
+            // Delivered — the CLI's own ExitPlanMode handler reverts out of
+            // plan mode internally now that it has received the allow.
+            self.plan_mode_active = Some(false);
             if let Some(channel) = channel {
                 let _ = channel.send(ClaudeEvent::PlanApproval {
                     request_id: request_id.to_string(),
@@ -844,10 +850,14 @@ impl ClaudeSession {
 
         match &decision {
             Decision::Allow => {
-                // Confirmed by the CLI's own ExitPlanMode handler reverting
-                // internally — `Some(false)`, not `None`.
-                self.plan_mode_active = Some(false);
+                // Mark unknown until the write actually succeeds — same
+                // reasoning as the autonomous-allow arm above: the CLI only
+                // reverts out of plan mode once it receives this allow, so a
+                // write/flush failure means the approval was never delivered.
+                self.plan_mode_active = None;
                 self.write_allow(request_id).await?;
+                // Delivered — confirmed.
+                self.plan_mode_active = Some(false);
             }
             Decision::Deny(reason) => {
                 self.write_deny(request_id, reason).await?;
