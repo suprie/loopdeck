@@ -520,6 +520,12 @@ impl CodexSession {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        tracing::info!(
+            target: "loopdeck::codex",
+            method,
+            request_id,
+            "Codex requested client interaction"
+        );
 
         match method {
             "item/tool/requestUserInput" => {
@@ -566,6 +572,25 @@ impl CodexSession {
                 let wire_decision = match decision {
                     Decision::Allow => "accept",
                     Decision::Deny(_) => "decline",
+                };
+                self.write_message(json!({
+                    "id": id,
+                    "result": { "decision": wire_decision }
+                }))
+                .await?;
+            }
+            // Codex still exposes these deprecated callback names and may emit
+            // them when compatibility mode is selected by a particular CLI
+            // build. Treat them exactly like the v2 approval callbacks, but
+            // use the legacy response vocabulary required by the protocol.
+            "execCommandApproval" | "applyPatchApproval" => {
+                let (tool_name, input) = approval_tool_context(method, &params, item_tools);
+                let decision = self
+                    .resolve_permission(request_id, tool_name, input, channel, permission_slot)
+                    .await?;
+                let wire_decision = match decision {
+                    Decision::Allow => "approved",
+                    Decision::Deny(_) => "denied",
                 };
                 self.write_message(json!({
                     "id": id,
@@ -893,7 +918,7 @@ fn approval_tool_context(
         return context.clone();
     }
 
-    if method.contains("commandExecution") {
+    if method.contains("commandExecution") || method == "execCommandApproval" {
         (
             "Bash".to_owned(),
             json!({
@@ -907,6 +932,7 @@ fn approval_tool_context(
             "Edit".to_owned(),
             json!({
                 "itemId": item_id,
+                "fileChanges": params.get("fileChanges").cloned().unwrap_or(Value::Null),
                 "reason": params.get("reason").cloned().unwrap_or(Value::Null),
                 "grantRoot": params.get("grantRoot").cloned().unwrap_or(Value::Null),
             }),
@@ -1059,6 +1085,43 @@ mod tests {
         assert_eq!(name, "Edit");
         assert_eq!(input["reason"], "Write outside the current root");
         assert_eq!(input["grantRoot"], "/other");
+    }
+
+    #[test]
+    fn legacy_command_approval_maps_to_bash_context() {
+        let (name, input) = approval_tool_context(
+            "execCommandApproval",
+            &json!({
+                "command": ["cargo", "test"],
+                "cwd": "/repo",
+                "reason": "Run the test suite"
+            }),
+            &HashMap::new(),
+        );
+
+        assert_eq!(name, "Bash");
+        assert_eq!(input["command"], json!(["cargo", "test"]));
+        assert_eq!(input["cwd"], "/repo");
+    }
+
+    #[test]
+    fn legacy_patch_approval_preserves_file_changes() {
+        let (name, input) = approval_tool_context(
+            "applyPatchApproval",
+            &json!({
+                "fileChanges": {
+                    "src/main.rs": {
+                        "type": "update",
+                        "unified_diff": "@@ -1 +1 @@"
+                    }
+                },
+                "reason": "Apply the fix"
+            }),
+            &HashMap::new(),
+        );
+
+        assert_eq!(name, "Edit");
+        assert_eq!(input["fileChanges"]["src/main.rs"]["type"], "update");
     }
 
     #[test]

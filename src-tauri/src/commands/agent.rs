@@ -1003,14 +1003,9 @@ async fn send_streaming_with_retry(
 /// On a mid-turn send failure, mark the just-orphaned user turn with a
 /// reason-appropriate terminal marker.
 ///
-/// All send failures now map to the generic process-exited marker: the
-/// per-park timeout (`ApprovalTimeout` / `QuestionTimeout`) and its distinct
-/// "timed out" markers were removed — parked approvals/questions now wait
-/// indefinitely until answered or Stopped, so the only send failures that
-/// reach here are transport/child/spawn failures (which are genuinely
-/// process-exited-shaped). Old transcripts carrying `interrupt_kind:
-/// "approval_timeout"` / `"question_timeout"` still render their truthful
-/// "timed out" tag (the kinds are kept for backward compatibility).
+/// Live send failures retain their concrete error text. Startup reconciliation
+/// still uses the generic process-exited marker because no live `AppError`
+/// survives an app restart.
 ///
 /// Best-effort wrapper over [`conversation::append_terminal_if_orphan`]: a
 /// write failure here is only logged, and the caller's original send error
@@ -1018,15 +1013,24 @@ async fn send_streaming_with_retry(
 /// the failed send still holds the per-project lock — no concurrent send can
 /// be appending, so the trailing user turn is a genuine orphan, not an
 /// in-flight turn mid-window.
-fn mark_turn_terminal(path: &Path, _err: &AppError) {
-    // Transport failure, child exit, spawn failure — the historical
-    // process-exited marker. Startup reconciliation uses the same kind via
-    // `reconcile_interrupted`.
-    let turn = ConversationTurn::interrupted();
+fn mark_turn_terminal(path: &Path, err: &AppError) {
+    // A live command failure has a concrete cause. Persist it instead of the
+    // startup-reconciliation fallback, whose "process exited" wording hid
+    // useful errors such as Codex's no-output timeout.
+    let turn = ConversationTurn::assistant(
+        format!("Agent turn failed: {err}"),
+        String::new(),
+        true,
+        None,
+        0,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     match conversation::append_terminal_if_orphan(path, &turn) {
-        Ok(true) => info!(
-            "marked terminal turn in transcript ({}): {}",
-            turn.interrupt_kind.as_deref().unwrap_or("interrupted"),
+        Ok(true) => warn!(
+            "marked failed turn in transcript for {}: {err}",
             path.display()
         ),
         Ok(false) => {}
@@ -1034,6 +1038,33 @@ fn mark_turn_terminal(path: &Path, _err: &AppError) {
             "failed to reconcile terminal turn for {}: {e}",
             path.display()
         ),
+    }
+}
+
+/// Remove a failed cached process without touching a newer replacement.
+///
+/// A read timeout leaves the app-server protocol position unknown. Reusing
+/// that process made every follow-up wait for the same timeout again. The
+/// Arc identity check makes invalidation safe if session lifecycle code later
+/// grows more concurrent replacement paths.
+fn invalidate_session(
+    state: &AppState,
+    path: &Path,
+    failed: &Arc<tokio::sync::Mutex<HarnessSession>>,
+) {
+    let Ok(mut sessions) = state.claude_sessions.lock() else {
+        warn!(
+            "failed to lock session map while invalidating {}",
+            path.display()
+        );
+        return;
+    };
+    let is_failed_session = sessions
+        .get(path)
+        .is_some_and(|current| Arc::ptr_eq(current, failed));
+    if is_failed_session {
+        sessions.remove(path);
+        warn!("discarded failed agent session for {}", path.display());
     }
 }
 
@@ -1066,11 +1097,14 @@ async fn send_and_record(
     //    retries), which records a real assistant turn at step 3 and so is not
     //    an orphan. The `Err` path skips that recording, leaving the user turn
     //    from step 1 dangling; reconcile it to a truthful `interrupted` state
-    //    before re-propagating so the transcript never hangs unanswered.
+    //    before re-propagating so the transcript never hangs unanswered. The
+    //    failed process is invalidated because a timed-out protocol stream is
+    //    no longer safe to reuse.
     let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
+            invalidate_session(state, path, &session_arc);
             return Err(e);
         }
     };
@@ -1136,7 +1170,8 @@ async fn send_and_record_streaming(
     // 2. Send + stream (with retry on transient 529 overload). See the
     //    non-streaming pipelines for the interruption-recovery rationale: a
     //    transport/child failure (`Err`) orphans the user turn from step 1, so
-    //    we reconcile it to `interrupted` before re-propagating the error.
+    //    we reconcile it to an error turn before re-propagating the error and
+    //    invalidate the process so the next follow-up starts cleanly.
     let response = match send_streaming_with_retry(
         &mut session,
         prompt,
@@ -1150,6 +1185,7 @@ async fn send_and_record_streaming(
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
+            invalidate_session(state, path, &session_arc);
             return Err(e);
         }
     };
@@ -1298,11 +1334,14 @@ async fn start_fresh_and_record(
     //    retries), which records a real assistant turn at step 3 and so is not
     //    an orphan. The `Err` path skips that recording, leaving the user turn
     //    from step 1 dangling; reconcile it to a truthful `interrupted` state
-    //    before re-propagating so the transcript never hangs unanswered.
+    //    before re-propagating so the transcript never hangs unanswered. The
+    //    failed process is invalidated because a timed-out protocol stream is
+    //    no longer safe to reuse.
     let response = match send_with_retry(&mut session, prompt, &qslot, &pslot, &islot).await {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
+            invalidate_session(state, path, &session_arc);
             return Err(e);
         }
     };
@@ -1361,7 +1400,8 @@ async fn start_fresh_and_record_streaming(
     // 2. Send + stream (with retry on transient 529 overload). See the
     //    non-streaming pipelines for the interruption-recovery rationale: a
     //    transport/child failure (`Err`) orphans the user turn from step 1, so
-    //    we reconcile it to `interrupted` before re-propagating the error.
+    //    we reconcile it to an error turn before re-propagating the error and
+    //    invalidate the process so the next follow-up starts cleanly.
     let response = match send_streaming_with_retry(
         &mut session,
         prompt,
@@ -1375,6 +1415,7 @@ async fn start_fresh_and_record_streaming(
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
+            invalidate_session(state, path, &session_arc);
             return Err(e);
         }
     };
@@ -1401,6 +1442,26 @@ async fn start_fresh_and_record_streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_send_error_preserves_the_real_cause() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        conversation::append_turn(&dir, &ConversationTurn::user("continue")).unwrap();
+
+        mark_turn_terminal(
+            &dir,
+            &AppError::Agent("Codex produced no stdout for 300s — assuming stuck".into()),
+        );
+
+        let turns = conversation::load_conversation(&dir);
+        let failed = turns.last().expect("failed assistant turn");
+        assert!(failed.is_error);
+        assert!(failed.text.contains("Codex produced no stdout for 300s"));
+        assert_eq!(failed.interrupt_kind, None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn next_unchecked_step_finds_first_unchecked() {

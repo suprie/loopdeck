@@ -734,3 +734,10 @@
 - **Status**: accepted
 - **Context**: Codex's `workspaceWrite` + `on-request` preset permits commands and file edits inside the workspace without an app-server approval request. That bypasses LoopDeck's default confirm-changes UI and prevents its destructive-command floor from evaluating actions that Codex performs autonomously.
 - **Consequences**: Codex turns always use `readOnly` + `on-request`, forcing commands and edits through app-server approval requests. LoopDeck's existing `PermissionPolicy` then parks normal projects for a user decision, auto-allows safe requests in autonomous projects, and denies destructive commands before autonomy is considered. Codex effort is cleared when switching providers and defaults to the model's advertised setting unless the user explicitly supplies an override. Regression tests pin turn security parameters, confirm/autonomous/floor decisions, approval context mapping, and idle/busy harness replacement.
+
+
+## 2026-07-26 — Failed Codex protocol sessions are not reusable
+
+- **Status**: accepted
+- **Context**: A Codex loop turn stalled and was recorded with the generic process-exited fallback. A subsequent `continue` reused the same cached app-server and hit the five-minute no-output timeout, while the transcript again hid that concrete cause. Codex app-server schemas also retain legacy `execCommandApproval` and `applyPatchApproval` callbacks alongside the v2 approval methods.
+- **Consequences**: Any transport/protocol `Err` now evicts the exact failed cached session so the next send starts a clean process; the Arc identity check cannot remove a newer replacement. Live failures persist their concrete `AppError` as an error turn, while startup reconciliation retains the generic process-exited marker because no live cause survives a restart. The Codex adapter handles both v2 and legacy approval callback names with their respective response vocabularies and logs the callback method/request ID for diagnostics.
