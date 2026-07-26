@@ -27,6 +27,15 @@ use tokio::task::JoinHandle;
 /// [`TURN_DEADLINE`].
 const READ_LINE_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// How long `write_set_permission_mode` waits for the matching
+/// `control_response` before treating the mode switch as failed.
+///
+/// Much shorter than [`READ_LINE_TIMEOUT`]: this is a lightweight control
+/// message exchanged between turns (no model generation involved), sent and
+/// answered synchronously by the CLI, so a real reply arrives near-instantly.
+/// A long wait here would just delay surfacing a genuinely stuck process.
+const SET_PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Absolute (turn-start-relative) deadline bounding how long a single turn
 /// may stay **parked** on a manual approval / `AskUserQuestion`.
 ///
@@ -1290,44 +1299,117 @@ impl ClaudeSession {
         Ok(())
     }
 
-    /// Write a `set_permission_mode` control_request to the live process.
+    /// Write a `set_permission_mode` control_request to the live process and
+    /// wait for the matching `control_response`.
     ///
-    /// Like `write_interrupt_control_request`, this relies on the CLI
-    /// processing stdin lines strictly in order, so a successful write always
-    /// takes effect before the next line we write (the user turn, written
-    /// immediately after by the caller). Unlike `interrupt`, a failure here
-    /// IS propagated (see `ensure_permission_mode`) rather than logged and
-    /// swallowed — the CLI does reply with a `control_response` for this
-    /// subtype, but we never read it back out-of-band (doing so would mean
-    /// interleaving a non-turn read into the turn's read loop, reintroducing
-    /// the same race the "interrupt has no response" design deliberately
-    /// avoids); any stray echo is silently skipped by the read loop the same
-    /// way every other unrecognized `type` is (`parse_stream_line` returns
-    /// `None`). So this only catches write-side failures (closed stdin, a
-    /// broken pipe) — not a CLI-side rejection of the mode change — but that
-    /// is still strictly better than the previous silent-continue behavior.
+    /// A successful *write* is not the same as a successful mode switch: the
+    /// installed CLI has explicit rejection paths for `set_permission_mode`
+    /// (e.g. "onSetPermissionMode callback not registered"), so we read
+    /// stdout until we see the `control_response` carrying our `request_id`
+    /// and only return `Ok` for `subtype: "success"` — a `subtype: "error"`
+    /// (or a timeout) is surfaced as a real error, which `ensure_permission_mode`
+    /// propagates instead of flipping `plan_mode_active` on an unconfirmed
+    /// change.
+    ///
+    /// This is safe to read here (outside the normal per-turn read loop)
+    /// because no turn is in flight at this call site — it always runs
+    /// before the user-turn line is written (see `ensure_permission_mode`'s
+    /// caller), so the CLI cannot be emitting assistant/result events in this
+    /// window. Any unrelated line encountered while waiting (the one-time
+    /// `system` init line on a fresh process, or a stray non-matching
+    /// response) is skipped rather than treated as the answer, bounded overall
+    /// by [`SET_PERMISSION_MODE_TIMEOUT`].
     async fn write_set_permission_mode(&mut self, mode: &str) -> Result<(), AppError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
-        let line = serde_json::json!({
-            "type": "control_request",
-            "request_id": format!("set-mode-{}", uuid::Uuid::new_v4()),
-            "request": { "subtype": "set_permission_mode", "mode": mode },
-        });
-        let mut full = line.to_string();
-        full.push('\n');
-        tracing::info!(target: "loopdeck::claude_wire", "→ set_permission_mode control_request: {full}");
-        stdin
-            .write_all(full.as_bytes())
+        let request_id = format!("set-mode-{}", uuid::Uuid::new_v4());
+        {
+            let stdin = self
+                .stdin
+                .as_mut()
+                .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
+            let line = serde_json::json!({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": { "subtype": "set_permission_mode", "mode": mode },
+            });
+            let mut full = line.to_string();
+            full.push('\n');
+            tracing::info!(target: "loopdeck::claude_wire", "→ set_permission_mode control_request: {full}");
+            stdin
+                .write_all(full.as_bytes())
+                .await
+                .map_err(|e| AppError::Agent(format!("set_permission_mode write failed: {e}")))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| AppError::Agent(format!("set_permission_mode flush failed: {e}")))?;
+        }
+
+        let deadline = tokio::time::Instant::now() + SET_PERMISSION_MODE_TIMEOUT;
+        let mut line_bytes: Vec<u8> = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(AppError::Agent(format!(
+                    "set_permission_mode({mode}): no control_response from claude within {}s",
+                    SET_PERMISSION_MODE_TIMEOUT.as_secs()
+                )));
+            }
+            let read = tokio::time::timeout(
+                remaining,
+                read_bounded_line(
+                    &mut self.stdout,
+                    &mut line_bytes,
+                    crate::limits::STREAM_LINE_MAX_BYTES,
+                ),
+            )
             .await
-            .map_err(|e| AppError::Agent(format!("set_permission_mode write failed: {e}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| AppError::Agent(format!("set_permission_mode flush failed: {e}")))?;
-        Ok(())
+            .map_err(|_| {
+                AppError::Agent(format!(
+                    "set_permission_mode({mode}): no control_response from claude within {}s",
+                    SET_PERMISSION_MODE_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| {
+                AppError::Agent(format!("set_permission_mode({mode}): read failed: {e}"))
+            })?;
+
+            match read {
+                BoundedRead::Eof => {
+                    return Err(AppError::Agent(format!(
+                        "claude closed stdout while waiting for the set_permission_mode({mode}) response"
+                    )));
+                }
+                // Discard and keep waiting — an oversized line can't be our
+                // small control_response.
+                BoundedRead::Oversized => continue,
+                BoundedRead::Line => {}
+            }
+
+            let line = String::from_utf8_lossy(&line_bytes);
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            tracing::debug!(target: "loopdeck::claude_wire", "← claude: {trimmed}");
+            match parse_stream_line(trimmed) {
+                Some(StreamEvent::ControlResponse { response })
+                    if response.request_id == request_id =>
+                {
+                    return if response.subtype == "success" {
+                        Ok(())
+                    } else {
+                        Err(AppError::Agent(format!(
+                            "claude rejected set_permission_mode({mode}): {}",
+                            response.error.unwrap_or_else(|| "no reason given".into())
+                        )))
+                    };
+                }
+                // Not our response (the one-time `system` init line on a
+                // fresh process, or an unrelated echo) — keep waiting,
+                // bounded by the deadline above.
+                _ => continue,
+            }
+        }
     }
 
     /// Send one user turn and block until claude emits its `result` event.

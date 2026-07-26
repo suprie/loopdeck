@@ -364,6 +364,34 @@ pub(crate) enum StreamEvent {
         /// ignores the rest (permission_suggestions, display_name, …).
         request: ControlRequestBody,
     },
+
+    /// A `control_response` line — claude's reply to a `control_request`
+    /// **we** sent. Only `set_permission_mode` currently reads this back
+    /// (`ClaudeSession::write_set_permission_mode`); the `interrupt` subtype
+    /// we also send has no reply and is fire-and-forget. Modeled so a
+    /// CLI-side rejection (the installed CLI has explicit reject paths for
+    /// `set_permission_mode`, e.g. "onSetPermissionMode callback not
+    /// registered") surfaces as an error instead of being silently assumed
+    /// to have succeeded once the request_id write itself didn't error.
+    #[serde(rename = "control_response")]
+    ControlResponse { response: ControlResponseBody },
+}
+
+/// The body of a `control_response` line — the inner `response` object.
+///
+/// Wire shape: `{"subtype":"success","request_id":"…"}` on success, or
+/// `{"subtype":"error","request_id":"…","error":"…"}` on rejection. Lenient
+/// on missing fields (defaults to empty/`None`) so a shape we don't fully
+/// recognize still deserializes rather than being silently dropped as an
+/// unparseable line.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlResponseBody {
+    #[serde(default)]
+    pub(crate) subtype: String,
+    #[serde(default)]
+    pub(crate) request_id: String,
+    #[serde(default)]
+    pub(crate) error: Option<String>,
 }
 
 /// The body of a `control_request`. Only the `permission`/`can_use_tool`
@@ -868,6 +896,13 @@ impl ResponseAccumulator {
             // never carry assistant content and are never terminal, so this arm
             // is a no-op that exists to keep the match exhaustive.
             StreamEvent::ControlRequest { .. } => false,
+            // A `control_response` line — the reply to a `control_request` we
+            // sent. `write_set_permission_mode` consumes these directly via
+            // its own dedicated read, ahead of the accumulator ever seeing
+            // stream lines for a turn; this arm exists only to keep the match
+            // exhaustive (a response line seen here — e.g. a stray echo
+            // outside that dedicated wait — is harmless to ignore).
+            StreamEvent::ControlResponse { .. } => false,
             // A `type: "user"` tool-result line. We only act on the
             // task-bearing shape: extract the structured task via the shared
             // helper (same one the streaming path uses for the live event) and
@@ -1194,6 +1229,66 @@ mod tests {
                 assert!(request.input.as_object().unwrap().is_empty());
             }
             other => panic!("expected ControlRequest, got {other:?}"),
+        }
+    }
+
+    // ── control protocol (control_response — claude's reply to OUR requests) ──
+
+    /// Regression guard for the "write succeeded ⇒ assume the mode switch
+    /// succeeded" gap: a `control_response` with `subtype: "success"` must
+    /// parse into `StreamEvent::ControlResponse` with the matching
+    /// `request_id`, so `write_set_permission_mode` can confirm it against
+    /// the request it just sent.
+    #[test]
+    fn test_parse_control_response_success() {
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"set-mode-abc"}}"#;
+        let event = parse_stream_line(line).expect("control_response must parse");
+        match event {
+            StreamEvent::ControlResponse { response } => {
+                assert_eq!(response.subtype, "success");
+                assert_eq!(response.request_id, "set-mode-abc");
+                assert!(response.error.is_none());
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
+        }
+    }
+
+    /// The installed CLI has explicit `set_permission_mode` rejection paths
+    /// (e.g. "onSetPermissionMode callback not registered") that reply with
+    /// `subtype: "error"` + a human-readable `error` string — this must
+    /// parse so `write_set_permission_mode` can surface the real reason
+    /// instead of assuming success.
+    #[test]
+    fn test_parse_control_response_error_carries_reason() {
+        let line = r#"{"type":"control_response","response":{"subtype":"error","request_id":"set-mode-xyz","error":"onSetPermissionMode callback not registered"}}"#;
+        let event = parse_stream_line(line).expect("control_response must parse");
+        match event {
+            StreamEvent::ControlResponse { response } => {
+                assert_eq!(response.subtype, "error");
+                assert_eq!(response.request_id, "set-mode-xyz");
+                assert_eq!(
+                    response.error.as_deref(),
+                    Some("onSetPermissionMode callback not registered")
+                );
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
+        }
+    }
+
+    /// A minimal/malformed control_response (missing fields) must still
+    /// parse — lenient defaults so an unrecognized shape can't panic the
+    /// read loop, mirroring `test_parse_control_request_lenient_on_missing_fields`.
+    #[test]
+    fn test_parse_control_response_lenient_on_missing_fields() {
+        let line = r#"{"type":"control_response","response":{}}"#;
+        let event = parse_stream_line(line).expect("control_response must parse");
+        match event {
+            StreamEvent::ControlResponse { response } => {
+                assert_eq!(response.subtype, "");
+                assert_eq!(response.request_id, "");
+                assert!(response.error.is_none());
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
         }
     }
 
