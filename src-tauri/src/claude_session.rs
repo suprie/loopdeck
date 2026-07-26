@@ -407,13 +407,24 @@ pub struct ClaudeSession {
     // (see `permission.rs`) — the decision is written back to stdin as a
     // `control_response` and surfaced via `ClaudeEvent::PermissionRequest`.
     policy: PermissionPolicy,
-    // Whether we last told the live process to run in `plan` permission mode
-    // (via a `set_permission_mode` control_request — see
+    // Whether we last **confirmed** the live process is running in `plan`
+    // permission mode (via a `set_permission_mode` control_request — see
     // `ensure_permission_mode`). Tracked here, not just inferred from the
     // per-call `plan_mode` flag, so a turn that leaves plan mode without ever
     // approving `ExitPlanMode` (Stop, error, or the model just answering
     // directly) is still defensively reset to `default` on the next send.
-    plan_mode_active: bool,
+    //
+    // `None` means "unknown, not merely unchanged" — set whenever a mode
+    // switch is attempted but its outcome couldn't be confirmed (the write
+    // failed, or the CLI's `control_response` never arrived / errored). The
+    // write may still have reached and been applied by the CLI even though
+    // we couldn't observe that; treating it as "still whatever it was
+    // before" would let a later call take the `Some(x) == plan_mode`
+    // shortcut against state that no longer matches reality, sending the
+    // user's message under the wrong permission mode without even trying to
+    // fix it. `None` forces the next call to always re-send and revalidate,
+    // regardless of which mode it requests.
+    plan_mode_active: Option<bool>,
 }
 
 impl ClaudeSession {
@@ -548,7 +559,11 @@ impl ClaudeSession {
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
             policy,
-            plan_mode_active: false,
+            // A freshly-spawned process starts in `default` permission mode
+            // (the CLI's own default, never overridden by our spawn args) —
+            // a real confirmed fact, not an assumption, so `Some(false)` is
+            // correct here rather than `None`.
+            plan_mode_active: Some(false),
         })
     }
 
@@ -751,7 +766,10 @@ impl ClaudeSession {
         let plan = parse_exit_plan(&request.input).unwrap_or_default();
 
         if self.policy.is_autonomous() {
-            self.plan_mode_active = false;
+            // The CLI's own ExitPlanMode handler reverts out of plan
+            // mode internally on allow — this is confirmed, not merely
+            // assumed, so `Some(false)` is correct here.
+            self.plan_mode_active = Some(false);
             tracing::info!(
                 request_id = %request_id,
                 "ExitPlanMode auto-allowed (autonomous mode)",
@@ -826,7 +844,9 @@ impl ClaudeSession {
 
         match &decision {
             Decision::Allow => {
-                self.plan_mode_active = false;
+                // Confirmed by the CLI's own ExitPlanMode handler reverting
+                // internally — `Some(false)`, not `None`.
+                self.plan_mode_active = Some(false);
                 self.write_allow(request_id).await?;
             }
             Decision::Deny(reason) => {
@@ -1281,21 +1301,31 @@ impl ClaudeSession {
     /// approved `ExitPlanMode` clears the flag itself (the CLI reverts
     /// internally), so the common path never re-sends here.
     ///
-    /// **Failure is fatal, by design.** If the write/flush fails we return
-    /// `Err` and leave `plan_mode_active` unchanged — the caller propagates
-    /// this as a turn failure rather than sending the user's message anyway.
-    /// The alternative (log-and-continue, updating the flag regardless) would
-    /// let a turn silently run under `default` permissions — full edit access
-    /// — right after the user asked for a read-only plan-first review, which
-    /// is exactly the kind of unattended mutation this app's whole
+    /// **Failure is fatal, by design.** If the write, flush, or response
+    /// validation fails we return `Err` — the caller propagates this as a
+    /// turn failure rather than sending the user's message anyway. The
+    /// alternative (log-and-continue, updating the flag regardless) would let
+    /// a turn silently run under `default` permissions — full edit access —
+    /// right after the user asked for a read-only plan-first review, which is
+    /// exactly the kind of unattended mutation this app's whole
     /// confirm-before-mutate posture exists to prevent.
+    ///
+    /// **On failure, the cached state is marked unknown (`None`), not left
+    /// unchanged.** `write_set_permission_mode`'s write can succeed and the
+    /// CLI can apply the new mode even when we then fail to *confirm* it (a
+    /// lost/errored/timed-out `control_response`) — so "unchanged" would
+    /// mean "possibly wrong". Marking it unknown forces the *next* call,
+    /// whichever mode it requests, to skip the equality shortcut and always
+    /// re-send + revalidate, rather than trusting stale cached state that may
+    /// no longer match what the live process is actually doing.
     async fn ensure_permission_mode(&mut self, plan_mode: bool) -> Result<(), AppError> {
-        if plan_mode == self.plan_mode_active {
+        if self.plan_mode_active == Some(plan_mode) {
             return Ok(());
         }
+        self.plan_mode_active = None;
         self.write_set_permission_mode(if plan_mode { "plan" } else { "default" })
             .await?;
-        self.plan_mode_active = plan_mode;
+        self.plan_mode_active = Some(plan_mode);
         Ok(())
     }
 
