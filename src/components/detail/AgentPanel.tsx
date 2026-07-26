@@ -154,7 +154,13 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
   // promising a plan-first review. `AgentConfig.harness` is a single global
   // setting (not per-project), fetched once here so the toggle can be hidden
   // entirely for Codex rather than silently accepted and ignored.
-  const [harness, setHarness] = useState<"claude" | "codex">("claude");
+  // `null` means "not yet known" — covers both the initial pre-fetch window
+  // and a fetch failure. Deliberately NOT defaulted to "claude": that would
+  // fail OPEN (the toggle usable while the real harness is unknown, or
+  // wrongly assumed after a probe error), letting a fast toggle-then-send
+  // during the loading window — or any `getAgentConfig` failure — submit
+  // `plan_mode: true` against what might actually be a Codex session.
+  const [harness, setHarness] = useState<"claude" | "codex" | null>(null);
   useEffect(() => {
     let cancelled = false;
     api
@@ -163,18 +169,22 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
         if (!cancelled) setHarness(cfg?.harness ?? "claude");
       })
       .catch(() => {
-        // Best-effort — default to "claude" so the toggle degrades to its
-        // pre-Codex behavior on a probe failure rather than disappearing.
+        // Fail closed: leave `harness` at `null` (unknown) rather than
+        // guessing "claude" on a probe error — see the comment above.
+        if (!cancelled) setHarness(null);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-  // Defense in depth alongside hiding the toggle below: even if `planMode`
-  // somehow ended up true while Codex is active (e.g. a harness switch
-  // landing between toggling on and sending), never actually request plan
-  // mode for a harness that can't honor it.
-  const planModeUsable = harness !== "codex";
+  // Explicit allow-list (`=== "claude"`), not a deny-list (`!== "codex"`) —
+  // `null` (unknown/loading/failed) must resolve to "not usable", the same
+  // as "codex", not silently fall through to usable. Belt-and-suspenders
+  // alongside the backend's own rejection of `plan_mode: true` for Codex
+  // (`HarnessSession::send_message_streaming`): even if this check were
+  // somehow bypassed, the backend still refuses rather than silently
+  // dropping the flag.
+  const planModeUsable = harness === "claude";
 
   // ── pendingAgentStart — auto-fire Start when landed from dashboard CTA ──
   const pendingAgentStart = useAppStore((s) => s.pendingAgentStart);

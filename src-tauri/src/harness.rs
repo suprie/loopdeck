@@ -66,8 +66,14 @@ impl HarnessSession {
     /// permission mode, entirely a Claude-CLI concept (`ExitPlanMode`, the
     /// `PlanSlot` carried inside `slots`). Codex has its own approval model
     /// (always `readOnly` + `on-request` — see the harness-boundary decision
-    /// in `.loopdeck/decisions.md`), so the flag is simply not forwarded to
-    /// `CodexSession`, which never asked for it.
+    /// in `.loopdeck/decisions.md`) with no equivalent read-only-until-approved
+    /// gate, so `plan_mode: true` against a Codex session is a hard error
+    /// rather than a silently-dropped flag: Codex would otherwise start the
+    /// turn with its normal `workspace-write` access despite the caller
+    /// believing it asked for a plan-first review. This is the single choke
+    /// point for that guarantee — any caller (not just the current frontend
+    /// toggle, which separately fails closed while the harness is unknown)
+    /// gets the same rejection.
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
@@ -83,6 +89,11 @@ impl HarnessSession {
                     .await
             }
             Self::Codex(session) => {
+                if plan_mode {
+                    return Err(AppError::Agent(
+                        "plan mode is a Claude-only feature and is not supported by the Codex harness".into(),
+                    ));
+                }
                 session
                     .send_message_streaming(text, channel, slots, interrupt_slot)
                     .await
