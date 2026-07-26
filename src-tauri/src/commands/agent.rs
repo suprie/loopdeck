@@ -455,7 +455,15 @@ pub struct PlanApprovalWire {
 /// again within the same turn.
 ///
 /// Returns an error if no plan approval is pending for this project (the user
-/// clicked after the turn ended/timed out, or there was never a prompt).
+/// clicked after the turn ended/timed out, or there was never a prompt), OR if
+/// `request_id` doesn't match the currently-parked plan. The mismatch case
+/// matters because the model can revise and re-propose a plan mid-turn: if the
+/// frontend's card is stale (a missed `plan_approval` channel event) and the
+/// user clicks Approve/Reject on request A while the backend is now parked on
+/// revised plan B, blindly taking the sender would apply the user's verdict —
+/// which they gave after reading plan A — to plan B instead. Checking the ID
+/// first, and leaving the slot untouched on a mismatch, means a stale click
+/// errors instead of silently approving/rejecting a plan the user never saw.
 #[tauri::command]
 pub async fn agent_answer_plan(
     path: String,
@@ -469,22 +477,43 @@ pub async fn agent_answer_plan(
     );
     let repo_path = PathBuf::from(&path);
 
-    // Pop the sender for this project. At most one pending plan approval at a
-    // time (Claude blocks on each control_request), so this is a single take
-    // of the sender field — the slot entry is cleared entirely so
-    // `agent_pending_plan` stops reporting it as pending.
+    // Validate the request_id BEFORE taking the sender — a mismatch leaves
+    // the slot untouched (the still-pending, newer plan keeps waiting for its
+    // own answer) rather than consuming it on behalf of a stale request.
     let sender = {
         let guard = state
             .pending_plans
             .lock()
             .map_err(|_| AppError::LockError)?;
-        guard
-            .get(&repo_path)
-            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+        let slot = guard.get(&repo_path).ok_or_else(|| {
+            AppError::Agent(
+                "no pending plan approval for this project (it may have timed out or already been answered)".into(),
+            )
+        })?;
+        let mut slot_guard = slot.lock().map_err(|_| AppError::LockError)?;
+        match slot_guard.as_ref() {
+            None => {
+                return Err(AppError::Agent(
+                    "no pending plan approval for this project (it may have timed out or already been answered)".into(),
+                ));
+            }
+            Some(pending) if pending.request_id != request_id => {
+                return Err(AppError::Agent(format!(
+                    "this plan approval is stale — the agent is now waiting on a different plan (request_id {}); reload and answer the current one",
+                    pending.request_id
+                )));
+            }
+            Some(_) => {}
+        }
+        // IDs match — safe to take. The slot entry is cleared entirely so
+        // `agent_pending_plan` stops reporting it as pending.
+        slot_guard
+            .take()
             .and_then(|pending| pending.sender)
             .ok_or_else(|| {
                 AppError::Agent(
-                    "no pending plan approval for this project (it may have timed out or already been answered)".into(),
+                    "the pending plan approval is no longer waiting for an answer (turn ended)"
+                        .into(),
                 )
             })?
     };

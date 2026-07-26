@@ -338,12 +338,20 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           } else if (!q && pendingStore.questions[projectPath]) {
             clearPendingQuestion(projectPath);
           }
-          if (plan && !pendingStore.plans[projectPath]) {
+          // Unlike the permission/question checks above, also refresh when
+          // the backend's pending request_id has moved on — the model can
+          // revise and re-call ExitPlanMode mid-turn, so a stored plan A
+          // whose request_id no longer matches the backend's snapshot is
+          // stale, not merely "already seeded". Without this, a missed
+          // `plan_approval` channel event would leave the superseded plan A
+          // on screen while the backend is actually parked on plan B.
+          const storedPlan = pendingStore.plans[projectPath];
+          if (plan && (!storedPlan || storedPlan.requestId !== plan.requestId)) {
             setPendingPlan(projectPath, {
               requestId: plan.requestId,
               plan: plan.plan,
             });
-          } else if (!plan && pendingStore.plans[projectPath]) {
+          } else if (!plan && storedPlan) {
             clearPendingPlan(projectPath);
           }
         } catch {

@@ -1271,29 +1271,46 @@ impl ClaudeSession {
     /// every later turn read-only-restricted with no visible cause. An
     /// approved `ExitPlanMode` clears the flag itself (the CLI reverts
     /// internally), so the common path never re-sends here.
-    async fn ensure_permission_mode(&mut self, plan_mode: bool) {
+    ///
+    /// **Failure is fatal, by design.** If the write/flush fails we return
+    /// `Err` and leave `plan_mode_active` unchanged — the caller propagates
+    /// this as a turn failure rather than sending the user's message anyway.
+    /// The alternative (log-and-continue, updating the flag regardless) would
+    /// let a turn silently run under `default` permissions — full edit access
+    /// — right after the user asked for a read-only plan-first review, which
+    /// is exactly the kind of unattended mutation this app's whole
+    /// confirm-before-mutate posture exists to prevent.
+    async fn ensure_permission_mode(&mut self, plan_mode: bool) -> Result<(), AppError> {
         if plan_mode == self.plan_mode_active {
-            return;
+            return Ok(());
         }
         self.write_set_permission_mode(if plan_mode { "plan" } else { "default" })
-            .await;
+            .await?;
         self.plan_mode_active = plan_mode;
+        Ok(())
     }
 
     /// Write a `set_permission_mode` control_request to the live process.
     ///
-    /// Fire-and-forget, like `write_interrupt_control_request`: the CLI
-    /// processes stdin lines strictly in order, so this always takes effect
-    /// before the next line we write (the user turn, written immediately
-    /// after by the caller). The CLI does reply with a `control_response`
-    /// here (unlike `interrupt`), but we never read it out-of-band — any
-    /// stray echo is silently skipped by the read loop the same way every
-    /// other unrecognized `type` is (`parse_stream_line` returns `None`).
-    async fn write_set_permission_mode(&mut self, mode: &str) {
-        let Some(stdin) = self.stdin.as_mut() else {
-            tracing::debug!("set_permission_mode: stdin already closed — nothing to write");
-            return;
-        };
+    /// Like `write_interrupt_control_request`, this relies on the CLI
+    /// processing stdin lines strictly in order, so a successful write always
+    /// takes effect before the next line we write (the user turn, written
+    /// immediately after by the caller). Unlike `interrupt`, a failure here
+    /// IS propagated (see `ensure_permission_mode`) rather than logged and
+    /// swallowed — the CLI does reply with a `control_response` for this
+    /// subtype, but we never read it back out-of-band (doing so would mean
+    /// interleaving a non-turn read into the turn's read loop, reintroducing
+    /// the same race the "interrupt has no response" design deliberately
+    /// avoids); any stray echo is silently skipped by the read loop the same
+    /// way every other unrecognized `type` is (`parse_stream_line` returns
+    /// `None`). So this only catches write-side failures (closed stdin, a
+    /// broken pipe) — not a CLI-side rejection of the mode change — but that
+    /// is still strictly better than the previous silent-continue behavior.
+    async fn write_set_permission_mode(&mut self, mode: &str) -> Result<(), AppError> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
         let line = serde_json::json!({
             "type": "control_request",
             "request_id": format!("set-mode-{}", uuid::Uuid::new_v4()),
@@ -1302,13 +1319,15 @@ impl ClaudeSession {
         let mut full = line.to_string();
         full.push('\n');
         tracing::info!(target: "loopdeck::claude_wire", "→ set_permission_mode control_request: {full}");
-        if let Err(e) = stdin.write_all(full.as_bytes()).await {
-            tracing::warn!("set_permission_mode control_request write failed: {e}");
-            return;
-        }
-        if let Err(e) = stdin.flush().await {
-            tracing::warn!("set_permission_mode control_request flush failed: {e}");
-        }
+        stdin
+            .write_all(full.as_bytes())
+            .await
+            .map_err(|e| AppError::Agent(format!("set_permission_mode write failed: {e}")))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| AppError::Agent(format!("set_permission_mode flush failed: {e}")))?;
+        Ok(())
     }
 
     /// Send one user turn and block until claude emits its `result` event.
@@ -1483,12 +1502,15 @@ impl ClaudeSession {
         // threaded into `answer_control_request`. See `send_message` for the
         // full rationale.
         let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        // Enter/leave `plan` permission mode BEFORE writing the user turn line
-        // below — the CLI processes stdin strictly in order, so the mode is
-        // guaranteed to apply to this turn's generation. See
-        // `ensure_permission_mode` for why this covers both directions.
-        self.ensure_permission_mode(plan_mode).await;
         let result = async {
+            // Enter/leave `plan` permission mode BEFORE writing the user turn
+            // line below — the CLI processes stdin strictly in order, so the
+            // mode is guaranteed to apply to this turn's generation. A
+            // failure here fails the whole turn (via `?`) rather than
+            // sending the user's message under an unconfirmed permission
+            // mode — see `ensure_permission_mode`.
+            self.ensure_permission_mode(plan_mode).await?;
+
             // ---- write the user turn to stdin ----
             let stdin = self
                 .stdin
