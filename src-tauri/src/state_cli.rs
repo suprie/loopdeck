@@ -204,7 +204,14 @@ fn execute(cmd: &StateCli) -> Result<(), String> {
             path,
         } => {
             let loaded = execution::load(path).map_err(fmt_err)?;
-            let git = commit.clone().map(|sha| GitEvidence { commit: sha });
+            let git = commit
+                .as_deref()
+                .map(|sha| {
+                    crate::git::verified_commit(path, sha)
+                        .map(|commit| GitEvidence { commit })
+                        .map_err(AppError::ExecutionState)
+                })
+                .transpose()?;
             let next = loaded
                 .state
                 .complete_current(Utc::now(), git, *promote_next)

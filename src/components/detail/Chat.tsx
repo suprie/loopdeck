@@ -661,6 +661,32 @@ function ToolUseBlock({
 }
 
 /**
+ * Normalize legacy/provider transcripts that persisted one content block per
+ * streamed token. Only adjacent blocks of the same prose kind are merged;
+ * tool calls remain hard ordering boundaries.
+ */
+function coalesceContentBlocks(blocks: ContentBlock[]): ContentBlock[] {
+  const coalesced: ContentBlock[] = [];
+  for (const block of blocks) {
+    const last = coalesced[coalesced.length - 1];
+    if (block.type === "text" && last?.type === "text") {
+      coalesced[coalesced.length - 1] = {
+        type: "text",
+        text: last.text + block.text,
+      };
+    } else if (block.type === "thinking" && last?.type === "thinking") {
+      coalesced[coalesced.length - 1] = {
+        type: "thinking",
+        thinking: last.thinking + block.thinking,
+      };
+    } else {
+      coalesced.push(block);
+    }
+  }
+  return coalesced;
+}
+
+/**
  * Render an ordered sequence of assistant content blocks in **arrival order**.
  *
  * This is the order-preserving counterpart to the legacy fixed grouping
@@ -682,11 +708,13 @@ function BlockList({
   /** When true, mutating tool calls render the "auto-approved" tag. */
   autonomous?: boolean;
 }) {
+  const displayBlocks = coalesceContentBlocks(blocks);
+
   // Index of the last text block, so the cursor attaches only there.
   let lastTextIndex = -1;
   if (streaming) {
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      if (blocks[i].type === "text") {
+    for (let i = displayBlocks.length - 1; i >= 0; i--) {
+      if (displayBlocks[i].type === "text") {
         lastTextIndex = i;
         break;
       }
@@ -695,7 +723,7 @@ function BlockList({
 
   return (
     <>
-      {blocks.map((block, i) => {
+      {displayBlocks.map((block, i) => {
         if (block.type === "thinking") {
           return <ThinkingBlock key={i} thinking={block.thinking} />;
         }

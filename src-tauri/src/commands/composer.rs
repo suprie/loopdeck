@@ -2,6 +2,7 @@
 //! chat composer's `@`-mention and `/`-skill menus.
 
 use super::state::{blocking_task_failed, AppState, DirEntry, SkillEntry};
+use crate::config::AgentHarness;
 use crate::error::AppError;
 use crate::limits;
 use crate::paths;
@@ -386,12 +387,11 @@ fn parse_skill_frontmatter(content: &str) -> (String, String, String) {
 /// List the skills installed for a project, for the composer's `/`-skill
 /// discovery menu.
 ///
-/// Reads `<root>/.claude/skills/<dir>/SKILL.md` for each installed skill and
-/// parses its YAML frontmatter for `name` (the invocation token the `claude`
-/// CLI recognizes) and `description`. The skills land there via
-/// `import_project` → `copy_skills` during project bootstrap; a project that
-/// hasn't been bootstrapped yet simply has no `.claude/skills/` directory, which
-/// is reported as an empty list (not an error) — the menu shows "no skills".
+/// Reads the active harness's native skill root (`.claude/skills` or
+/// `.agents/skills`) and parses each `SKILL.md` frontmatter. The skills land
+/// there via `import_project` → `copy_skills` during project bootstrap; a
+/// project that hasn't been bootstrapped yet simply has no skill directory,
+/// which is reported as an empty list (not an error).
 ///
 /// `path` is the canonical project root (the same key used by every other
 /// project command). Results are sorted by `name` for stable arrow-key
@@ -403,23 +403,29 @@ pub async fn list_skills(
 ) -> Result<Vec<SkillEntry>, AppError> {
     debug!("list_skills called: path={path:?}");
 
-    // Resolve the canonical, registered project root (PRD FR3) before reading
-    // `.claude/skills/` beneath it.
-    let root = {
+    // Resolve the canonical, registered project root (PRD FR3) and snapshot
+    // the active harness under the same brief config lock.
+    let (root, harness) = {
         let config = state.config.lock().map_err(|_| AppError::LockError)?;
-        paths::resolve_registered_root(&config, &path)?
+        let root = paths::resolve_registered_root(&config, &path)?;
+        let harness = config
+            .agent
+            .as_ref()
+            .map(|agent| agent.harness)
+            .unwrap_or_default();
+        (root, harness)
     };
 
-    list_skills_at(&root)
+    list_skills_at(&root, harness)
 }
 
-/// Read and parse the skills under `<root>/.claude/skills/`.
+/// Read and parse the skills under the selected harness's native skill root.
 ///
 /// Factored out of the [`list_skills`] command so the read path is unit-
 /// testable without a registered `AppState` — the registration check is the
 /// command layer's concern; this is pure filesystem read + frontmatter parse.
-fn list_skills_at(root: &Path) -> Result<Vec<SkillEntry>, AppError> {
-    let skills_dir = root.join(".claude").join("skills");
+fn list_skills_at(root: &Path, harness: AgentHarness) -> Result<Vec<SkillEntry>, AppError> {
+    let skills_dir = crate::skills::skills_dir_for_harness(root, harness);
 
     // Not bootstrapped yet — no skills to show. Treat as empty rather than an
     // error so the menu degrades gracefully on a fresh project.
@@ -431,9 +437,9 @@ fn list_skills_at(root: &Path) -> Result<Vec<SkillEntry>, AppError> {
     let mut entries: Vec<SkillEntry> = Vec::new();
     for entry in read_dir.flatten() {
         // Only directories are skills — a stray file directly under skills/ is
-        // ignored. We don't filter dotfiles here: `.claude/skills/` is itself a
-        // dotfile path, but the skill dirs inside (e.g. `loopdeck-rust-expert`)
-        // aren't, and any user-added skill should appear regardless.
+        // ignored. We don't filter dotfiles here: the harness skill root is
+        // itself a dotfile path, but the skill dirs inside aren't, and any
+        // user-added skill should appear regardless.
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -672,7 +678,7 @@ mod tests {
     // ── list_skills ──
 
     #[tokio::test]
-    async fn list_skills_reads_installed_skills() {
+    async fn list_skills_reads_installed_claude_skills() {
         let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
         let skills_dir = dir.join(".claude").join("skills");
         std::fs::create_dir_all(skills_dir.join("loopdeck-rust-expert")).unwrap();
@@ -691,7 +697,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = list_skills_at(&dir).unwrap();
+        let result = list_skills_at(&dir, AgentHarness::Claude).unwrap();
 
         // Sorted by name → orchestrator before rust-expert.
         assert_eq!(result.len(), 2);
@@ -709,14 +715,39 @@ mod tests {
     }
 
     #[test]
+    fn list_skills_reads_installed_codex_skills() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
+        let skills_dir = dir.join(".agents").join("skills");
+        std::fs::create_dir_all(skills_dir.join("loopdeck-memory")).unwrap();
+        std::fs::write(
+            skills_dir.join("loopdeck-memory").join("SKILL.md"),
+            "---\nname: loopdeck:memory\ndescription: Updates project memory.\n---\nbody",
+        )
+        .unwrap();
+
+        let result = list_skills_at(&dir, AgentHarness::Codex).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "loopdeck:memory");
+        assert_eq!(result[0].directory, "loopdeck-memory");
+        assert_eq!(result[0].description, "Updates project memory.");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn list_skills_empty_when_not_bootstrapped() {
-        // A project with no `.claude/skills/` (not yet bootstrapped) returns an
-        // empty list, not an error — the menu shows "no skills".
+        // A project with no harness skill roots returns an empty list, not an
+        // error — the menu shows "no skills".
         let dir = std::env::temp_dir().join(format!("loopdeck-skills-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let result = list_skills_at(&dir).unwrap();
-        assert!(result.is_empty());
+        assert!(list_skills_at(&dir, AgentHarness::Claude)
+            .unwrap()
+            .is_empty());
+        assert!(list_skills_at(&dir, AgentHarness::Codex)
+            .unwrap()
+            .is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -743,7 +774,7 @@ mod tests {
         // A loose file directly under skills/ — ignored (only dirs are skills).
         std::fs::write(skills_dir.join("loose-file.md"), "whatever").unwrap();
 
-        let result = list_skills_at(&dir).unwrap();
+        let result = list_skills_at(&dir, AgentHarness::Claude).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "valid");
 

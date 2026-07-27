@@ -739,3 +739,32 @@
 - **Status**: accepted
 - **Context**: Codex's `workspaceWrite` + `on-request` preset permits commands and file edits inside the workspace without an app-server approval request. That bypasses LoopDeck's default confirm-changes UI and prevents its destructive-command floor from evaluating actions that Codex performs autonomously.
 - **Consequences**: Codex turns always use `readOnly` + `on-request`, forcing commands and edits through app-server approval requests. LoopDeck's existing `PermissionPolicy` then parks normal projects for a user decision, auto-allows safe requests in autonomous projects, and denies destructive commands before autonomy is considered. Codex effort is cleared when switching providers and defaults to the model's advertised setting unless the user explicitly supplies an override. Regression tests pin turn security parameters, confirm/autonomous/floor decisions, approval context mapping, and idle/busy harness replacement.
+## 2026-07-26 — Phase 4 post-merge migration hardening
+
+- **Status**: accepted
+- **Context**: Reviewing merged PR #11 found three edge cases in the Phase 4 migration surface: POSIX `rename` may replace an existing `loops.legacy.md`; the UI offered migration only when legacy current/history records existed, excluding empty and next-step-only files; and queued structured records were labeled completed.
+- **Consequences**: Fresh migration now refuses before writing `execution.yaml` when `loops.legacy.md` already exists, preserving the earlier snapshot byte-for-byte; a regression test pins the no-write behavior. The Loops panel now offers migration whenever `loops.md` exists, reconciliation details include unconverted next steps, and queued records render as queued. Phase 4's PRD checklist is closed after post-merge verification.
+
+## 2026-07-26 — Bound Codex initialization, not active-turn silence
+
+- **Status**: accepted
+- **Context**: The Codex app-server adapter applied a 300-second timeout to every stdout read. A healthy agent can emit no JSONL while a long-running tool executes, so the adapter falsely reported “Codex produced no stdout … assuming stuck”; the generic error reconciliation then appended a misleading `process_exited` interruption marker.
+- **Consequences**: The 300-second bound now applies only while waiting for initialization, thread start/resume, and turn-acceptance responses. Once a turn is accepted, stdout reads are unbounded because protocol silence is not proof of a hang; EOF still detects an exited child, and the existing interrupt channel keeps Stop responsive. This prevents the false timeout and its derived interruption marker without allowing a broken handshake to wait forever.
+
+## 2026-07-26 — Coalesce Codex stream deltas at persistence and render boundaries
+
+- **Status**: accepted
+- **Context**: Codex app-server emits assistant text in token-sized deltas. Live state coalesced adjacent deltas, but `CodexSession` persisted every delta as a separate `ContentBlockRecord`; after reload, `BlockList` rendered each record through a block-level Markdown component, producing one word or token per line.
+- **Consequences**: The Codex adapter now merges adjacent text and adjacent thinking deltas before persistence, while tool calls and content-type changes remain ordering boundaries. The frontend also coalesces adjacent prose blocks before rendering, repairing existing fragmented transcripts in memory without rewriting historical JSONL files. New transcripts stay compact and old transcripts display correctly.
+
+## 2026-07-26 — Install and discover skills per agent harness
+
+- **Status**: accepted
+- **Context**: LoopDeck installed and listed every project skill exclusively from `.claude/skills`. Codex repository discovery uses `.agents/skills`, so Codex sessions could neither fetch the bundled LoopDeck skills nor surface Codex-only project skills in the composer.
+- **Consequences**: Managed skill installation now targets both `.claude/skills` and `.agents/skills`, with an independent `.loopdeck-manifest.json` in each root so Refresh Skills backfills a missing Codex installation even when Claude is already current. Composer discovery snapshots the configured harness and reads only its native root. This duplicates the small bundled `SKILL.md` files intentionally; symlinks were rejected because LoopDeck is cross-platform and each root needs independent refresh state.
+
+## 2026-07-27 — Bound graceful Codex interruption and replace wedged children
+
+- **Status**: accepted
+- **Context**: Removing the false active-turn stdout timeout correctly allowed long silent tools, but exposed a distinct failure mode: a genuinely wedged app-server could ignore `turn/interrupt`. LoopDeck then waited indefinitely for `turn/completed`, leaving the per-project mutex and UI stuck on “Agent is working” even after Stop was pressed.
+- **Consequences**: Once Stop is requested, Codex gets a 15-second grace period to complete the interrupted turn. If the deadline expires, LoopDeck closes stdin, terminates the child, returns a specific harness error, and clears the normal turn/interaction state through the existing error path. The dead session reports itself unusable; `with_session` replaces an idle unusable Codex cache entry on the next send while still preserving any currently locked in-flight session. Active turns remain unbounded before Stop, so legitimate long-running silent tools are not reclassified as stuck.

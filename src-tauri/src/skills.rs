@@ -1,7 +1,8 @@
+use crate::config::AgentHarness;
 use crate::error::AppError;
 use crate::persist;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── Embedded skill content (compile-time via include_str!) ──
 
@@ -168,9 +169,10 @@ pub fn determine_skills(repo_path: &Path, markers: &[String]) -> Vec<String> {
 // The `loopdeck-` prefix is the skills ownership boundary (ADR-4 of the
 // `support-project-management` epic): app-managed skills may be overwritten
 // when the app version advances; user-owned skills (no prefix) are never
-// touched. A per-project manifest (`.claude/skills/.loopdeck-manifest.json`)
-// records the version the app last installed at, so a refresh only overwrites
-// managed skills when the version actually moved.
+// touched. Each harness skill root has its own per-project manifest
+// (`.claude/skills/.loopdeck-manifest.json` for Claude Code and
+// `.agents/skills/.loopdeck-manifest.json` for Codex), so a refresh only
+// overwrites managed skills when the version actually moved.
 
 /// The app version, baked in at compile time from `Cargo.toml`'s `version`.
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -235,8 +237,19 @@ fn version_gt(a: &str, b: &str) -> bool {
     parse_version(a) > parse_version(b)
 }
 
+/// Return the project skill directory discovered by the selected harness.
+pub(crate) fn skills_dir_for_harness(repo_path: &Path, harness: AgentHarness) -> PathBuf {
+    match harness {
+        AgentHarness::Claude => repo_path.join(".claude").join("skills"),
+        AgentHarness::Codex => repo_path.join(".agents").join("skills"),
+    }
+}
+
 /// Copy the project's skill `SKILL.md` files into
-/// `<repo_path>/.claude/skills/<skill>/`, using a version-aware refresh.
+/// both harness-native roots (`.claude/skills` and `.agents/skills`), using a
+/// version-aware refresh. Codex discovers repository skills only from
+/// `.agents/skills`; keeping the two installations in sync lets a project
+/// switch harnesses without another bootstrap.
 ///
 /// Returns the list of skill names that apply to the project (whether or not
 /// each was freshly written).
@@ -264,41 +277,43 @@ fn copy_skills_with_version(
     app_version: &str,
 ) -> Result<Vec<String>, AppError> {
     let names = determine_skills(repo_path, markers);
-    let skills_dir = repo_path.join(".claude").join("skills");
+    for harness in [AgentHarness::Claude, AgentHarness::Codex] {
+        let skills_dir = skills_dir_for_harness(repo_path, harness);
+        std::fs::create_dir_all(&skills_dir)?;
 
-    std::fs::create_dir_all(&skills_dir)?;
+        let manifest = read_manifest(&skills_dir);
+        let overwrite_managed = version_gt(app_version, &manifest.version);
 
-    let manifest = read_manifest(&skills_dir);
-    let overwrite_managed = version_gt(app_version, &manifest.version);
+        for name in &names {
+            let skill_dir = skills_dir.join(name);
+            let skill_file = skill_dir.join("SKILL.md");
 
-    for name in &names {
-        let skill_dir = skills_dir.join(name);
-        let skill_file = skill_dir.join("SKILL.md");
+            let is_managed = name.starts_with("loopdeck-");
+            let exists = skill_file.exists();
 
-        let is_managed = name.starts_with("loopdeck-");
-        let exists = skill_file.exists();
+            // Skip when there's nothing to do: an existing managed skill at
+            // the same app version, or any already-present user-owned skill.
+            if exists && !(is_managed && overwrite_managed) {
+                continue;
+            }
 
-        // Skip when there's nothing to do: an existing managed skill at the
-        // same app version, or any already-present user-owned skill.
-        if exists && !(is_managed && overwrite_managed) {
-            continue;
+            if let Some(content) = skill_content(name) {
+                std::fs::create_dir_all(&skill_dir)?;
+                std::fs::write(&skill_file, content)?;
+            }
         }
 
-        if let Some(content) = skill_content(name) {
-            std::fs::create_dir_all(&skill_dir)?;
-            std::fs::write(&skill_file, content)?;
-        }
+        // Each harness root owns its refresh state independently. This also
+        // backfills `.agents/skills` for an existing Claude-only project even
+        // when `.claude/skills` is already at the current app version.
+        write_manifest(
+            &skills_dir,
+            &SkillManifest {
+                version: app_version.to_string(),
+                skills: names.clone(),
+            },
+        )?;
     }
-
-    // Record the current app version + the skill set the app manages, so a
-    // future refresh knows whether an overwrite is due.
-    write_manifest(
-        &skills_dir,
-        &SkillManifest {
-            version: app_version.to_string(),
-            skills: names.clone(),
-        },
-    )?;
 
     Ok(names)
 }
@@ -687,15 +702,19 @@ mod tests {
         let copied = copy_skills(&dir, &markers).unwrap();
         assert!(!copied.is_empty());
 
-        // Verify orchestrator SKILL.md exists
-        let orch_path = dir.join(".claude/skills/loopdeck-orchestrator/SKILL.md");
-        assert!(orch_path.exists());
-        let content = fs::read_to_string(&orch_path).unwrap();
-        assert!(content.contains("name: loopdeck:orchestrator"));
+        for harness in [AgentHarness::Claude, AgentHarness::Codex] {
+            let skills_dir = skills_dir_for_harness(&dir, harness);
 
-        // Verify rust-expert SKILL.md exists
-        let rust_path = dir.join(".claude/skills/loopdeck-rust-expert/SKILL.md");
-        assert!(rust_path.exists());
+            // Verify orchestrator SKILL.md exists.
+            let orch_path = skills_dir.join("loopdeck-orchestrator/SKILL.md");
+            assert!(orch_path.exists());
+            let content = fs::read_to_string(&orch_path).unwrap();
+            assert!(content.contains("name: loopdeck:orchestrator"));
+
+            // Verify the stack-specific skill and manifest also exist.
+            assert!(skills_dir.join("loopdeck-rust-expert/SKILL.md").exists());
+            assert!(skills_dir.join(".loopdeck-manifest.json").exists());
+        }
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -716,6 +735,34 @@ mod tests {
         // Files should still exist and be unchanged
         let rust_path = dir.join(".claude/skills/loopdeck-rust-expert/SKILL.md");
         assert!(rust_path.exists());
+        let codex_rust_path = dir.join(".agents/skills/loopdeck-rust-expert/SKILL.md");
+        assert!(codex_rust_path.exists());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_copy_skills_backfills_missing_codex_root() {
+        let dir = temp_dir();
+        let claude_skills = skills_dir_for_harness(&dir, AgentHarness::Claude);
+        let claude_skill = claude_skills.join("loopdeck-memory/SKILL.md");
+        fs::create_dir_all(claude_skill.parent().unwrap()).unwrap();
+        fs::write(&claude_skill, "KEEP-CLAUDE").unwrap();
+        write_manifest(
+            &claude_skills,
+            &SkillManifest {
+                version: "0.2.0".to_string(),
+                skills: vec!["loopdeck-memory".to_string()],
+            },
+        )
+        .unwrap();
+
+        copy_skills_with_version(&dir, &[], "0.2.0").unwrap();
+
+        assert_eq!(fs::read_to_string(&claude_skill).unwrap(), "KEEP-CLAUDE");
+        assert!(skills_dir_for_harness(&dir, AgentHarness::Codex)
+            .join("loopdeck-memory/SKILL.md")
+            .exists());
 
         fs::remove_dir_all(&dir).unwrap();
     }

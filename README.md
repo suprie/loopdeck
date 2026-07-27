@@ -20,9 +20,11 @@ your-repo/
 │   └── sessions/
 │       ├── active.jsonl    # live agent transcript
 │       └── archive-*.jsonl # rotated past conversations
-└── .claude/                # seeded on import — skills, hooks, settings
-    ├── skills/
-    └── settings.local.json
+├── .claude/                # Claude Code — skills, hooks, settings
+│   ├── skills/
+│   └── settings.local.json
+└── .agents/
+    └── skills/             # Codex project skills
 ```
 
 Any tool — AI agent, CLI, editor — can read and write these files. LoopDeck provides the desktop UI and the agent runtime.
@@ -31,7 +33,7 @@ Any tool — AI agent, CLI, editor — can read and write these files. LoopDeck 
 
 **Project discovery & memory**
 - 🔍 **Scans** a directory recursively for repositories (`.git`, `Cargo.toml`, `package.json`, `go.mod`, and more)
-- 📦 **Imports** selected repos; bootstraps `.loopdeck/project.yaml` (description parsed from `README.md`) and seeds `.claude/` with skills + hooks
+- 📦 **Imports** selected repos; bootstraps `.loopdeck/project.yaml` (description parsed from `README.md`), seeds skills for Claude and Codex, and configures Claude hooks
 - 🗂️ **Maintains** a local registry at `~/.config/loopdeck/config.yaml`
 - ✏️ **Edits** descriptions inline, or regenerates from README
 - 📊 **Shows** git freshness (last commit, uncommitted counts) and relative timestamps
@@ -47,7 +49,7 @@ Any tool — AI agent, CLI, editor — can read and write these files. LoopDeck 
 
 **Composer**
 - `@` **-mention autocomplete** for files and folders, with ranked fuzzy search across the whole tree
-- `/` **-skill discovery** lists the project's installed skills (parsed from `.claude/skills/*/SKILL.md`)
+- `/` **-skill discovery** lists the active harness's installed skills (`.claude/skills` for Claude, `.agents/skills` for Codex)
 
 ## Quick Start
 
@@ -165,7 +167,7 @@ loopdeck/
 │       ├── claude_session.rs  # subprocess lifecycle, streaming read loop
 │       ├── conversation.rs    # transcript load/archive/resume, history
 │       ├── permission.rs      # tool-approval policy + allow rules
-│       ├── skills.rs          # copy skills/hooks into .claude/ on import
+│       ├── skills.rs          # install skills for both harnesses + Claude hooks
 │       ├── logging.rs         # tracing + file appender
 │       └── error.rs           # AppError (thiserror + serde)
 ├── templates/                 # bundled skills + hooks, seeded on import

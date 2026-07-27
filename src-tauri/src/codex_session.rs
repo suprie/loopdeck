@@ -27,7 +27,13 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-const READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// Bound app-server setup handshakes so a broken child cannot hold the first
+/// turn forever. Once a turn has been accepted, protocol silence is valid:
+/// Codex may spend longer than this inside a tool without emitting JSONL.
+const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// A graceful Stop should complete quickly. If app-server itself is wedged,
+/// waiting forever would leave the project locked in "Agent is working".
+const INTERRUPT_GRACE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct CodexSession {
     child: Option<Child>,
@@ -274,13 +280,29 @@ impl CodexSession {
         let mut start_response_seen = false;
         let mut interrupt_requested = false;
         let mut interrupt_sent = false;
+        let mut interrupt_deadline: Option<tokio::time::Instant> = None;
 
         loop {
+            let stop_deadline = interrupt_deadline;
             let message = tokio::select! {
                 biased;
+                _ = async move {
+                    match stop_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.abort_child();
+                    return Err(AppError::Agent(format!(
+                        "Codex did not complete the interrupted turn within {}s; the wedged app-server was terminated",
+                        INTERRUPT_GRACE_TIMEOUT.as_secs()
+                    )));
+                }
                 interrupt = &mut interrupt_rx, if !interrupt_requested => {
                     if interrupt.is_ok() {
                         interrupt_requested = true;
+                        interrupt_deadline =
+                            Some(tokio::time::Instant::now() + INTERRUPT_GRACE_TIMEOUT);
                         if let Some(turn_id) = active_turn_id.as_deref() {
                             let id = self.next_id();
                             self.write_message(json!({
@@ -293,7 +315,13 @@ impl CodexSession {
                     }
                     continue;
                 }
-                message = self.read_message() => message?,
+                message = async {
+                    if start_response_seen {
+                        self.read_message().await
+                    } else {
+                        self.read_message_with_timeout(Some(HANDSHAKE_READ_TIMEOUT)).await
+                    }
+                } => message?,
             };
 
             if message.get("id").and_then(Value::as_u64) == Some(request_id) {
@@ -315,6 +343,8 @@ impl CodexSession {
                         }))
                         .await?;
                         interrupt_sent = true;
+                        interrupt_deadline =
+                            Some(tokio::time::Instant::now() + INTERRUPT_GRACE_TIMEOUT);
                     }
                 }
                 continue;
@@ -346,9 +376,7 @@ impl CodexSession {
                 "item/agentMessage/delta" => {
                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
                         text_acc.push_str(delta);
-                        blocks.push(ContentBlockRecord::Text {
-                            text: delta.to_owned(),
-                        });
+                        append_text_block(&mut blocks, delta);
                         if let Some(channel) = channel {
                             let _ = channel.send(ClaudeEvent::TextDelta {
                                 text: delta.to_owned(),
@@ -359,9 +387,7 @@ impl CodexSession {
                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
                         thinking_acc.push_str(delta);
-                        blocks.push(ContentBlockRecord::Thinking {
-                            thinking: delta.to_owned(),
-                        });
+                        append_thinking_block(&mut blocks, delta);
                         if let Some(channel) = channel {
                             let _ = channel.send(ClaudeEvent::ThinkingDelta {
                                 thinking: delta.to_owned(),
@@ -410,9 +436,7 @@ impl CodexSession {
                                 // suppression. Preserve a usable transcript.
                                 if text_acc.is_empty() && !final_text.is_empty() {
                                     text_acc.push_str(final_text);
-                                    blocks.push(ContentBlockRecord::Text {
-                                        text: final_text.to_owned(),
-                                    });
+                                    append_text_block(&mut blocks, final_text);
                                     if let Some(channel) = channel {
                                         let _ = channel.send(ClaudeEvent::TextDelta {
                                             text: final_text.to_owned(),
@@ -498,6 +522,8 @@ impl CodexSession {
                     }))
                     .await?;
                     interrupt_sent = true;
+                    interrupt_deadline =
+                        Some(tokio::time::Instant::now() + INTERRUPT_GRACE_TIMEOUT);
                 }
             }
 
@@ -691,16 +717,30 @@ impl CodexSession {
     }
 
     async fn read_message(&mut self) -> Result<Value, AppError> {
+        self.read_message_with_timeout(None).await
+    }
+
+    async fn read_message_with_timeout(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Value, AppError> {
         let mut line = String::new();
-        let bytes = tokio::time::timeout(READ_TIMEOUT, self.stdout.read_line(&mut line))
-            .await
-            .map_err(|_| {
-                AppError::Agent(format!(
-                    "Codex produced no stdout for {}s — assuming stuck",
-                    READ_TIMEOUT.as_secs()
-                ))
-            })?
-            .map_err(|e| AppError::Agent(format!("read from Codex failed: {e}")))?;
+        let bytes = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, self.stdout.read_line(&mut line))
+                .await
+                .map_err(|_| {
+                    AppError::Agent(format!(
+                        "Codex app-server did not respond to a handshake within {}s",
+                        timeout.as_secs()
+                    ))
+                })?
+                .map_err(|e| AppError::Agent(format!("read from Codex failed: {e}")))?,
+            None => self
+                .stdout
+                .read_line(&mut line)
+                .await
+                .map_err(|e| AppError::Agent(format!("read from Codex failed: {e}")))?,
+        };
         if bytes == 0 {
             return Err(AppError::Agent(
                 "Codex app-server closed stdout unexpectedly".into(),
@@ -720,7 +760,9 @@ impl CodexSession {
 
     async fn wait_for_response(&mut self, id: u64) -> Result<Value, AppError> {
         loop {
-            let message = self.read_message().await?;
+            let message = self
+                .read_message_with_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+                .await?;
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
@@ -740,6 +782,18 @@ impl CodexSession {
             .map(|status| status.is_some())
             .map_err(|e| AppError::Agent(format!("failed to inspect Codex process: {e}")))
     }
+
+    pub(crate) fn is_usable(&mut self) -> bool {
+        matches!(self.child_exited(), Ok(false))
+    }
+
+    fn abort_child(&mut self) {
+        self.stdin.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+        }
+        self.initialized = false;
+    }
 }
 
 impl Drop for CodexSession {
@@ -751,6 +805,28 @@ impl Drop for CodexSession {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
         }
+    }
+}
+
+/// Preserve semantic block ordering without persisting one block per streamed
+/// token. A tool/thinking block remains a boundary, so only adjacent text
+/// deltas are coalesced.
+fn append_text_block(blocks: &mut Vec<ContentBlockRecord>, delta: &str) {
+    match blocks.last_mut() {
+        Some(ContentBlockRecord::Text { text }) => text.push_str(delta),
+        _ => blocks.push(ContentBlockRecord::Text {
+            text: delta.to_owned(),
+        }),
+    }
+}
+
+/// Thinking deltas follow the same adjacency rule as assistant text.
+fn append_thinking_block(blocks: &mut Vec<ContentBlockRecord>, delta: &str) {
+    match blocks.last_mut() {
+        Some(ContentBlockRecord::Thinking { thinking }) => thinking.push_str(delta),
+        _ => blocks.push(ContentBlockRecord::Thinking {
+            thinking: delta.to_owned(),
+        }),
     }
 }
 
@@ -961,6 +1037,40 @@ fn nonnegative_u64(value: Option<&Value>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_deltas_coalesce_without_crossing_content_boundaries() {
+        let mut blocks = Vec::new();
+
+        append_text_block(&mut blocks, "I");
+        append_text_block(&mut blocks, "'ll check");
+        blocks.push(ContentBlockRecord::ToolUse {
+            name: "Bash".into(),
+            input: r#"{"command":"pwd"}"#.into(),
+        });
+        append_text_block(&mut blocks, "Done");
+        append_text_block(&mut blocks, ".");
+        append_thinking_block(&mut blocks, "Need");
+        append_thinking_block(&mut blocks, " verify");
+
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlockRecord::Text { text } if text == "I'll check"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            ContentBlockRecord::ToolUse { name, .. } if name == "Bash"
+        ));
+        assert!(matches!(
+            &blocks[2],
+            ContentBlockRecord::Text { text } if text == "Done."
+        ));
+        assert!(matches!(
+            &blocks[3],
+            ContentBlockRecord::Thinking { thinking } if thinking == "Need verify"
+        ));
+    }
 
     #[test]
     fn maps_codex_command_item_to_loopdeck_bash_tool() {

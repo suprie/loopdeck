@@ -402,12 +402,12 @@ Do not label an epic "done" when LoopDeck can only prove implementation.
 
 ### Phase 4 — Migration and compatibility
 
-- [ ] `structured-state/legacy-reader` Preserve legacy `loops.md` read mode through 0.2.x
-- [ ] `structured-state/migration-preview` Build exact-match migration with warnings and no fuzzy matching
-- [ ] `structured-state/migration-confirmation` Require explicit confirmation before writing structured state
-- [ ] `structured-state/migration-backup` Preserve `loops.legacy.md` and make migration idempotent
-- [ ] `structured-state/migration-ui` Add a project-level migration and reconciliation surface
-- [ ] `structured-state/migration-tests` Cover empty, current-only, history, ambiguous-title, missing-origin, both-files, and cancelled migration cases
+- [x] `structured-state/legacy-reader` Preserve legacy `loops.md` read mode through 0.2.x
+- [x] `structured-state/migration-preview` Build exact-match migration with warnings and no fuzzy matching
+- [x] `structured-state/migration-confirmation` Require explicit confirmation before writing structured state
+- [x] `structured-state/migration-backup` Preserve `loops.legacy.md` and make migration idempotent
+- [x] `structured-state/migration-ui` Add a project-level migration and reconciliation surface
+- [x] `structured-state/migration-tests` Cover empty, current-only, history, ambiguous-title, missing-origin, both-files, and cancelled migration cases
 
 ### Phase 5 — Derived progress UI
 

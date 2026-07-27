@@ -77,16 +77,17 @@ pub struct DirEntry {
 }
 
 /// A skill installed for a project, surfaced by the composer's `/`-skill
-/// discovery menu. Read from `<repo>/.claude/skills/<dir>/SKILL.md` — the files
-/// `copy_skills()` writes during project bootstrap.
+/// discovery menu. Read from the active harness's native project skill root:
+/// `.claude/skills/<dir>/SKILL.md` for Claude or
+/// `.agents/skills/<dir>/SKILL.md` for Codex.
 ///
 /// `name` is the SKILL.md frontmatter `name` (e.g. `loopdeck:rust-expert`),
-/// which is what the `claude` CLI invokes the skill by — so the frontend
+/// which is what the active harness invokes the skill by — so the frontend
 /// inserts it verbatim as `/<name>`. It is distinct from `directory`, the
 /// on-disk folder name (`loopdeck-rust-expert`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillEntry {
-    /// Frontmatter `name` — the invocation token the `claude` CLI recognizes.
+    /// Frontmatter `name` — the invocation token the active harness recognizes.
     pub name: String,
     /// On-disk skill directory name (e.g. `loopdeck-rust-expert`).
     pub directory: String,
@@ -212,8 +213,13 @@ pub(crate) async fn with_session(
         // Apply a changed harness as soon as the existing session is idle. If
         // a turn is still running, preserve the live process; the next send
         // after it completes will replace it.
-        let current_harness = arc.try_lock().ok().map(|session| session.harness());
-        if should_replace_cached_session(current_harness, desired_harness) {
+        let current_session = arc.try_lock().ok().map(|mut session| {
+            let harness = session.harness();
+            let usable = session.is_usable();
+            (harness, usable)
+        });
+        let should_replace = should_replace_cached_session(current_session, desired_harness);
+        if should_replace {
             map_guard.remove(path);
         } else {
             return Ok(Arc::clone(&arc));
@@ -232,15 +238,18 @@ pub(crate) async fn with_session(
     Ok(arc)
 }
 
-/// Replace only an idle cached session whose provider no longer matches.
+/// Replace an idle cached session when its provider changed or it is unusable.
 ///
 /// `None` means the inner mutex is busy, so the in-flight provider must be
 /// preserved until the next send.
 fn should_replace_cached_session(
-    current_harness: Option<AgentHarness>,
+    current_session: Option<(AgentHarness, bool)>,
     desired_harness: AgentHarness,
 ) -> bool {
-    matches!(current_harness, Some(current) if current != desired_harness)
+    matches!(
+        current_session,
+        Some((current, usable)) if !usable || current != desired_harness
+    )
 }
 
 /// Get (or create) the per-project `AskUserQuestion` slot.
@@ -395,7 +404,7 @@ mod tests {
     #[test]
     fn idle_cached_session_is_reused_when_harness_matches() {
         assert!(!should_replace_cached_session(
-            Some(AgentHarness::Codex),
+            Some((AgentHarness::Codex, true)),
             AgentHarness::Codex,
         ));
     }
@@ -403,7 +412,15 @@ mod tests {
     #[test]
     fn idle_cached_session_is_replaced_when_harness_changes() {
         assert!(should_replace_cached_session(
-            Some(AgentHarness::Claude),
+            Some((AgentHarness::Claude, true)),
+            AgentHarness::Codex,
+        ));
+    }
+
+    #[test]
+    fn unusable_cached_session_is_replaced_even_when_harness_matches() {
+        assert!(should_replace_cached_session(
+            Some((AgentHarness::Codex, false)),
             AgentHarness::Codex,
         ));
     }
