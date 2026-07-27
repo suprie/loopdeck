@@ -768,3 +768,9 @@
 - **Status**: accepted
 - **Context**: Removing the false active-turn stdout timeout correctly allowed long silent tools, but exposed a distinct failure mode: a genuinely wedged app-server could ignore `turn/interrupt`. LoopDeck then waited indefinitely for `turn/completed`, leaving the per-project mutex and UI stuck on “Agent is working” even after Stop was pressed.
 - **Consequences**: Once Stop is requested, Codex gets a 15-second grace period to complete the interrupted turn. If the deadline expires, LoopDeck closes stdin, terminates the child, returns a specific harness error, and clears the normal turn/interaction state through the existing error path. The dead session reports itself unusable; `with_session` replaces an idle unusable Codex cache entry on the next send while still preserving any currently locked in-flight session. Active turns remain unbounded before Stop, so legitimate long-running silent tools are not reclassified as stuck.
+
+## 2026-07-27 — Provider boundary returns evidence, not derived status
+
+- **Status**: accepted
+- **Context**: Phase 6 initially defined `DeliveryProvider` as returning `DeliveryStatus`. That made `InReview` and `Shipped` circular and unconstructable in core production code—the provider could only return a derived status it had already created—and strict dead-code validation correctly rejected both variants and the unused trait.
+- **Consequences**: Providers now return neutral `DeliveryEvidence { in_review, shipped }`. The progress read model maps that evidence into `InReview` or `Shipped` only after a reachable local commit establishes `Committed`; missing providers and provider errors retain the strongest local state. This activates the optional provider boundary without suppressing dead-code warnings or making remote access an offline runtime dependency.

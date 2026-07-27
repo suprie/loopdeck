@@ -35,12 +35,18 @@ pub enum DeliveryStatus {
 
 /// Optional remote enrichment boundary. Core progress never requires an
 /// implementation: without one, the strongest provable local state wins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliveryEvidence {
+    pub in_review: bool,
+    pub shipped: bool,
+}
+
 pub trait DeliveryProvider {
     fn delivery_for_commit(
         &self,
         repo_path: &Path,
         commit: &str,
-    ) -> Result<Option<DeliveryStatus>, AppError>;
+    ) -> Result<DeliveryEvidence, AppError>;
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -84,6 +90,17 @@ struct IndexedState {
 }
 
 pub fn snapshot(repo_path: &Path) -> Result<ProgressSnapshot, AppError> {
+    snapshot_with_provider(repo_path, None)
+}
+
+/// Build the progress read model with optional remote delivery enrichment.
+///
+/// `None` is the normal offline path. Provider failures are deliberately
+/// non-fatal: the strongest locally provable delivery state remains visible.
+pub fn snapshot_with_provider(
+    repo_path: &Path,
+    provider: Option<&dyn DeliveryProvider>,
+) -> Result<ProgressSnapshot, AppError> {
     let epics = epic::parse_epics(repo_path);
     let loaded = execution::load(repo_path)?;
     if !loaded.file_present {
@@ -95,10 +112,15 @@ pub fn snapshot(repo_path: &Path) -> Result<ProgressSnapshot, AppError> {
             execution_file_present: false,
         });
     }
-    Ok(derive(repo_path, &epics, &loaded.state))
+    Ok(derive(repo_path, &epics, &loaded.state, provider))
 }
 
-fn derive(repo_path: &Path, epics: &[Epic], state: &ExecutionState) -> ProgressSnapshot {
+fn derive(
+    repo_path: &Path,
+    epics: &[Epic],
+    state: &ExecutionState,
+    provider: Option<&dyn DeliveryProvider>,
+) -> ProgressSnapshot {
     let index = execution_index(state);
     let mut loops = BTreeMap::new();
     let mut prds = BTreeMap::new();
@@ -126,13 +148,15 @@ fn derive(repo_path: &Path, epics: &[Epic], state: &ExecutionState) -> ProgressS
                     let commit = indexed.and_then(|value| value.commit.clone());
                     let commit_reachability =
                         git::commit_reachability(repo_path, commit.as_deref());
-                    let delivery = match (execution, commit_reachability) {
+                    let local_delivery = match (execution, commit_reachability) {
                         (ExecutionStatus::Completed, CommitReachability::Reachable) => {
                             DeliveryStatus::Committed
                         }
                         (ExecutionStatus::Completed, _) => DeliveryStatus::Implemented,
                         _ => DeliveryStatus::Planned,
                     };
+                    let delivery =
+                        enrich_delivery(repo_path, commit.as_deref(), local_delivery, provider);
                     let discrepancy = match (item.checked, execution) {
                         (true, status) if status != ExecutionStatus::Completed => Some(
                             "Authored checkbox is checked, but structured execution has not completed"
@@ -180,6 +204,28 @@ fn derive(repo_path: &Path, epics: &[Epic], state: &ExecutionState) -> ProgressS
         epics: epic_counts,
         unmatched,
         execution_file_present: true,
+    }
+}
+
+fn enrich_delivery(
+    repo_path: &Path,
+    commit: Option<&str>,
+    local: DeliveryStatus,
+    provider: Option<&dyn DeliveryProvider>,
+) -> DeliveryStatus {
+    let (Some(provider), Some(commit), DeliveryStatus::Committed) = (provider, commit, local)
+    else {
+        return local;
+    };
+    let evidence = provider
+        .delivery_for_commit(repo_path, commit)
+        .unwrap_or_default();
+    if evidence.shipped {
+        DeliveryStatus::Shipped
+    } else if evidence.in_review {
+        DeliveryStatus::InReview
+    } else {
+        local
     }
 }
 
@@ -344,7 +390,7 @@ mod tests {
             }),
             ..ExecutionState::default()
         };
-        let result = derive(Path::new("."), &epics, &state);
+        let result = derive(Path::new("."), &epics, &state, None);
         let progress = &result.loops["prd/loop"];
         assert_eq!(progress.execution, ExecutionStatus::InProgress);
         assert!(progress.discrepancy.is_some());
@@ -369,8 +415,61 @@ mod tests {
             }),
             ..ExecutionState::default()
         };
-        let result = derive(Path::new("."), &epics, &state);
+        let result = derive(Path::new("."), &epics, &state, None);
         assert_eq!(result.unmatched.len(), 1);
         assert_eq!(result.unmatched[0].id, "prd/missing");
+    }
+
+    struct StaticDeliveryProvider(DeliveryEvidence);
+
+    impl DeliveryProvider for StaticDeliveryProvider {
+        fn delivery_for_commit(
+            &self,
+            _repo_path: &Path,
+            _commit: &str,
+        ) -> Result<DeliveryEvidence, AppError> {
+            Ok(self.0)
+        }
+    }
+
+    #[test]
+    fn provider_can_enrich_committed_delivery_without_weakening_local_state() {
+        let review = StaticDeliveryProvider(DeliveryEvidence {
+            in_review: true,
+            shipped: false,
+        });
+        let shipped = StaticDeliveryProvider(DeliveryEvidence {
+            in_review: true,
+            shipped: true,
+        });
+        let no_remote_evidence = StaticDeliveryProvider(DeliveryEvidence::default());
+
+        assert_eq!(
+            enrich_delivery(
+                Path::new("."),
+                Some("abc123"),
+                DeliveryStatus::Committed,
+                Some(&review),
+            ),
+            DeliveryStatus::InReview
+        );
+        assert_eq!(
+            enrich_delivery(
+                Path::new("."),
+                Some("abc123"),
+                DeliveryStatus::Committed,
+                Some(&shipped),
+            ),
+            DeliveryStatus::Shipped
+        );
+        assert_eq!(
+            enrich_delivery(
+                Path::new("."),
+                Some("abc123"),
+                DeliveryStatus::Committed,
+                Some(&no_remote_evidence),
+            ),
+            DeliveryStatus::Committed
+        );
     }
 }

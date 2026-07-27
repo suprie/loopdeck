@@ -211,7 +211,8 @@ fn execute(cmd: &StateCli) -> Result<(), String> {
                         .map(|commit| GitEvidence { commit })
                         .map_err(AppError::ExecutionState)
                 })
-                .transpose()?;
+                .transpose()
+                .map_err(fmt_err)?;
             let next = loaded
                 .state
                 .complete_current(Utc::now(), git, *promote_next)
