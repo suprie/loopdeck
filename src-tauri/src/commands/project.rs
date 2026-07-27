@@ -501,14 +501,20 @@ pub async fn rescan_project(
         paths::resolve_registered_root(&config, &path)?
     };
 
-    // Refresh git info on the blocking pool — spawns git subprocesses and walks
-    // the tree for last-modified, so it must not run on the tokio worker. Clone
-    // the root into the closure so the canonical path is still available for
-    // the apply-pass lookup below.
+    // Refresh git info + next-steps progress on the blocking pool — git spawns
+    // subprocesses and walks the tree for last-modified, so it must not run on
+    // the tokio worker; the next-steps read is a cheap fs read colocated here
+    // for the same reason `list_projects`/`import_project` colocate it with
+    // their own git refresh. Clone the root into the closure so the canonical
+    // path is still available for the apply-pass lookup below.
     let target_for_probe = target.clone();
-    let git_info = tokio::task::spawn_blocking(move || git::check_git_info(&target_for_probe))
-        .await
-        .map_err(blocking_task_failed)?;
+    let (git_info, (next_steps_total, next_steps_done)) = tokio::task::spawn_blocking(move || {
+        let git_info = git::check_git_info(&target_for_probe);
+        let next_steps = next_steps_counts(&target_for_probe);
+        (git_info, next_steps)
+    })
+    .await
+    .map_err(blocking_task_failed)?;
 
     // Apply + persist under a brief lock. Note: `last_commit_message` is
     // intentionally not refreshed here — preserved from the prior behaviour.
@@ -520,6 +526,8 @@ pub async fn rescan_project(
         entry.last_commit_date = git_info.last_commit_date.clone();
         entry.last_modified = git_info.last_modified.clone();
         entry.uncommitted = git_info.uncommitted.into();
+        entry.next_steps_total = next_steps_total;
+        entry.next_steps_done = next_steps_done;
 
         config::update_project_status(entry);
 
