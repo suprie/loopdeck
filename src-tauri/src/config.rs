@@ -159,12 +159,26 @@ pub struct ProjectEntry {
     /// `skip_serializing_if` keeps the registry tidy for the common case.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autonomous: bool,
+    /// Total `## Next Steps` checklist items parsed from `.loopdeck/loops.md`.
+    /// Ephemeral — derived at read time, not meant to be a stable persisted
+    /// fact, so it's excluded from the registry when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub next_steps_total: usize,
+    /// Checked (`- [x]`) items within `next_steps_total`. Ephemeral, same
+    /// rationale as `next_steps_total`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub next_steps_done: usize,
 }
 
 /// serde `skip_serializing_if` predicate: omit `run_state` when `Idle` so the
 /// ephemeral field doesn't clutter the persisted YAML.
 fn is_run_state_idle(state: &RunState) -> bool {
     matches!(state, RunState::Idle)
+}
+
+/// serde `skip_serializing_if` predicate for the ephemeral next-steps counts.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// serde `skip_serializing_if` predicate for `AgentConfig::has_auth_token`:
@@ -191,6 +205,8 @@ impl Default for ProjectEntry {
             uncommitted: UncommittedStats::default(),
             run_state: RunState::Idle,
             autonomous: false,
+            next_steps_total: 0,
+            next_steps_done: 0,
         }
     }
 }
