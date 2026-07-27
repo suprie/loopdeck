@@ -2,9 +2,10 @@
 
 ## Current
 
-- **Started**: 2026-07-26
-- **Goal**: Milestone **0.2.1 — Structured Execution State** (`docs/epics/support-project-management/prd-structured-execution-state.md`) — complete. All 6 phases done; next work is unscoped (supporting backlog or the proposed 0.3.0 `agent-full-access` epic).
+- **Started**: 2026-07-27
+- **Goal**: Milestone **0.3.0 — Agent Full Access + Verify + Ship** (`docs/epics/agent-full-access/`). Reconciliation loop, not new implementation — both PRDs under this epic (`prd-full-access-tier.md`, `prd-verify-and-ship-skills.md`) were already fully implemented on 2026-07-23/24 (as "Per-project Autonomous Mode" and "Release Gate C") **before** the epic doc itself was committed (`e61ce7b`), so `status: proposed` and all-unchecked boxes were stale from the start — same pattern as the `prd-skill-split` near-miss.
 - **Status**: completed (2026-07-27)
+- ✅ **0.3.0 `agent-full-access` epic reconciliation + version bump** (2026-07-27) — Flipped `status: proposed` → `accepted` on the epic README and both PRDs; checked off all phase items in both PRDs against real symbols (`PermissionMode::Autonomous`/`is_autonomous()`/`ProjectEntry::autonomous`/`set_project_autonomous`/`resolve_permission_policy` for the runtime half; `templates/skills/loopdeck-{open-pr,prd-verifier}/SKILL.md` + the orchestrator's Phase 6/7 wiring for the skills half). Added an "Amendment" section to all three docs mapping every PRD-proposed name to its shipped equivalent (e.g. `FullAccess` → `Autonomous`, `ProjectPermissionMode` enum → plain `autonomous: bool`, `.agents/skills/` → `templates/skills/` post-SSOT-reconciliation) so the deviation reads as documented, not as unfinished work. Bumped the app version **0.2.0 → 0.3.0** in the three places that must agree (`package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`) plus `Cargo.lock`'s own package entry, per `docs/release-pipeline.md`'s version contract — this is the first version bump since the runtime/skills work landed, formalizing that 0.3.0's scope is done. `cargo metadata` confirms the new version resolves cleanly. No behavior change; docs + version strings only.
 - ✅ **`prd-skill-split.md` amended in place to document Option A** (2026-07-27) — Closed the gap the 2026-07-27 near-miss decision flagged: the PRD file itself still read as a literal-removal plan with unexplained unchecked boxes, with Option A's rationale living only in `decisions.md`. Added an "Amendment — Option A" section to the PRD (cross-referencing both dated decisions), flipped frontmatter `status: proposed` → `accepted`, struck through and annotated the two orchestrator-removal Goals rows as **Superseded**, and checked off every Phase 1–3 item that's actually implemented (verified against `skills.rs:577` `test_core_skills_always_included`, `commands/project.rs::refresh_skills`, `ProjectDetail.tsx`, both new SKILL.md files) while leaving `remove-orchestrator-const`/`orchestrator-removal-migration` unchecked with an explicit "superseded, not a to-do" note. Found two genuinely open (non-deviation) items and left them unchecked: `prefix-convention-doc` (no `CONTRIBUTING.md` in this repo) and `dogfood-refresh` (not yet run against this repo's own gitignored `.claude/skills/`). Doc-only, no code change. See decision of same date.
 - ✅ **`prd-structured-execution-state` Phase 1-3 checklist reconciliation** (2026-07-27) — Closed the gap flagged by the prior `prd-spec-layer`/`prd-epics-view` pass (line below): Phases 1-3 (16 real items; the 2 `- [ ]` at lines 123-124 and 129-133 are fenced authoring-format examples, not checklist items) were stale-unchecked despite `decisions.md` recording each phase complete on 2026-07-25. Verified every item against a real symbol/test before checking it: Phase 1 — `PrdLoop.id`/`split_loop_id` (`epic.rs:128,779`), `validate_loop_ids` + `LoopIdDiagnostic` with 5 passing tests (`epic.rs:843`, `test_validate_loop_ids_*`), the epic-author skill's stable-ID section (`templates/skills/loopdeck-epic-author/SKILL.md:184-234`), `EpicsPanel`/`EpicsView`/`LoopsPanel` promote-disabled + ID-chip rendering, and stable IDs present on every checklist item across all four 0.2.0 PRDs (`spec-layer/*`, `epics-view/*`, `epic-author/*`). Phase 2 — `ExecutionState`/`ActiveLoop`/`QueuedLoop`/`HistoryLoop`/`LoopOrigin`/`Outcome`/`GitEvidence` structs, `validate_invariants`/`validate`/schema-version check, `load`/`save` via `persist::atomic_write` + `.bak`, `LoadSource`/`recover_from_backup`, and all 6 named test categories confirmed by function name (`round_trip_preserves_state`, `stale_writer_is_rejected_by_revision_check`, `duplicate_queue_id_is_invalid`, `newer_schema_version_loads_read_only_and_preserves_file`/`older_schema_version_loads_read_only`, `malformed_primary_recovers_from_backup_and_preserves_primary`, `complete_current_is_atomic_clear_append_bump`) in `execution.rs`. Phase 3 — `promote_loop_by_id`/`complete_current_loop`/`abandon_current_loop`/`promote_next_queued_loop` (`commands/execution.rs`), `state_cli.rs` wired in `main.rs`, and both `loopdeck-memory` and `loopdeck-loop-runner` skills' mode-aware "Structured execution state" sections that route exclusively through `loopdeck state` (never hand-editing `execution.yaml`) while preserving legacy-mode freeform `loops.md` edits only for unmigrated projects. All 16 items now `[x]`; milestone 0.2.1's PRD file is now fully checked end-to-end (Phases 1-6). No code changes — checkbox reconciliation only.
 - ✅ **Phase 5 — Derived progress UI + Phase 6 — Git delivery evidence** (2026-07-27, worktree `feat/0.2.1-phase5-progress-ui`) — The backend for both phases (`src-tauri/src/progress.rs`'s `execution_index`/`derive` join + `ExecutionStatus`/`DeliveryStatus`/discrepancy computation, `git.rs`'s `commit_reachability`/`verified_commit`, and the `get_progress_snapshot`/`export_execution_summary` commands) had already landed in the `6d6adbc` "Support skills for Codex" commit, but its PRD checklist boxes were never checked and the frontend never wired to it — so this loop closed the actual gap. Added TS mirrors of the read model (`ProgressSnapshot`/`LoopProgress`/`ExecutionStatus`/`DeliveryStatus`/`ProgressCount`/`UnmatchedExecution` in `types/index.ts`) + `tauri.ts` wrappers (`getProgressSnapshot`, `exportExecutionSummary`). `EpicsPanel.tsx`: per-loop derived execution/delivery badge + discrepancy warning icon (authored-checkbox vs. derived-state disagreement) next to each checklist item, PRD/epic progress bars driven by stable-ID counts (falls back to checkbox counting in legacy/empty mode), an "Unmatched execution records" reconciliation panel, and an "Export summary" button (writes `.loopdeck/execution-summary.md`, non-authoritative). `EpicsView.tsx` (cross-project): epic progress bars now prefer the execution.yaml-derived count over checkbox counting per project, satisfying acceptance criterion 4. All 10 Phase 5/6 PRD checklist items now `[x]`. No Rust changes (backend was pre-existing); gates green: fmt/clippy(lib, `-D warnings`)/test(445 passed, 8 ignored)/tsc/build.
@@ -153,6 +154,38 @@ Source: [`docs/epics/support-project-management/prd-structured-execution-state.m
 
 Milestone 0.2.1 is now implementation-complete — all 6 phases of
 `prd-structured-execution-state` are done.
+
+### Milestone 0.3.0 — Agent Full Access + Verify + Ship
+
+Source: [`docs/epics/agent-full-access/README.md`](../docs/epics/agent-full-access/README.md)
+
+Add a per-project "full access" (shipped as **Autonomous Mode**) permission
+tier so a trusted project's agent runs unattended, then close the
+orchestrator's build→verify→ship loop with two skills that check the work
+against its PRD and open the resulting pull request. Both halves were
+implemented under the **Release Gate A/C** work below on 2026-07-23/24 —
+before this epic's docs existed — and reconciled into this epic's PRDs on
+2026-07-27 (see `## Current`).
+
+- [x] **prd-full-access-tier** (done 2026-07-23, reconciled 2026-07-27) —
+  `PermissionMode::Autonomous` + `is_autonomous()` (`permission.rs`),
+  `ProjectEntry::autonomous: bool` (serde-default, back-compat),
+  `set_project_autonomous` IPC, `resolve_permission_policy` threaded to
+  both spawn sites, `OverviewTab` toggle + confirm dialog, mode-aware
+  `PermissionModeBadge`, per-turn "auto-approved" tag in `Chat.tsx`. See
+  the PRD's Amendment section for the full proposed-name → shipped-name map.
+- [x] **prd-verify-and-ship-skills** (done 2026-07-23/24 as Release Gate C,
+  reconciled 2026-07-27) — `loopdeck:open-pr` + `loopdeck:prd-verifier`
+  skills (now canonical at `templates/skills/`, post-SSOT-reconciliation),
+  orchestrator Phase 6 "Verify Against PRD" / Phase 7 "Decide & Open PR"
+  wiring, end-to-end smoke confirmed. See Release Gate C below and the
+  PRD's Amendment section.
+
+Milestone 0.3.0 is implementation-complete. App version bumped 0.2.0 →
+0.3.0 (`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`
+/ `Cargo.lock`) on 2026-07-27 to reflect it. Next unscoped work: the
+supporting backlog (P2/P3/P5/P6 below) or the already-drafted 0.4.0
+`overnight-orchestration` epic (`docs/epics/overnight-orchestration/`).
 
 ### Release Gate A — Hardened private alpha
 

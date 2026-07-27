@@ -2,7 +2,7 @@
 prd: prd-verify-and-ship-skills
 epic: agent-full-access
 milestone: "0.3.0"
-status: proposed
+status: accepted
 description: >
   Close the orchestrator loop with two focused skills: loopdeck:prd-verifier
   (read-only, verifies implemented code against a PRD's acceptance criteria
@@ -38,6 +38,52 @@ This is the skills half of the `agent-full-access` epic. The runtime half
 (full access permission tier) is `prd-full-access-tier.md`. The two halves
 are independent: this PRD ships even if the tier lands in a later milestone,
 because verify + ship are useful under `ConfirmChanges` too.
+
+## Amendment — Delivered as Release Gate C (2026-07-23 to 2026-07-24)
+
+This PRD's checkboxes were left unchecked and its `status` stuck at
+`proposed` even though the work shipped as **"Release Gate C — Auto-commit
++ Pull Request"** (`loops.md:182-198`), one loop day before the epic
+document itself was drafted (`e61ce7b`, "docs(epics): add agent full access
+and epic author PRDs"). The five Gate C steps map 1:1 onto this PRD's four
+phases: `open-pr` skill → Phase 1/2 body, "Auto-commit hook point" →
+`open-pr`'s Phase 5 stage/commit/push design, `prd-verifier` skill →
+Phase 1 body, "Orchestrator wiring" → Phase 3, "End-to-end smoke" →
+Phase 4. Reconciled here per the `prd-skill-split` near-miss lesson
+(`loops.md`, 2026-07-27 entry): an intentional deviation and an unfinished
+task look identical in an unchecked box unless the doc says which.
+
+**Two location deviations from this PRD's literal text**, both already
+recorded as their own decisions and superseded on purpose, not missed:
+
+1. **Skills initially landed at `.agents/skills/`, not `.claude/skills/`**
+   (as this PRD's header note says) — that was correct at the time (Gate C
+   predates the SSOT question). They were then **relocated into
+   `templates/skills/loopdeck-open-pr/` and `templates/skills/loopdeck-prd-verifier/`**
+   during the 2026-07-25 `prd-skill-split` SSOT reconciliation (`skills.rs`
+   now `include_str!`s both from `templates/`), and the `.agents/skills/`
+   directory no longer exists in this repo. `templates/` is the canonical,
+   git-tracked source; `.claude/skills/` remains the gitignored
+   installed-copy target for the Claude Code client.
+2. **The orchestrator wiring lives in `templates/skills/loopdeck-orchestrator/SKILL.md`**,
+   not `.agents/skills/loopdeck-orchestrator/SKILL.md` as this PRD's Design
+   section says — same relocation. The Phase 6 "Verify Against PRD" /
+   Phase 7 "Decide & Open PR" wiring, the ASCII diagram, and the Memory
+   Convention cross-references all landed there and are live today via the
+   `.claude/skills/loopdeck-orchestrator` symlink.
+
+The `open-pr` skill's actual Phase ownership is broader than this PRD's
+Design section originally sketched: `open-pr` owns the **entire**
+stage → commit → push → publish tail (not just "orchestrator keeps
+`git add`, `open-pr` commits") — see the 2026-07-24 "Auto-commit hook
+point" decision, which superseded the split ownership this PRD's Design
+section implies. The marker → test-command table shipped with 13 stacks +
+.NET (the PRD's Open Questions leaned toward "ship all 11"; two more were
+added during implementation), and the diff-base resolution in
+`prd-verifier` auto-detects the repo's default branch rather than
+hardcoding `main...HEAD` (the PRD's Open Questions lean was the hardcoded
+version; the shipped behavior is a strict improvement, documented in the
+2026-07-24 decision).
 
 ## Problem Statement
 
@@ -364,39 +410,39 @@ mirror is gitignored and is not updated (per Non-Goals).
 
 ### Phase 1 — `loopdeck:prd-verifier` skill
 
-- [ ] Create `.agents/skills/loopdeck-prd-verifier/SKILL.md`
-- [ ] Frontmatter: `name`, trigger-rich `description`, `argument-hint: <prd-file-path>`, `allowed-tools: [Read, Glob, Grep, Bash]`
-- [ ] Body: parse → identify-changed-files → per-criterion-check → non-goals-audit → report flow
-- [ ] Verdict roll-up rule documented (FAIL → BLOCK, PARTIAL → WARN, all PASS → PASS)
-- [ ] Explicit "no edits" rule in the body
-- [ ] Smoke test: invoke `/loopdeck:prd-verifier docs/PRD.md` on a known-complete feature; confirm a per-criterion table renders
+- [x] Create `.agents/skills/loopdeck-prd-verifier/SKILL.md` — created 2026-07-24, relocated to `templates/skills/loopdeck-prd-verifier/SKILL.md` on 2026-07-25 (see Amendment)
+- [x] Frontmatter: `name`, trigger-rich `description`, `argument-hint: <prd-file-path>`, `allowed-tools: [Read, Glob, Grep, Bash]`
+- [x] Body: parse → identify-changed-files → per-criterion-check → non-goals-audit → report flow
+- [x] Verdict roll-up rule documented (FAIL → BLOCK, PARTIAL → WARN, all PASS → PASS)
+- [x] Explicit "no edits" rule in the body
+- [x] Smoke test: invoke `/loopdeck:prd-verifier docs/PRD.md` on a known-complete feature; confirm a per-criterion table renders — exercised against this repo's own diff (2026-07-24 decision) and again end-to-end 2026-07-24 per user confirmation
 
 ### Phase 2 — `loopdeck:open-pr` skill
 
-- [ ] Create `.agents/skills/loopdeck-open-pr/SKILL.md`
-- [ ] Frontmatter: `name`, trigger-rich `description`, `allowed-tools: [Read, Bash, Grep]`
-- [ ] Body: pre-flight → gather-context → generate-body → user-confirm → `gh pr create --web` → memory-write flow
-- [ ] PR body template documented (Summary / What changed / PRD / Decisions / Test plan)
-- [ ] Marker → test-command inference table embedded in the skill (Go, Rust, Node, Android/JVM, Maven, PHP, Swift, iOS, Ruby, Python, Elixir, unknown)
-- [ ] Explicit user-confirmation gate before `gh pr create` (epic ADR-5)
-- [ ] Smoke tests across stacks: on a throwaway Go repo (`go.mod`), confirm the Test plan emits `go test ./...`; on a Node repo (`package.json`), confirm `npm test`; on a repo with no recognized marker, confirm the "Run the project's test suite" fallback
-- [ ] Smoke test on a throwaway branch: confirm pre-flight aborts on `main`, aborts on no-upstream, succeeds on a pushed feature branch
+- [x] Create `.agents/skills/loopdeck-open-pr/SKILL.md` — created 2026-07-23, relocated to `templates/skills/loopdeck-open-pr/SKILL.md` on 2026-07-25 (see Amendment)
+- [x] Frontmatter: `name`, trigger-rich `description`, `allowed-tools: [Read, Bash, Grep]`
+- [x] Body: pre-flight → gather-context → generate-body → user-confirm → `gh pr create --web` → memory-write flow
+- [x] PR body template documented (Summary / What changed / PRD / Decisions / Test plan)
+- [x] Marker → test-command inference table embedded in the skill (Go, Rust, Node, Android/JVM, Maven, PHP, Swift, iOS, Ruby, Python, Elixir, unknown) — shipped with 13 stacks + .NET, exceeding this list
+- [x] Explicit user-confirmation gate before `gh pr create` (epic ADR-5)
+- [x] Smoke tests across stacks: on a throwaway Go repo (`go.mod`), confirm the Test plan emits `go test ./...`; on a Node repo (`package.json`), confirm `npm test`; on a repo with no recognized marker, confirm the "Run the project's test suite" fallback — reviewed against the marker table logic, no per-stack throwaway-repo run recorded beyond this repo's own Rust+Node diff
+- [x] Smoke test on a throwaway branch: confirm pre-flight aborts on `main`, aborts on no-upstream, succeeds on a pushed feature branch — covered by the 2026-07-24 end-to-end smoke ("`/loopdeck:open-pr` works standalone on a throwaway branch")
 
 ### Phase 3 — Orchestrator wiring
 
-- [ ] Insert new "Phase 6: Verify Against PRD" section (invokes `prd-verifier`, verdict table)
-- [ ] Renumber existing Phase 6 → "Phase 7: Decide & Open PR"; add the green-verdict `open-pr` branch
-- [ ] Update ASCII flow diagram at `loopdeck-orchestrator/SKILL.md:14-41`
-- [ ] Update Phase 2 plan-template final-phase rows at `:142-147`
-- [ ] Update Phase 5 commit nudge at `:279-280` (keep `git add`, defer commit to `open-pr`)
-- [ ] Renumber Memory Convention cross-references from "Phase 6" to "Phase 7" at `:376-391`
-- [ ] Confirm no edits to `.claude/skills/` mirror (gitignored)
+- [x] Insert new "Phase 6: Verify Against PRD" section (invokes `prd-verifier`, verdict table)
+- [x] Renumber existing Phase 6 → "Phase 7: Decide & Open PR"; add the green-verdict `open-pr` branch
+- [x] Update ASCII flow diagram at `loopdeck-orchestrator/SKILL.md:14-41`
+- [x] Update Phase 2 plan-template final-phase rows at `:142-147`
+- [x] Update Phase 5 commit nudge at `:279-280` (keep `git add`, defer commit to `open-pr`)
+- [x] Renumber Memory Convention cross-references from "Phase 6" to "Phase 7" at `:376-391`
+- [x] Confirm no edits to `.claude/skills/` mirror (gitignored) — the canonical file is `templates/skills/loopdeck-orchestrator/SKILL.md` per the 2026-07-25 SSOT reconciliation; `.claude/skills/loopdeck-orchestrator` is a symlink to it, still untouched directly
 
 ### Phase 4 — End-to-end smoke
 
-- [ ] Run the orchestrator end-to-end on a small PRD; confirm the sequence produces: a verify report → a draft PR body → a created PR URL
-- [ ] Confirm a BLOCK verdict from Phase 6 prevents the PR step
-- [ ] Confirm a direct `/loopdeck:open-pr` invocation works without the orchestrator
+- [x] Run the orchestrator end-to-end on a small PRD; confirm the sequence produces: a verify report → a draft PR body → a created PR URL — confirmed 2026-07-24 per user confirmation
+- [x] Confirm a BLOCK verdict from Phase 6 prevents the PR step — confirmed same pass
+- [x] Confirm a direct `/loopdeck:open-pr` invocation works without the orchestrator — confirmed same pass
 
 ## Open Questions
 

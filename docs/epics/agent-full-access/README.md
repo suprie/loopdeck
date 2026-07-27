@@ -2,7 +2,7 @@
 title: Agent Full Access
 slug: agent-full-access
 milestone: "0.3.0"
-status: proposed
+status: accepted
 started: 2026-07-21
 owner: Suprie
 description: >
@@ -16,6 +16,37 @@ description: >
 ---
 
 # Epic — Agent Full Access + Verify + Ship
+
+## Amendment — Both PRDs delivered before this epic doc was drafted (2026-07-27)
+
+Both PRDs under this epic are fully implemented, and were implemented
+**before this epic's own commit** — the runtime tier shipped 2026-07-23 as
+"Per-project Autonomous Mode", the verify+ship skills shipped 2026-07-23 to
+2026-07-24 as "Release Gate C", and this epic README + both PRDs were
+authored in commit `e61ce7b` on top of already-merged work. The `status:
+proposed` / all-unchecked-boxes state was therefore stale from the moment
+the epic was committed, not a sign of unstarted work. Reconciled 2026-07-27
+per the `prd-skill-split` near-miss lesson — see each PRD's own "Amendment"
+section for the full symbol-by-symbol mapping from proposed names to
+shipped names:
+
+- [`prd-full-access-tier.md`](./prd-full-access-tier.md) — shipped as
+  `PermissionMode::Autonomous` / `ProjectEntry::autonomous: bool` /
+  `set_project_autonomous`, not the `FullAccess` / `ProjectPermissionMode`
+  enum / `set_project_permission_mode` names this PRD specifies. Same
+  design (ADR-1/2/3 all hold), different, simpler naming (a two-tier bool
+  instead of a persistable enum).
+- [`prd-verify-and-ship-skills.md`](./prd-verify-and-ship-skills.md) —
+  shipped exactly as designed, but the skills now live at
+  `templates/skills/loopdeck-{open-pr,prd-verifier}/` (the `.agents/skills/`
+  location this PRD specifies was correct when Gate C shipped, then
+  superseded by the 2026-07-25 SSOT reconciliation that moved everything
+  into `templates/`; `.agents/skills/` no longer exists in this repo).
+
+All three Architecture Decisions this epic's ADR-1/2/3 describe hold as
+shipped; ADR-4 and ADR-5 hold as shipped for the skills half. The Success
+Criteria below are all met by the code on `main` today — see each PRD's
+Amendment for the evidence.
 
 ## Motivation
 

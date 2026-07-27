@@ -1,6 +1,6 @@
 [package]
 name = "loopdeck"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI Project Manager Desktop App"
 authors = ["LoopDeck"]
 edition = "2021"
