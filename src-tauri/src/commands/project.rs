@@ -5,15 +5,39 @@ use crate::config::{self, ProjectEntry, ProjectStatus, RunState};
 use crate::error::AppError;
 use crate::git;
 use crate::graphify;
+use crate::memory;
 use crate::paths;
 use crate::project::{self, ProjectMeta};
 use crate::scanner;
 use crate::skills;
 use chrono::Utc;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::State;
 use tracing::{debug, info};
+
+/// `(next_steps_total, next_steps_done)` — see `next_steps_counts`.
+type NextStepsCount = (usize, usize);
+
+/// The per-project data refreshed on the blocking pool in `import_project`.
+type ImportRefresh = (
+    project::ProjectMeta,
+    git::GitInfo,
+    Option<String>,
+    NextStepsCount,
+);
+
+/// The per-project data refreshed on the blocking pool in `list_projects`.
+type ListRefresh = (git::GitInfo, Option<String>, NextStepsCount);
+
+/// Parse `.loopdeck/loops.md`'s `## Next Steps` checklist into `(total, done)`
+/// counts. A cheap fs read (no subprocess), safe to call inline alongside the
+/// existing `current_loop` read in the blocking closures below.
+fn next_steps_counts(path: &Path) -> NextStepsCount {
+    let steps = memory::parse_loops(path).next_steps;
+    let done = steps.iter().filter(|s| s.checked).count();
+    (steps.len(), done)
+}
 
 /// Import a repository: bootstrap `.loopdeck/project.yaml` and register in global config.
 ///
@@ -48,18 +72,21 @@ pub async fn import_project(
     // subprocesses — so it runs on the blocking pool, off the tokio worker.
     // `canonical` is cloned into the task; the outer value is retained to build
     // the registry entry after it completes.
-    let (project_meta, git_info, current_loop) = tokio::task::spawn_blocking({
-        let canonical = canonical.clone();
-        move || -> Result<(project::ProjectMeta, git::GitInfo, Option<String>), AppError> {
-            let (name, markers, has_readme) = scanner::quick_scan_directory(&canonical);
-            let project_meta = project::bootstrap_project(&canonical, &name, &markers, has_readme)?;
-            let git_info = git::check_git_info(&canonical);
-            let current_loop = project::read_current_loop(canonical.as_path());
-            Ok((project_meta, git_info, current_loop))
-        }
-    })
-    .await
-    .map_err(blocking_task_failed)??;
+    let (project_meta, git_info, current_loop, (next_steps_total, next_steps_done)) =
+        tokio::task::spawn_blocking({
+            let canonical = canonical.clone();
+            move || -> Result<ImportRefresh, AppError> {
+                let (name, markers, has_readme) = scanner::quick_scan_directory(&canonical);
+                let project_meta =
+                    project::bootstrap_project(&canonical, &name, &markers, has_readme)?;
+                let git_info = git::check_git_info(&canonical);
+                let current_loop = project::read_current_loop(canonical.as_path());
+                let next_steps = next_steps_counts(&canonical);
+                Ok((project_meta, git_info, current_loop, next_steps))
+            }
+        })
+        .await
+        .map_err(blocking_task_failed)??;
 
     // Build project entry and add to config
     let entry = ProjectEntry {
@@ -76,6 +103,8 @@ pub async fn import_project(
         uncommitted: git_info.uncommitted.into(),
         run_state: RunState::Idle,
         autonomous: false,
+        next_steps_total,
+        next_steps_done,
     };
 
     {
@@ -115,21 +144,21 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
     // changed between snapshot and apply — a project added/removed by a
     // concurrent command simply won't match and is left untouched. Projects
     // whose path no longer exists are skipped (mirrors the prior inline guard).
-    let refreshed: HashMap<PathBuf, (git::GitInfo, Option<String>)> =
-        tokio::task::spawn_blocking(move || {
-            let mut map = HashMap::with_capacity(paths.len());
-            for path in paths {
-                if !path.exists() {
-                    continue;
-                }
-                let git_info = git::check_git_info(&path);
-                let current_loop = project::read_current_loop(&path);
-                map.insert(path, (git_info, current_loop));
+    let refreshed: HashMap<PathBuf, ListRefresh> = tokio::task::spawn_blocking(move || {
+        let mut map = HashMap::with_capacity(paths.len());
+        for path in paths {
+            if !path.exists() {
+                continue;
             }
-            map
-        })
-        .await
-        .map_err(blocking_task_failed)?;
+            let git_info = git::check_git_info(&path);
+            let current_loop = project::read_current_loop(&path);
+            let next_steps = next_steps_counts(&path);
+            map.insert(path, (git_info, current_loop, next_steps));
+        }
+        map
+    })
+    .await
+    .map_err(blocking_task_failed)?;
 
     // Apply the fresh data under a brief lock, persisting only if something
     // moved. The lock is held just for the mutation + save — not the git work.
@@ -138,7 +167,9 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
         let mut changed = false;
 
         for entry in &mut config.projects {
-            let Some((git_info, current_loop)) = refreshed.get(&entry.path) else {
+            let Some((git_info, current_loop, (next_steps_total, next_steps_done))) =
+                refreshed.get(&entry.path)
+            else {
                 continue;
             };
 
@@ -164,6 +195,11 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntr
             // change/save decision — this matches the prior inline behaviour,
             // which set it unconditionally per project.
             entry.current_loop = current_loop.clone();
+
+            // Same treatment for the next-steps progress counts: ephemeral,
+            // recomputed every call, never part of the change/save decision.
+            entry.next_steps_total = *next_steps_total;
+            entry.next_steps_done = *next_steps_done;
 
             // Recompute status from the (possibly refreshed) git dates so the
             // Dashboard reflects current freshness without a manual rescan.

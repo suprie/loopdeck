@@ -104,6 +104,14 @@ export interface ProjectEntry {
    * the backend `skip_serializing_if`s it when false.
    */
   autonomous?: boolean;
+  /**
+   * Total `## Next Steps` checklist items parsed from `.loopdeck/loops.md`,
+   * refreshed on every `list_projects` call. Ephemeral — not persisted when
+   * zero, so older/quiet projects load as `0`.
+   */
+  next_steps_total: number;
+  /** Checked (`- [x]`) items within `next_steps_total`. Same ephemeral rationale. */
+  next_steps_done: number;
 }
 
 /** Content of .loopdeck/project.yaml. */

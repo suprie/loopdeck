@@ -6,7 +6,6 @@ import {
   Bot,
   GitBranch,
   RotateCw,
-  FolderPlus,
   Layers,
   Settings,
   Sun,
@@ -17,15 +16,26 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/lib/theme";
+import { useAppStore } from "@/store/appStore";
+import { CommandPalette } from "./CommandPalette";
 
-const nav = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
-  { to: "/activity", label: "Activity", icon: Activity },
-  { to: "/agent", label: "Agent Runner", icon: Bot },
-  { to: "/decisions", label: "Decisions", icon: GitBranch },
-  { to: "/loops", label: "Loops", icon: RotateCw },
-  { to: "/epics", label: "Epics", icon: Layers },
-  { to: "/import", label: "Import Repo", icon: FolderPlus },
+const navGroups = [
+  {
+    label: "Work",
+    items: [
+      { to: "/", label: "Overview", icon: LayoutDashboard, exact: true },
+      { to: "/activity", label: "Activity", icon: Activity },
+      { to: "/agent", label: "Agent Runner", icon: Bot },
+    ],
+  },
+  {
+    label: "Memory",
+    items: [
+      { to: "/decisions", label: "Decisions", icon: GitBranch },
+      { to: "/loops", label: "Loops", icon: RotateCw },
+      { to: "/epics", label: "Epics", icon: Layers },
+    ],
+  },
 ] as const;
 
 function NavLink({
@@ -110,6 +120,7 @@ export function AppShell({
   onNavClick?: (to: string, e: React.MouseEvent) => void;
 }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const isLoading = useAppStore((s) => s.isLoading);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background text-foreground">
@@ -131,9 +142,18 @@ export function AppShell({
           </div>
         </div>
 
-        <nav className="flex flex-1 flex-col gap-0.5 px-2 py-2">
-          {nav.map((n) => (
-            <NavLink key={n.to} {...n} pathname={pathname} onNavClick={onNavClick} />
+        <nav className="flex flex-1 flex-col gap-4 px-2 py-2">
+          {navGroups.map((group) => (
+            <div key={group.label}>
+              <div className="px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                {group.label}
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {group.items.map((n) => (
+                  <NavLink key={n.to} {...n} pathname={pathname} onNavClick={onNavClick} />
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
@@ -147,18 +167,31 @@ export function AppShell({
           />
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2.5">
-          <ThemeToggle />
-          <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span className="font-mono">v0.1.0</span>
-            <kbd className="rounded border border-border bg-background px-1 py-0.5 font-mono">
-              ⌘K
-            </kbd>
-          </div>
+        <div className="mx-2 mb-2 flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground">
+          <span className="size-1.5 rounded-full bg-success" />
+          Local only
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground/70">v0.2.0</span>
         </div>
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col">{children}</main>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-6">
+          <CommandPalette />
+          <div className="ml-auto flex items-center gap-3">
+            <ThemeToggle />
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  isLoading ? "bg-warning" : "bg-success",
+                )}
+              />
+              {isLoading ? "Loading…" : "Ready"}
+            </div>
+          </div>
+        </header>
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</main>
+      </div>
     </div>
   );
 }

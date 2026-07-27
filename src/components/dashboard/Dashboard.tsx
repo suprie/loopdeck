@@ -2,35 +2,32 @@ import { useNavigate } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
-import { ProjectCard } from "./ProjectCard";
+import { ProjectList } from "./ProjectList";
+import { AttentionPanel, useAttentionItems } from "./AttentionPanel";
+import { TodayPanel } from "./TodayPanel";
 import { EmptyState } from "./EmptyState";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { PageHeader } from "../layout/AppShell";
+
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
 
 export function Dashboard() {
   const navigate = useNavigate();
   const projects = useAppStore((s) => s.projects);
   const isLoading = useAppStore((s) => s.isLoading);
   const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
-  const setDetailTab = useAppStore((s) => s.setDetailTab);
-  const setPendingAgentStart = useAppStore((s) => s.setPendingAgentStart);
-  const { openInFinder, openInTerminal, removeProject, rescanProject, scanFolder } =
-    useProjects();
+  const { scanFolder } = useProjects();
+  const attentionCount = useAttentionItems().length;
 
   /** Navigate to a project's detail view. The full entry is derived from
    *  `projects` in ProjectDetail, so only the path identifier is stored. */
   const handleSelect = (path: string) => {
     setSelectedProjectPath(path);
-    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
-  };
-
-  /** Start the agent from the dashboard: navigate to the project on the Agent
-   *  tab and signal AgentPanel to auto-fire `agent_start_loop` on mount. */
-  const handleStart = (path: string) => {
-    if (!projects.some((p) => p.path === path)) return;
-    setSelectedProjectPath(path);
-    setDetailTab("agent");
-    setPendingAgentStart(path);
     navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
   };
 
@@ -59,44 +56,65 @@ export function Dashboard() {
   }
 
   const showEmpty = projects.length === 0;
-  const activeCount = projects.filter((p) => p.status === "active").length;
-  const subtitle = `${projects.length} project${projects.length !== 1 ? "s" : ""} · ${activeCount} active`;
+  const runningCount = projects.filter((p) => p.run_state === "working").length;
+  const subtitle = showEmpty
+    ? undefined
+    : attentionCount > 0
+      ? `${attentionCount} project${attentionCount === 1 ? "" : "s"} need${attentionCount === 1 ? "s" : ""} attention. Everything else is moving.`
+      : "All caught up. Nothing needs your attention right now.";
 
   return (
-    <div className="flex flex-1 flex-col min-h-0">
-      <PageHeader
-        title="Dashboard"
-        subtitle={subtitle}
-        actions={
-          <>
+    <div className="flex flex-1 flex-col min-h-0 overflow-y-auto">
+      {showEmpty ? (
+        <>
+          <PageHeader title="Dashboard" />
+          <EmptyState onScan={handleScan} />
+        </>
+      ) : (
+        <div className="mx-auto w-full max-w-[1240px] px-8 py-7">
+          <div className="mb-7 flex items-start gap-6">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-bold tracking-tight">{greeting()}</h1>
+              <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{subtitle}</p>
+            </div>
             <button
               type="button"
               onClick={handleScan}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
+              className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
             >
-              <Plus className="size-3.5" />
-              Import Repo
+              <Plus className="size-4" />
+              Add project
             </button>
-          </>
-        }
-      />
+          </div>
 
-      {showEmpty ? (
-        <EmptyState onScan={handleScan} />
-      ) : (
-        <div className="grid flex-1 auto-rows-max grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4 overflow-y-auto p-8">
-          {projects.map((project) => (
-            <ProjectCard
-              key={project.path}
-              project={project}
-              onSelect={() => handleSelect(project.path)}
-              onOpenInFinder={openInFinder}
-              onOpenInTerminal={openInTerminal}
-              onRemove={removeProject}
-              onRescan={rescanProject}
-              onStart={handleStart}
-            />
-          ))}
+          <AttentionPanel />
+
+          <div className="grid grid-cols-1 gap-7 lg:grid-cols-[minmax(0,1.65fr)_minmax(300px,1fr)]">
+            <section aria-labelledby="projects-title">
+              <div className="mb-2.5 flex min-h-[28px] items-start">
+                <div>
+                  <h2 id="projects-title" className="text-base font-semibold tracking-tight">
+                    Projects
+                  </h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {projects.length} project{projects.length !== 1 ? "s" : ""} · sorted by recent
+                    activity
+                  </p>
+                </div>
+              </div>
+              <ProjectList projects={projects} onSelect={(p) => handleSelect(p.path)} />
+            </section>
+
+            <TodayPanel />
+          </div>
+
+          <footer className="mt-7 flex items-center text-[11px] text-muted-foreground/70">
+            <span>All project data stays on this Mac</span>
+            <span className="ml-auto flex items-center gap-1.5">
+              <span className="size-1.5 rounded-full bg-success" />
+              {runningCount} agent{runningCount === 1 ? "" : "s"} running
+            </span>
+          </footer>
         </div>
       )}
     </div>
