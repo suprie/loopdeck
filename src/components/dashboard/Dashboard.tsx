@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
@@ -21,8 +22,18 @@ export function Dashboard() {
   const projects = useAppStore((s) => s.projects);
   const isLoading = useAppStore((s) => s.isLoading);
   const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
-  const { scanFolder } = useProjects();
+  const { scanFolder, loadProjects } = useProjects();
   const attentionCount = useAttentionItems().length;
+
+  // Loop/agent activity elsewhere (the Agent tab, another session editing
+  // .loopdeck/loops.md) can change current_loop / next_steps_total /
+  // next_steps_done / run_state on disk without this tab knowing — the
+  // project list is otherwise only loaded once, at App mount. Re-fetch on
+  // every Dashboard visit so returning here after work shows current
+  // progress instead of a stale startup snapshot.
+  useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
 
   /** Navigate to a project's detail view. The full entry is derived from
    *  `projects` in ProjectDetail, so only the path identifier is stored. */
