@@ -108,16 +108,16 @@ marks it done after the loop completes and lands in History.
 
 ### Phase 3 — Promote-to-loop bridge (backend)
 
-- [ ] `epics-view/promote-command` `promote_epic_loop(project_path, epic_slug, prd_filename, loop_title) -> Result<()>` Tauri command
-- [ ] `epics-view/clobber-guard` Clobber guard: refuse if `loops.md ## Current` is non-empty (`parse_loops` status check)
-- [ ] `epics-view/current-backref` Write `## Current` block with `**Epic**`/`**PRD**` back-reference, preserving the rest of `loops.md`
-- [ ] `epics-view/promote-tests` Unit tests: empty current → success; non-empty current → `Conflict`; back-reference fields present
+- [x] `epics-view/promote-command` `promote_epic_loop(project_path, epic_slug, prd_filename, loop_title) -> Result<()>` Tauri command — `commands/epics.rs::promote_epic_loop`
+- [x] `epics-view/clobber-guard` Clobber guard: refuse if `loops.md ## Current` is non-empty (`parse_loops` status check) — `epic.rs::test_promote_refuses_when_current_occupied`
+- [x] `epics-view/current-backref` Write `## Current` block with `**Epic**`/`**PRD**` back-reference, preserving the rest of `loops.md` — `epic.rs::test_promote_into_empty_current_succeeds`, `test_promote_creates_loops_md_when_absent`
+- [x] `epics-view/promote-tests` Unit tests: empty current → success; non-empty current → `Conflict`; back-reference fields present — `test_promote_into_empty_current_succeeds`, `test_promote_refuses_when_current_occupied`, `test_promote_prd_ref_strips_md_suffix`
 
 ### Phase 4 — Done-visibility (read path)
 
-- [ ] `epics-view/done-in-history` `get_epics` enriches each PRD checklist item with `done_in_history: bool` by scanning `loops.md ## History` for entries whose `**Epic**`/`**PRD**` match and whose title matches the item
-- [ ] `epics-view/render-done` Render done items as checked in the UI (read-only sync from History → PRD display)
-- [ ] `epics-view/manual-mark-done` Manual "Mark done" action for cases where the title drifted (writes the check into the PRD file)
+- [x] `epics-view/done-in-history` `get_epics` enriches each PRD checklist item with `done_in_history: bool` by scanning `loops.md ## History` for entries whose `**Epic**`/`**PRD**` match and whose title matches the item — `epic.rs::parse_epics`, `test_done_in_history_marks_matching_loop`, `test_done_in_history_no_history_leaves_all_false`
+- [x] `epics-view/render-done` Render done items as checked in the UI (read-only sync from History → PRD display) — `EpicsPanel.tsx:514`, `EpicsView.tsx:60,415`
+- [x] `epics-view/manual-mark-done` Manual "Mark done" action for cases where the title drifted (writes the check into the PRD file) — `EpicsPanel.tsx::handleToggle` → `api.togglePrdLoop` → `toggle_prd_loop`
 
 ## Open Questions
 

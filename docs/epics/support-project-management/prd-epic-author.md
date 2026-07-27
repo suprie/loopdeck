@@ -346,36 +346,36 @@ body, not just this PRD.
 
 ### Phase 1 — Skill scaffold
 
-- [ ] `epic-author/create-skill-file` Create `.agents/skills/loopdeck-epic-author/SKILL.md`
-- [ ] `epic-author/frontmatter` Frontmatter: `name: loopdeck:epic-author`, trigger-rich `description` (on-demand phrasing — "Use when the user wants to draft / structure a new epic or PRD…"), `argument-hint: [optional epic slug or intent]`, `allowed-tools: [Read, Write, Glob, Grep, Bash]`
-- [ ] `epic-author/allowed-tools` `Bash` is included only for `git status`/directory checks; `Write` is the file-creation tool. No `Edit` (the skill writes new files, doesn't edit existing ones), no `Agent`/`TaskCreate` (posture rule 6)
+- [x] `epic-author/create-skill-file` Create `.agents/skills/loopdeck-epic-author/SKILL.md` (lands at `.claude/skills/loopdeck-epic-author/SKILL.md` — the item's path predates the `.claude/skills/` convention used by the rest of the managed skills)
+- [x] `epic-author/frontmatter` Frontmatter: `name: loopdeck:epic-author`, trigger-rich `description` (on-demand phrasing — "Use when the user wants to draft / structure a new epic or PRD…"), `argument-hint: [optional epic slug or intent]`, `allowed-tools: [Read, Write, Glob, Grep, Bash]`
+- [x] `epic-author/allowed-tools` `Bash` is included only for `git status`/directory checks; `Write` is the file-creation tool. No `Edit` (the skill writes new files, doesn't edit existing ones), no `Agent`/`TaskCreate` (posture rule 6)
 
 ### Phase 2 — Clarifying-question flow
 
-- [ ] `epic-author/question-set` Document the five fixed questions + optional sixth in the skill body, with the rejection rules (Q1 implementation-shaped → ask once more; Q3 too-large/too-vague → push back)
-- [ ] `epic-author/answers-substance-framing` Document the "answers are the substance" framing — the skill places answers into the format, does not generate them
-- [ ] `epic-author/confirm-gate` Document the confirm-before-proceeding gate between each question group
+- [x] `epic-author/question-set` Document the five fixed questions + optional sixth in the skill body, with the rejection rules (Q1 implementation-shaped → ask once more; Q3 too-large/too-vague → push back)
+- [x] `epic-author/answers-substance-framing` Document the "answers are the substance" framing — the skill places answers into the format, does not generate them
+- [x] `epic-author/confirm-gate` Document the confirm-before-proceeding gate between each question group
 
 ### Phase 3 — Decomposition flow
 
-- [ ] `epic-author/step1-readme` Document Step 1 (epic README draft) with the frontmatter + body mapping per `prd-spec-layer.md`
-- [ ] `epic-author/step2-prd-decomposition` Document Step 2 (PRD decomposition) with the one-PRD-per-independent-deliverable rule and the merge/split guidance
-- [ ] `epic-author/step3-phase-decomposition` Document Step 3 (phase decomposition) with the spike-first-if-riskiest-unknown-load-bearing rule and the tests-last convention
-- [ ] `epic-author/step4-loop-decomposition` Document Step 4 (loop decomposition) with the three loop invariants (atomic, single-loop-shaped, ordered) and the split-if-not-single-loop rule
-- [ ] `epic-author/step5-final-review` Document Step 5 (final review + write-on-confirmation + status:proposed reminder)
+- [x] `epic-author/step1-readme` Document Step 1 (epic README draft) with the frontmatter + body mapping per `prd-spec-layer.md`
+- [x] `epic-author/step2-prd-decomposition` Document Step 2 (PRD decomposition) with the one-PRD-per-independent-deliverable rule and the merge/split guidance
+- [x] `epic-author/step3-phase-decomposition` Document Step 3 (phase decomposition) with the spike-first-if-riskiest-unknown-load-bearing rule and the tests-last convention
+- [x] `epic-author/step4-loop-decomposition` Document Step 4 (loop decomposition) with the three loop invariants (atomic, single-loop-shaped, ordered) and the split-if-not-single-loop rule
+- [x] `epic-author/step5-final-review` Document Step 5 (final review + write-on-confirmation + status:proposed reminder)
 
 ### Phase 4 — Format contract + posture rules
 
-- [ ] `epic-author/format-contract` Embed the format-contract invariants (required frontmatter fields, slug=dirname, milestone quoted, phase heading shape, status vocabularies) in the skill body
-- [ ] `epic-author/posture-rules` Embed the seven posture rules in the skill body
-- [ ] `epic-author/read-before-write` Document the read-before-write rule and the refuse-to-overwrite behavior
+- [x] `epic-author/format-contract` Embed the format-contract invariants (required frontmatter fields, slug=dirname, milestone quoted, phase heading shape, status vocabularies) in the skill body
+- [x] `epic-author/posture-rules` Embed the seven posture rules in the skill body
+- [x] `epic-author/read-before-write` Document the read-before-write rule and the refuse-to-overwrite behavior
 
 ### Phase 5 — Integration with the spec layer
 
-- [ ] `epic-author/dogfood-parse` Verify drafted files parse cleanly via `epic.rs` (dogfood: draft a trivial epic, confirm it appears in `/epics`)
-- [ ] `epic-author/dogfood-promote` Verify drafted checklist items are promote-able via the `prd-epics-view.md` Promote Contract (item text fits `**Goal**`, promotes without clobbering)
-- [ ] `epic-author/dogfood-prd-index` Verify the `## PRD Index` table in the epic README is updated when PRDs are drafted in Step 2
-- [ ] `epic-author/manifest-update` Update the managed-skills manifest (`prd-skill-split.md:124-131`) to include `loopdeck-epic-author` in the skills list
+- [x] `epic-author/dogfood-parse` Verify drafted files parse cleanly via `epic.rs` (dogfood: draft a trivial epic, confirm it appears in `/epics`) — covered by `epic.rs::test_dogfood_parses_this_repos_epic`, which parses this repo's own `docs/epics/` tree
+- [x] `epic-author/dogfood-promote` Verify drafted checklist items are promote-able via the `prd-epics-view.md` Promote Contract (item text fits `**Goal**`, promotes without clobbering) — covered by `epic.rs::test_promote_into_empty_current_succeeds` and `test_promote_refuses_when_current_occupied`
+- [x] `epic-author/dogfood-prd-index` Verify the `## PRD Index` table in the epic README is updated when PRDs are drafted in Step 2 — verified by code-reading, not a live draft: `epic.rs::parse_epics` attaches PRDs to an epic via a directory scan for `prd-*.md` (`epic.rs:161`), never by parsing the README's `## PRD Index` table (`parse_epic_readme` discards the body). The table is human-readable only, not load-bearing, so the skill's append-only/never-rewrite guidance is safe regardless of table-shape drift.
+- [x] `epic-author/manifest-update` Update the managed-skills manifest (`prd-skill-split.md:124-131`) to include `loopdeck-epic-author` in the skills list — present in `.claude/skills/.loopdeck-manifest.json`
 
 ## Open Questions
 

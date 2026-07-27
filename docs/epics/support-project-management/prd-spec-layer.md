@@ -162,22 +162,22 @@ the origin PRD as context.
 
 ### Phase 1 — Core structs and parser
 
-- [ ] `spec-layer/define-structs` Define `Epic`, `Prd`, `PrdPhase`, `PrdLoop` structs in `epic.rs` with serde derives; frontmatter fields via `serde_yaml`
-- [ ] `spec-layer/frontmatter-extractor` Implement frontmatter extractor: split `---\n...\n---` from body, deserialize with `serde_yaml`
-- [ ] `spec-layer/parse-epic-readme` Implement `parse_epic_readme(path) -> Epic` — frontmatter + PRD Index table from body
-- [ ] `spec-layer/parse-prd` Implement `parse_prd(path) -> Prd` — frontmatter + `### Phase N` sections into `Vec<PrdPhase>` with checklist items
-- [ ] `spec-layer/parse-epics` Implement `parse_epics(project_path) -> Vec<Epic>` — walk `docs/epics/*/`, parse each README, attach parsed PRDs
-- [ ] `spec-layer/milestone-grouping` Milestone grouping: `epics_by_milestone(project_path) -> BTreeMap<String, Vec<Epic>>` (ordered by milestone)
-- [ ] `spec-layer/lenient-body-edge-cases` Lenient body edge cases: missing `## Scope`, missing PRD Index table, em dashes in prose, empty `docs/epics/`
-- [ ] `spec-layer/strict-frontmatter` Strict frontmatter: missing required field → parse error with the file path (not a panic)
-- [ ] `spec-layer/unit-tests` Unit tests mirroring `memory.rs` coverage (≥15 tests) + frontmatter round-trip tests
+- [x] `spec-layer/define-structs` Define `Epic`, `Prd`, `PrdPhase`, `PrdLoop` structs in `epic.rs` with serde derives; frontmatter fields via `serde_yaml`
+- [x] `spec-layer/frontmatter-extractor` Implement frontmatter extractor: split `---\n...\n---` from body, deserialize with `serde_yaml`
+- [x] `spec-layer/parse-epic-readme` Implement `parse_epic_readme(path) -> Epic` — frontmatter + PRD Index table from body
+- [x] `spec-layer/parse-prd` Implement `parse_prd(path) -> Prd` — frontmatter + `### Phase N` sections into `Vec<PrdPhase>` with checklist items
+- [x] `spec-layer/parse-epics` Implement `parse_epics(project_path) -> Vec<Epic>` — walk `docs/epics/*/`, parse each README, attach parsed PRDs
+- [x] `spec-layer/milestone-grouping` Milestone grouping: `epics_by_milestone(project_path) -> BTreeMap<String, Vec<Epic>>` (ordered by milestone)
+- [x] `spec-layer/lenient-body-edge-cases` Lenient body edge cases: missing `## Scope`, missing PRD Index table, em dashes in prose, empty `docs/epics/` — `test_parse_prd_missing_phases_section_is_lenient`, `test_parse_epics_missing_dir_returns_empty`, `test_parse_epics_empty_dir_returns_empty`
+- [x] `spec-layer/strict-frontmatter` Strict frontmatter: missing required field → parse error with the file path (not a panic) — `test_parse_epic_readme_missing_required_field_errors`, `test_parse_epic_readme_missing_frontmatter_errors`
+- [x] `spec-layer/unit-tests` Unit tests mirroring `memory.rs` coverage (≥15 tests) + frontmatter round-trip tests — `epic.rs::tests` has ~40 test functions
 
 ### Phase 2 — Bootstrap and integration
 
-- [ ] `spec-layer/bootstrap-path` Add `docs/epics/` to the bootstrap path in `project.rs` (create-on-absent, idempotent)
-- [ ] `spec-layer/register-commands` Register `get_epics(project_path)` + `get_epics_by_milestone(project_path)` Tauri commands in `commands.rs` + `lib.rs`
-- [ ] `spec-layer/typed-wrappers` Typed `getEpics` / `getEpicsByMilestone` wrappers in `src/lib/tauri.ts` + `Epic`/`Prd`/`PrdPhase`/`PrdLoop` types in `src/types/index.ts`
-- [ ] `spec-layer/dogfood-parse` Verify LoopDeck's own `docs/epics/support-project-management/` parses cleanly (dogfood)
+- [x] `spec-layer/bootstrap-path` Add `docs/epics/` to the bootstrap path in `project.rs` (create-on-absent, idempotent) — `project.rs::create_files_and_directories`
+- [x] `spec-layer/register-commands` Register `get_epics(project_path)` + `get_epics_by_milestone(project_path)` Tauri commands in `commands.rs` + `lib.rs` — `commands/epics.rs`, registered in `lib.rs`
+- [x] `spec-layer/typed-wrappers` Typed `getEpics` / `getEpicsByMilestone` wrappers in `src/lib/tauri.ts` + `Epic`/`Prd`/`PrdPhase`/`PrdLoop` types in `src/types/index.ts`
+- [x] `spec-layer/dogfood-parse` Verify LoopDeck's own `docs/epics/support-project-management/` parses cleanly (dogfood) — `epic.rs::test_dogfood_parses_this_repos_epic`
 
 ## Open Questions
 
