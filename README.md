@@ -1,5 +1,7 @@
 # LoopDeck
 
+[![CI](https://github.com/suprie/loopdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/suprie/loopdeck/actions/workflows/ci.yml)
+
 **Local-first desktop app for structured project memory — stored right inside your repo — with a built-in agent loop that reads and writes that memory.**
 
 LoopDeck discovers your local repositories and creates a standardized `.loopdeck/` folder in each one, carrying project descriptions, architectural decisions, and development loops alongside your source code. It also runs an on-device AI agent (the `claude` CLI) that drives the next development loop against that memory — reading `.loopdeck/loops.md`, implementing the next step, and updating the memory files when done. No cloud, no database, no lock-in.

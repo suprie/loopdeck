@@ -2,7 +2,7 @@
 prd: prd-safety-prereqs
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: proposed
+status: accepted
 description: >
   Harden the destructive floor's mv/cp gap and stand up a CI workflow before
   any unattended run exists — an overnight agent needs the floor watertight,
@@ -72,25 +72,32 @@ already documents as the local gates.
 
 ### Phase 1 — Destructive floor hardening
 
-- [ ] Extend `check_destructive_floor` argv analysis to deny `mv`/`cp`/`rsync` whose destination resolves to `/`, `/etc`, `/usr`, `/var`, or the `$HOME` root
-- [ ] Add floor unit tests for the new denials covering absolute, relative, `~`, and `$HOME`-expansion target forms
-- [ ] Reconcile the `claude_session.rs:218-224` doc comment with the actual `--permission-mode` argument
+- [x] Extend `check_destructive_floor` argv analysis to deny `mv`/`cp`/`rsync` whose destination resolves to `/`, `/etc`, `/usr`, `/var`, or the `$HOME` root (2026-07-27) — new `destructive_move_target`/`expand_destination`/`lexically_normalize`/`home_dir` helpers in `permission.rs`; a new `mv`/`gmv`/`cp`/`gcp`/`rsync` arm in `analyze_stage` resolves the last argv token as the destination, expands `~`/`$HOME`/`${HOME}`, lexically collapses `.`/`..` (no filesystem access — the destination need not exist), and hard-denies an exact match against `/`, `/etc`, `/usr`, `/var`, or the resolved home directory. Subpaths (`/var/tmp/x`, `~/Downloads`, `/etc/myapp.conf`) are untouched — see the Open Questions resolution below.
+- [x] Add floor unit tests for the new denials covering absolute, relative, `~`, and `$HOME`-expansion target forms — `mv_cp_rsync_to_protected_root_absolute_form_is_caught`, `mv_cp_to_protected_root_relative_dotdot_form_is_caught` (`..`-collapsing, e.g. `/usr/local/../..` → `/`), `mv_cp_to_home_root_tilde_and_home_expansion_forms_are_caught` (`~`, `~/../../home/x`, `$HOME`, `${HOME}`, `${HOME}/`), plus `mv_cp_rsync_to_ordinary_destinations_are_allowed` (negative cases, incl. `/var/tmp`/`/var/folders` subpaths and an unresolvable relative destination). 6 new tests, all green.
+- [x] Reconcile the `claude_session.rs:218-224` doc comment with the actual `--permission-mode` argument — already accurate; no change needed. The line range in this PRD is stale (the file has grown since 2026-07-21). The real doc comment (`claude_session.rs:467-474`, next to `cmd.args(["--permission-mode", "default"])`) was corrected back on 2026-07-23 as part of the SECURITY.md work (see `decisions.md` "Add LICENSE and SECURITY.md"), which fixed the exact `default`-vs-`acceptEdits` drift this item describes. `loops.md` P2's mirroring line was stale for the same reason.
 
 ### Phase 2 — CI pipeline
 
-- [ ] Add `.github/workflows/ci.yml` running `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on a macOS + Ubuntu matrix
-- [ ] Add frontend CI jobs: `npm ci`, `npx tsc --noEmit`, `npm run build`
-- [ ] Cache cargo and npm artifacts; add a CI status badge to `README.md`
+- [x] Add `.github/workflows/ci.yml` running `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on a macOS + Ubuntu matrix (2026-07-27) — `ci.yml` already existed (Release Gate A "Basic CI", 2026-07-23) running all three on macOS only; this PRD's P1 goal was the missing Ubuntu leg. Converted to a `strategy.matrix.os: [macos-latest, ubuntu-latest]`, with an Ubuntu-only `apt-get install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf` step ahead of the Rust toolchain (mirrors `build.yml`'s existing Linux dependency step) so `cargo clippy`/`cargo test` can actually compile the Tauri/gtk bindings on Linux. `loops.md` P3's matching line was stale in the same "file exists, box unchecked" way as the two 0.3.0 PRDs reconciled earlier this session.
+- [x] Add frontend CI jobs: `npm ci`, `npx tsc --noEmit`, `npm run build` — `npm ci` + `npm run build` present (unchanged); no separate `tsc --noEmit` step because `npm run build` is `tsc && vite build` (`package.json`), so the type-check already runs and fails the job on a type error — a dedicated step would be redundant.
+- [x] Cache cargo and npm artifacts; add a CI status badge to `README.md` — `Swatinem/rust-cache@v2` (now keyed per-OS via `key: ${{ matrix.os }}` so the two legs don't collide) and `actions/setup-node@v5`'s built-in `cache: npm` were already present; added the CI badge to `README.md` (top of file, links to the workflow run history).
 
 ### Phase 3 — Prove the gates
 
-- [ ] Open a throwaway PR with a deliberate clippy warning and confirm CI fails it
-- [ ] Spot-check that `mv`/`cp` floor denials appear in the audit log under `FullAccess`
+- [ ] Open a throwaway PR with a deliberate clippy warning and confirm CI fails it — genuinely not run this session (would require pushing a live throwaway PR against the real GitHub repo). Remaining manual step before treating Phase 2 as fully proven, not just implemented.
+- [ ] Spot-check that `mv`/`cp` floor denials appear in the audit log under `FullAccess`/Autonomous — not run live. Structurally true by construction: `claude_session.rs::answer_control_request`'s `tracing::info!(tool, autonomous, behavior = decision.behavior(), reason = decision.reason(), "permission decision")` call is unconditional and runs for every `Decision`, so a new `mv`/`cp`/`rsync` floor deny flows through the exact same logging path as every pre-existing floor rule (`rm -rf`, force-push, …) — no new code path was introduced that could skip it. Left unchecked because this documents the code guarantee, not an observed log line from a real Autonomous-mode run.
 
 ## Open Questions
 
-- Should `/var` denial except `/var/tmp`/`/var/folders` (macOS temp lives
-  there)? Current stance: deny the root itself, allow subpaths beneath the
-  exceptions — decide during implementation with test cases.
-- Does `rsync` belong in the same rule, or is its flag surface (`--delete`)
-  worth a separate floor entry?
+- ~~Should `/var` denial except `/var/tmp`/`/var/folders`~~ **Resolved
+  (2026-07-27):** the rule matches the destination **exactly** against the
+  protected-root set, never as a prefix — so `/var/tmp/x` and
+  `/var/folders/y` (subpaths) were never in scope to begin with, and no
+  exception logic was needed. This also means a subpath write into `/etc`
+  or `/usr` (e.g. `cp app.conf /etc/myapp/app.conf`) is allowed; only the
+  literal root itself as a destination is denied. Documented in
+  `destructive_move_target`'s doc comment.
+- ~~Does `rsync` belong in the same rule~~ **Resolved (2026-07-27):** yes,
+  same rule, same last-argv-is-destination heuristic as `mv`/`cp` — `rsync`'s
+  flag surface (`-avz`, `--delete`, etc.) doesn't change which argv token is
+  the destination, so no separate floor entry was needed.

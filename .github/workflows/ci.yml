@@ -1,12 +1,14 @@
 name: CI
 
-# Basic CI for the hardened private alpha (Release Gate A — "Basic CI").
-#
-# Alpha scope: run the five core gates on ONE supported OS — macOS (the
-# alpha's primary development + target platform) — rather than a three-OS
-# matrix. Broadening to macOS/Linux/Windows is the P3 backlog item in
-# `.loopdeck/loops.md` and lands after the cross-boundary OS contract is
-# signed (Release Gate A — "Alpha distribution contract").
+# CI for the overnight-orchestration epic's safety prerequisite (ADR-6):
+# un-eyeballed overnight PRs need an automated reviewer's net, so this gates
+# every PR — including agent-drafted ones — before Phase 2+ of that epic
+# starts. macOS + Ubuntu matrix (`prd-safety-prereqs` P1): macOS is the
+# alpha's primary target platform, Ubuntu is the second cheaply-available
+# runner and catches Linux-only build breaks (distinct system webkit2gtk/gtk
+# deps) early. Windows stays out of scope until a Windows alpha exists (the
+# P3 backlog line keeps it, per `docs/epics/overnight-orchestration/prd-safety-prereqs.md`
+# Non-Goals).
 #
 # This workflow supersedes the old `rust.yml` (ubuntu build+test only), which
 # it entirely covers plus fmt + clippy + the frontend build.
@@ -22,12 +24,24 @@ env:
 
 jobs:
   ci:
-    name: fmt · clippy · test · build (macOS)
-    runs-on: macos-latest
+    name: fmt · clippy · test · build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5        # v5 = Node.js 24 runtime (v4 = deprecated Node 20)
+
+      # Tauri's Rust crates (gtk/webkit2gtk bindings) need these system
+      # headers to build on Linux; macOS ships the equivalent frameworks.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       # ---------------- Rust ----------------
       - name: Install Rust stable (with rustfmt + clippy)
@@ -39,6 +53,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.os }}
 
       - name: cargo fmt --check
         working-directory: src-tauri

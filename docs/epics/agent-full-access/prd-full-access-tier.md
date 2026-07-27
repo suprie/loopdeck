@@ -2,7 +2,7 @@
 prd: prd-full-access-tier
 epic: agent-full-access
 milestone: "0.3.0"
-status: proposed
+status: accepted
 description: >
   Add a per-project "full access" permission tier to the LoopDeck agent
   runtime. Extends the Rust PermissionMode enum with a FullAccess variant
@@ -14,6 +14,57 @@ description: >
 ---
 
 # PRD — Full Access Permission Tier
+
+## Amendment — 2026-07-27 reconciliation (shipped as `Autonomous`, not `FullAccess`)
+
+This PRD's runtime goal shipped on 2026-07-23 (`loops.md` "Per-project
+Autonomous Mode") — **before** this file's checkboxes were ever revisited —
+under a smaller, differently-named surface than the Design section below
+specifies:
+
+- `PermissionMode::Autonomous` (`permission.rs:93`), not `FullAccess`. `decide()`
+  was **not** changed (no new match arm) — `Autonomous` behaves identically to
+  `ConfirmChanges` for `decide()`'s own output; the actual bypass is
+  `PermissionPolicy::is_autonomous()` (`permission.rs:123`), consulted directly
+  by `claude_session.rs::answer_control_request` (`:659`, `:768`) in place of
+  the PRD's proposed `intercepts_manually()` method — one fewer indirection,
+  same effect: `MANUAL_APPROVAL_TOOLS` parking and the `ExitPlanMode` park are
+  both skipped when `is_autonomous()`.
+- `ProjectEntry::autonomous: bool` (`config.rs:161`), not a
+  `ProjectPermissionMode` enum — two states only, no `Deny`-adjacent third
+  variant needed for a persisted field. `#[serde(default,
+  skip_serializing_if = "std::ops::Not::not")]` gives the same "old configs
+  deserialize unchanged, tidy config.yaml" property the PRD wanted from
+  `is_permission_default`.
+- `set_project_autonomous(path, autonomous: bool)` (`commands/project.rs:290`),
+  not `set_project_permission_mode`. Same shape, bool instead of enum.
+- The tier toggle lives in **`ProjectDetail`'s "Agent mode" Overview
+  section** (`:454-494`, with a confirm-on-enable dialog at `:505-516`), not
+  in the `AgentPanel`/`AgentRunner` **toolbar** the Design section names —
+  Overview was judged the better fit for a set-and-forget per-project
+  setting. `AgentPanel`/`AgentRunner` still mount the mode-aware
+  `PermissionModeBadge` read-only (`AgentPanel.tsx:1053`,
+  `AgentRunner.tsx:85-86`), matching the P1 badge goal, just not the P1
+  toolbar-selector goal at that location.
+- Landed for **both** agent harnesses — `codex_session.rs` has the same
+  `is_autonomous()` gate and its own floor/auto-allow tests
+  (`autonomous_mode_auto_allows_safe_codex_requests`,
+  `autonomous_mode_cannot_bypass_destructive_floor`), which post-dates this
+  PRD (Codex support shipped 2026-07-26) and was never in its scope.
+
+Net effect: every **P0/P1 goal** in the table above is met behaviorally —
+auto-approve past the floor, persisted per-project opt-in, IPC toggle,
+mode-aware badge, per-project selector (relocated) — under a leaner API this
+PRD didn't anticipate. The **P2 goal** ("applies to the next conversation"
+popover copy) was not carried over verbatim; the shipped confirm dialog
+states the floor caveat but not the next-conversation timing nuance — see
+the Phase 2 checklist below.
+
+**Not carried over, and not planned:** the literal `FullAccess`/
+`ProjectPermissionMode` names and the `intercepts_manually()` indirection.
+Checkboxes below are marked `[x]` when the shipped code satisfies the
+*goal* the item names, with a note where the concrete shape differs; items
+with no shipped equivalent are left `[ ]`.
 
 ## Overview
 
@@ -305,35 +356,35 @@ mode-aware wiring.
 
 ### Phase 1 — Backend permission mode + persistence
 
-- [ ] Add `FullAccess` variant to `PermissionMode` (`permission.rs:72-85`); update doc comment
-- [ ] Add `PermissionPolicy::full_access()` constructor; add the `FullAccess` arm to `decide()` (`permission.rs:118-131`)
-- [ ] Add `PermissionPolicy::intercepts_manually() -> bool` returning `false` for `FullAccess`, `true` otherwise
-- [ ] Wire `intercepts_manually()` into `claude_session.rs::answer_control_request` so `MANUAL_APPROVAL_TOOLS` is bypassed under `FullAccess`
-- [ ] Remove `#[allow(dead_code)]` from `with_mode` (`permission.rs:104-108`)
-- [ ] Define `ProjectPermissionMode` enum + `ProjectEntry::permission_mode` field with `#[serde(default)]` (`config.rs`)
-- [ ] Add `fn project_permission_policy(state, path) -> Result<PermissionPolicy, AppError>` helper
-- [ ] Replace the hardcoded `confirm_changes()` at `commands/agent.rs:1156` with the lookup; grep for any other production call sites
-- [ ] Add `set_project_permission_mode` IPC command in `commands/config_cmds.rs` mirroring `set_agent_config`
-- [ ] Register the command in `lib.rs` `generate_handler!`
+- [x] Add `FullAccess` variant to `PermissionMode` (`permission.rs:72-85`); update doc comment — shipped as `PermissionMode::Autonomous` (`permission.rs:93`); doc comment at `:63-72` describes it honestly. See Amendment.
+- [x] Add `PermissionPolicy::full_access()` constructor; add the `FullAccess` arm to `decide()` (`permission.rs:118-131`) — no new `decide()` arm was needed (`Autonomous` and `ConfirmChanges` both return `Allow` there); the constructor is `PermissionPolicy::with_mode(PermissionMode::Autonomous)` (no dedicated `autonomous()` fn, `with_mode` is the general constructor — see next item).
+- [x] Add `PermissionPolicy::intercepts_manually() -> bool` returning `false` for `FullAccess`, `true` otherwise — shipped as the inverse-shaped `is_autonomous() -> bool` (`permission.rs:123`), consulted directly at the two park sites instead of through a named "intercepts" predicate. Same effect, one fewer method.
+- [x] Wire `intercepts_manually()` into `claude_session.rs::answer_control_request` so `MANUAL_APPROVAL_TOOLS` is bypassed under `FullAccess` — `!self.policy.is_autonomous()` gates the arm-3 park (`claude_session.rs:659`) and the `ExitPlanMode` park (`:768`); same gate landed in `codex_session.rs` for the Codex harness (not in this PRD's scope, shipped later).
+- [x] Remove `#[allow(dead_code)]` from `with_mode` (`permission.rs:104-108`) — done; `with_mode` is the production constructor for `Autonomous`.
+- [x] Define `ProjectPermissionMode` enum + `ProjectEntry::permission_mode` field with `#[serde(default)]` (`config.rs`) — shipped as `ProjectEntry::autonomous: bool` (`config.rs:161`) with `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`, not a two-variant enum. Same backward-compat property (missing field → `false`/confirm-changes).
+- [x] Add `fn project_permission_policy(state, path) -> Result<PermissionPolicy, AppError>` helper — shipped as `resolve_permission_policy(state, path)`, threaded to both the Claude and Codex spawn sites (`loops.md` 2026-07-23 entry); unregistered paths resolve to `confirm_changes()`, matching the PRD's stated default.
+- [x] Replace the hardcoded `confirm_changes()` at `commands/agent.rs:1156` with the lookup; grep for any other production call sites — done via `resolve_permission_policy`; both spawn sites (Claude + Codex) use it.
+- [x] Add `set_project_permission_mode` IPC command in `commands/config_cmds.rs` mirroring `set_agent_config` — shipped as `set_project_autonomous(path, autonomous: bool)` in `commands/project.rs:290` (not `config_cmds.rs`; co-located with the other per-project toggles in that file). Note: unlike the PRD's sketch, a path that isn't found is a silent no-op (`find_by_path_mut` returns `None`), not an `AppError::ProjectNotFound` — see the Phase 3 gap below.
+- [x] Register the command in `lib.rs` `generate_handler!` — `set_project_autonomous` is registered.
 
 ### Phase 2 — Frontend selector + mode-aware badge
 
-- [ ] Add `PermissionMode` TS type to `src/types/index.ts`; add `permission_mode?` to `ProjectEntry`
-- [ ] Add `setProjectPermissionMode` wrapper to `src/lib/tauri.ts`
-- [ ] Make `PermissionModeBadge` accept a `mode` prop and render distinct styling/copy for `FullAccess`
-- [ ] Add tier selector in `AgentPanel.tsx` toolbar; wire to `setProjectPermissionMode`
-- [ ] Mirror selector wiring in `AgentRunner.tsx`
-- [ ] Honest popover copy: "applies to the next conversation; the destructive floor still applies"
-- [ ] `npx tsc --noEmit` clean
+- [x] Add `PermissionMode` TS type to `src/types/index.ts`; add `permission_mode?` to `ProjectEntry` — shipped as `autonomous?: boolean` on `ProjectEntry` (`types/index.ts:106`); no separate `PermissionMode` union type since the badge component defines its own inline `"confirm" | "autonomous"` prop type.
+- [x] Add `setProjectPermissionMode` wrapper to `src/lib/tauri.ts` — shipped as `setProjectAutonomous(path, autonomous: boolean)` (`tauri.ts:80-84`).
+- [x] Make `PermissionModeBadge` accept a `mode` prop and render distinct styling/copy for `FullAccess` — done; accepts `mode?: "confirm" | "autonomous"`, renders amber `ShieldAlert` + floor-caveat tooltip for `"autonomous"`.
+- [ ] Add tier selector in `AgentPanel.tsx` toolbar; wire to `setProjectPermissionMode` — **not built at this location.** `AgentPanel.tsx:1053` mounts the badge read-only; the toggle lives in `ProjectDetail`'s "Agent mode" Overview section instead (`ProjectDetail.tsx:454-494`, with a confirm-on-enable dialog). Superseded by relocation, not unfinished — see Amendment.
+- [ ] Mirror selector wiring in `AgentRunner.tsx` — same relocation; `AgentRunner.tsx:85-86` mounts the badge read-only only.
+- [x] Honest popover copy: "applies to the next conversation; the destructive floor still applies" — partially: the shipped confirm dialog (`ProjectDetail.tsx:508`) and badge tooltip both state the floor caveat verbatim; neither states the "next conversation" timing nuance the PRD's Open Questions section called for. Marked done for the floor-honesty half; the timing nuance is a small genuinely-open follow-up.
+- [x] `npx tsc --noEmit` clean — clean on the current tree (part of every subsequent gate run in `loops.md`).
 
 ### Phase 3 — Tests
 
-- [ ] `decide_full_access_allows_bash_edit_write` — confirm Bash/Edit/Write inputs return `Allow` under `FullAccess`
-- [ ] `decide_full_access_still_denies_destructive_floor` — confirm `rm -rf /` / `git push --force` still hard-deny under `FullAccess`
-- [ ] `intercepts_manually_false_under_full_access` — confirm the manual-approval interception is bypassed
-- [ ] `ProjectPermissionMode` round-trip serialization test in `config.rs` tests (both variants; missing-field defaults to `ConfirmChanges`)
-- [ ] `set_project_permission_mode` happy-path + `ProjectNotFound` error path test
-- [ ] `cargo test`, `cargo clippy -D warnings` clean
+- [x] `decide_full_access_allows_bash_edit_write` — confirm Bash/Edit/Write inputs return `Allow` under `FullAccess` — shipped as `autonomous_mode_lets_edit_and_safe_bash_through` (`permission.rs:695`); Codex-harness equivalent `autonomous_mode_auto_allows_safe_codex_requests` (`codex_session.rs:1193`).
+- [x] `decide_full_access_still_denies_destructive_floor` — confirm `rm -rf /` / `git push --force` still hard-deny under `FullAccess` — shipped as `autonomous_mode_still_enforces_destructive_floor` (`permission.rs:715`) + the mode-agnostic property test `floor_denies_regardless_of_mode` (`permission.rs:739`); Codex equivalent `autonomous_mode_cannot_bypass_destructive_floor` (`codex_session.rs:1202`).
+- [x] `intercepts_manually_false_under_full_access` — confirm the manual-approval interception is bypassed — covered indirectly: `autonomous_is_autonomous_reports_true` (`permission.rs:688`) pins the pure-logic predicate; no dedicated integration test exercises the `answer_control_request` park-skip itself (would need a mocked child process). Marked done at the level the codebase tests this kind of logic elsewhere (pure predicate, not the I/O-bound caller).
+- [ ] `ProjectPermissionMode` round-trip serialization test in `config.rs` tests (both variants; missing-field defaults to `ConfirmChanges`) — genuinely not written as a dedicated test. `autonomous: bool` shares the same `#[serde(default)]` pattern already proven for `run_state` (`config.rs:153`), so the risk is low, but no test pins "missing field → `false`" for this specific field. Left open.
+- [ ] `set_project_permission_mode` happy-path + `ProjectNotFound` error path test — the happy path is exercised end-to-end via the command (`commands/project.rs:290`), but there's no unit test, and the error path doesn't exist to test: an unknown path is a silent no-op rather than an `AppError`. Left open — worth deciding whether the silent-no-op behavior is intended before writing the test.
+- [x] `cargo test`, `cargo clippy -D warnings` clean — green on every gate run since (see `loops.md` 2026-07-23 through 2026-07-27 entries).
 
 ## Open Questions
 

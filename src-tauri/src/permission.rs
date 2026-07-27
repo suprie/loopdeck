@@ -362,7 +362,113 @@ fn analyze_stage(argv: &[String]) -> Option<String> {
         {
             return Some("force push blocked by policy floor".into());
         }
+        // `mv`/`cp`/`rsync` whose destination (the last argv token) resolves
+        // to a protected filesystem root — see `destructive_move_target`.
+        "mv" | "gmv" | "cp" | "gcp" | "rsync" => {
+            if let Some(dest) = args.last() {
+                if let Some(reason) = destructive_move_target(cmd, dest, home_dir().as_deref()) {
+                    return Some(reason);
+                }
+            }
+        }
         _ => {}
+    }
+    None
+}
+
+/// Resolve the user's home directory for `~`/`$HOME` expansion. Mirrors the
+/// `HOME`-first, `directories`-fallback pattern already used in `config.rs`
+/// for cross-platform resolution (`$HOME` on Unix; `directories::BaseDirs`
+/// covers the Windows `%USERPROFILE%` case via the same crate already a
+/// dependency). Returns `None` only in the pathological case where neither
+/// source resolves — the caller then can't expand `~`/`$HOME` and the
+/// destination check is skipped rather than guessed at.
+fn home_dir() -> Option<String> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+    directories::BaseDirs::new().map(|b| b.home_dir().to_string_lossy().into_owned())
+}
+
+/// Lexically collapse `.`/`..` path components — no filesystem access, since
+/// an `mv`/`cp` destination need not exist yet. Standard textual resolution:
+/// `..` pops the previous component (or, for an absolute path, is dropped
+/// once there is nothing left to pop — climbing above `/` stays at `/`,
+/// matching real path-resolution semantics).
+fn lexically_normalize(path: &str) -> String {
+    let is_absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if matches!(parts.last(), Some(&last) if last != "..") {
+                    parts.pop();
+                } else if !is_absolute {
+                    parts.push("..");
+                } // absolute + nothing to pop: climbing above root stays at root
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    if is_absolute {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".into()
+    } else {
+        joined
+    }
+}
+
+/// Expand `~`, `~/…`, `$HOME`, `$HOME/…`, `${HOME}`, `${HOME}/…` and already
+/// absolute paths, then lexically normalize. `home` is the already-resolved
+/// home directory (see `home_dir`), threaded in rather than looked up here
+/// so this function is a pure, directly testable string transform. Returns
+/// `None` for a purely relative destination with no absolute/`~`/`$HOME`
+/// anchor (e.g. `../etc` typed relative to an unknown working directory) —
+/// this floor is a syntactic deny-list, not a working-directory-aware
+/// sandbox (see the module's destructive-floor doc comment), so an
+/// unanchored relative destination is out of scope rather than guessed at.
+fn expand_destination(raw: &str, home: Option<&str>) -> Option<String> {
+    let trimmed = raw.trim();
+    let expanded = if trimmed == "~" || trimmed.starts_with("~/") {
+        format!("{}{}", home?, &trimmed[1..])
+    } else if trimmed == "$HOME" || trimmed.starts_with("$HOME/") {
+        format!("{}{}", home?, &trimmed[5..])
+    } else if trimmed == "${HOME}" || trimmed.starts_with("${HOME}/") {
+        format!("{}{}", home?, &trimmed[7..])
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        return None;
+    };
+    Some(lexically_normalize(&expanded))
+}
+
+/// The filesystem roots an `mv`/`cp`/`rsync` destination must not resolve to.
+/// Exact-match only — a subpath like `/var/tmp` or `/etc/myapp.conf` is a
+/// normal, allowed destination; only the root itself (the whole directory,
+/// as a rename/overwrite target) is denied. This also resolves the PRD's
+/// `/var/tmp`/`/var/folders` open question for free: those never equal
+/// `/var` under exact-match, so no special-casing is needed.
+const PROTECTED_MOVE_ROOTS: &[&str] = &["/", "/etc", "/usr", "/var"];
+
+/// Check an `mv`/`cp`/`rsync` destination against the protected-root floor.
+/// `cmd` is the (already-lowercased) command name, used only for the deny
+/// reason; `dest` is the raw last-argv token; `home` is the already-resolved
+/// home directory (`home_dir()`), threaded in so this stays a pure,
+/// directly testable function with no process-env access of its own.
+fn destructive_move_target(cmd: &str, dest: &str, home: Option<&str>) -> Option<String> {
+    let normalized = expand_destination(dest, home)?;
+    if PROTECTED_MOVE_ROOTS.contains(&normalized.as_str())
+        || home.is_some_and(|home| normalized == lexically_normalize(home))
+    {
+        return Some(format!(
+            "{cmd} destination resolves to protected root `{normalized}` blocked by policy floor"
+        ));
     }
     None
 }
@@ -919,6 +1025,87 @@ mod tests {
                     Decision::Deny(_)
                 ),
                 "{cmd} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn mv_cp_rsync_to_protected_root_absolute_form_is_caught() {
+        let policy = PermissionPolicy::confirm_changes();
+        for cmd in [
+            "mv build /",
+            "cp -r dist /etc",
+            "rsync -avz --delete out/ /usr",
+            "mv report.txt /var",
+        ] {
+            assert!(
+                matches!(
+                    policy.decide("Bash", &json!({ "command": cmd })),
+                    Decision::Deny(_)
+                ),
+                "{cmd} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn mv_cp_to_protected_root_relative_dotdot_form_is_caught() {
+        // `..` components collapse lexically before the protected-root check —
+        // `/usr/local/../..` normalizes to `/`.
+        let policy = PermissionPolicy::confirm_changes();
+        for cmd in ["mv build /usr/local/../..", "cp -r dist /var/log/../../etc"] {
+            assert!(
+                matches!(
+                    policy.decide("Bash", &json!({ "command": cmd })),
+                    Decision::Deny(_)
+                ),
+                "{cmd} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn mv_cp_to_home_root_tilde_and_home_expansion_forms_are_caught() {
+        // Exercises `destructive_move_target` directly with an injected home
+        // directory rather than mutating the process-global `HOME` env var,
+        // which would race other tests running concurrently in this binary.
+        let home = Some("/home/tester");
+        for dest in ["~", "~/../../home/tester", "$HOME", "${HOME}", "${HOME}/"] {
+            assert!(
+                destructive_move_target("mv", dest, home).is_some(),
+                "{dest} should resolve to the protected home root"
+            );
+        }
+    }
+
+    #[test]
+    fn mv_cp_rsync_to_ordinary_destinations_are_allowed() {
+        // Subpaths beneath a protected root (not the root itself) are normal,
+        // legitimate destinations and must not be flagged — including the
+        // `/var/tmp`/`/var/folders` macOS-temp case the PRD open question
+        // raised (resolved for free by exact-root-only matching).
+        let policy = PermissionPolicy::confirm_changes();
+        for cmd in [
+            "mv build /var/tmp/staging",
+            "cp -r dist /var/folders/xyz",
+            "mv report.txt /etc/myapp/report.txt",
+            "mv x ../sibling-dir",
+            "rsync -a src/ dest/",
+        ] {
+            assert_eq!(
+                policy.decide("Bash", &json!({ "command": cmd })),
+                Decision::Allow,
+                "{cmd} should clear the floor"
+            );
+        }
+        // Home-relative subpaths and unresolvable relative destinations are
+        // also allowed, checked directly against the pure helper (avoids
+        // depending on this process's real `HOME`).
+        let home = Some("/home/tester");
+        for dest in ["~/Downloads", "../sibling-dir"] {
+            assert!(
+                destructive_move_target("cp", dest, home).is_none(),
+                "{dest} should clear the floor"
             );
         }
     }
