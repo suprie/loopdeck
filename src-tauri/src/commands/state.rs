@@ -134,9 +134,12 @@ pub(crate) fn resolve_root(state: &AppState, path: &str) -> Result<PathBuf, AppE
 /// (`ANTHROPIC_AUTH_TOKEN`) and then drops it — the plaintext token is never
 /// held on the long-lived `Mutex<GlobalConfig>`.
 ///
-/// A missing secrets-file token resolves to `None`, preserving the prior
-/// behaviour where a user may rely on `ANTHROPIC_AUTH_TOKEN` inherited from
-/// their shell.
+/// No `agent` block yet (fresh install, Settings never saved) falls back to
+/// `AgentConfig::default()` rather than erroring, so a user who sets nothing
+/// still gets the plain `claude` CLI behaviour (its own login session, no
+/// forced token/base_url). A missing secrets-file token likewise resolves to
+/// `None`, preserving the prior behaviour where a user may rely on
+/// `ANTHROPIC_AUTH_TOKEN` inherited from their shell.
 pub(crate) fn resolve_agent_config(state: &AppState) -> Result<AgentConfig, AppError> {
     let mut agent_config = state
         .config
@@ -144,11 +147,7 @@ pub(crate) fn resolve_agent_config(state: &AppState) -> Result<AgentConfig, AppE
         .map_err(|_| AppError::LockError)?
         .agent
         .clone()
-        .ok_or_else(|| {
-            AppError::Agent(
-                "no agent config set; configure it in Settings before starting a loop".into(),
-            )
-        })?;
+        .unwrap_or_default();
     agent_config.auth_token = secrets::load_auth_token()?;
     Ok(agent_config)
 }
