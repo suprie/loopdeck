@@ -3,8 +3,9 @@
 ## Current
 
 - **Started**: 2026-07-26
-- **Goal**: Complete milestone **0.2.1 — Structured Execution State** (`docs/epics/support-project-management/prd-structured-execution-state.md`). Phase 4 is merged and post-merge reviewed; the remaining work is Phase 5 (derived progress UI) and Phase 6 (Git delivery evidence).
-- **Status**: in_progress
+- **Goal**: Milestone **0.2.1 — Structured Execution State** (`docs/epics/support-project-management/prd-structured-execution-state.md`) — complete. All 6 phases done; next work is unscoped (supporting backlog or the proposed 0.3.0 `agent-full-access` epic).
+- **Status**: completed (2026-07-27)
+- ✅ **Phase 5 — Derived progress UI + Phase 6 — Git delivery evidence** (2026-07-27, worktree `feat/0.2.1-phase5-progress-ui`) — The backend for both phases (`src-tauri/src/progress.rs`'s `execution_index`/`derive` join + `ExecutionStatus`/`DeliveryStatus`/discrepancy computation, `git.rs`'s `commit_reachability`/`verified_commit`, and the `get_progress_snapshot`/`export_execution_summary` commands) had already landed in the `6d6adbc` "Support skills for Codex" commit, but its PRD checklist boxes were never checked and the frontend never wired to it — so this loop closed the actual gap. Added TS mirrors of the read model (`ProgressSnapshot`/`LoopProgress`/`ExecutionStatus`/`DeliveryStatus`/`ProgressCount`/`UnmatchedExecution` in `types/index.ts`) + `tauri.ts` wrappers (`getProgressSnapshot`, `exportExecutionSummary`). `EpicsPanel.tsx`: per-loop derived execution/delivery badge + discrepancy warning icon (authored-checkbox vs. derived-state disagreement) next to each checklist item, PRD/epic progress bars driven by stable-ID counts (falls back to checkbox counting in legacy/empty mode), an "Unmatched execution records" reconciliation panel, and an "Export summary" button (writes `.loopdeck/execution-summary.md`, non-authoritative). `EpicsView.tsx` (cross-project): epic progress bars now prefer the execution.yaml-derived count over checkbox counting per project, satisfying acceptance criterion 4. All 10 Phase 5/6 PRD checklist items now `[x]`. No Rust changes (backend was pre-existing); gates green: fmt/clippy(lib, `-D warnings`)/test(445 passed, 8 ignored)/tsc/build.
 - **Verified state (2026-07-26)**:
   - ✅ **Codex Stop deadlock recovery** (2026-07-27) — Diagnosed a real wedged app-server from logs: a resumed Codex turn remained active for hours, and `agent_interrupt` fired without any terminal response. Codex Stop now has a 15-second grace deadline; an unresponsive child is terminated, the turn lock/error path releases the UI from "Agent is working," and the cached session is marked unusable so the next send replaces it. Full shared-worktree validation is green: fmt, strict clippy, 445 Rust tests passed / 8 ignored, TypeScript, production build, and diff check.
   - ✅ **Codex project-skill discovery** — LoopDeck now installs bundled skills into both `.claude/skills` and Codex's native `.agents/skills`, keeps an independent managed-skills manifest in each root, and reads the active harness's directory for composer `/` discovery. Clean-HEAD isolated verification: 26 skills tests, 12 composer tests, and the bootstrap integration test pass. The previously blocked shared-worktree Rust gate is now green.
@@ -29,6 +30,8 @@
 - [x] Review & merge: https://github.com/suprie/loopdeck/pull/11 (0.2.1 Phase 4 — migrate legacy loops.md to execution.yaml)
 - [x] Review & merge: https://github.com/suprie/loopdeck/pull/12 (agent execution-plan approval — `ExitPlanMode` interception + plan-mode toggle, unrelated ad-hoc work — see the 2026-07-26 decision). Gates green (fmt/clippy -D/test 418/tsc/build); not yet verified against a live `claude` session (no API credentials in the dev environment) — manual GUI dogfood (toggle Plan mode, send a message, confirm the plan card + Approve/Reject round-trip) is the remaining step before merge.
 - [x] Review & merge: https://github.com/suprie/loopdeck/pull/14 (Dashboard redesign — top bar/command palette, attention panel, project list, Today timeline; worktree `loopdeck-dashboard-redesign-effort-69cb9b`). Gates green (fmt/clippy -D/test 436/tsc/build); real project-data rendering (state pills, attention cards, Today timeline against live IPC) not yet dogfooded via `npm run tauri dev` — remaining step before merge.
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/16 (Fall back to default agent config when Settings was never saved — fresh install no longer hard-errors before starting a loop). Gates green (fmt/clippy -D/test 445/build).
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/17 (0.2.1 Phase 5/6 — derived progress UI wired to the existing execution.yaml read model; worktree `feat/0.2.1-phase5-progress-ui`). Gates green (fmt/clippy -D/test 445/tsc/build); manual dogfood of the Epics tab against real execution.yaml data not yet exercised outside the Tauri shell.
 
 ### Milestone 0.2.0 — Support Project Management
 
@@ -139,16 +142,11 @@ Source: [`docs/epics/support-project-management/prd-structured-execution-state.m
   render `execution.yaml`; legacy → legacy view + MigrationCard). Dogfood test
   migrates this repo's own `loops.md`+spec to a valid state. See the 2026-07-25
   decision.
-- [ ] Implement the remaining PRD phases (5–6): Phase 5 (derived progress UI),
-  Phase 6 (Git delivery evidence).
+- [x] Implement the remaining PRD phases (5–6): Phase 5 (derived progress UI),
+  Phase 6 (Git delivery evidence) — done 2026-07-27. See `## Current`.
 
-The two remaining PRDs are coupled (the split creates the `loopdeck-epic-author`
-slot; the author PRD fills it) and should land together, each in its own worktree
-(per the 2026-07-24 one-worktree-per-loop rule). See `## Current` for the open
-architectural decision: reconciling the orchestrator split (a PRD that predates
-Gate C) with the 2026-07-24 verify→ship wiring now inside `loopdeck-orchestrator`,
-plus the `templates/`-is-SSOT reconciliation of the two orchestrator copies and
-the `.agents/`-only `open-pr`/`prd-verifier`.
+Milestone 0.2.1 is now implementation-complete — all 6 phases of
+`prd-structured-execution-state` are done.
 
 ### Release Gate A — Hardened private alpha
 

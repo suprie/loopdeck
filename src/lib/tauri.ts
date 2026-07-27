@@ -12,6 +12,7 @@ import type {
   ExecutionState,
   LoadedExecution,
   MigrationPreview,
+  ProgressSnapshot,
   AgentResponse,
   ClaudeEvent,
   ConversationTurn,
@@ -187,6 +188,26 @@ export async function getMigrationPreview(
  */
 export async function applyMigration(path: string): Promise<ExecutionState> {
   return invoke<ExecutionState>("apply_migration", { path });
+}
+
+/**
+ * Derive loop/PRD/epic execution + delivery progress from stable IDs joined
+ * against execution.yaml. `execution_file_present` is false in legacy/empty
+ * mode (no execution.yaml yet) — the caller falls back to checkbox-derived
+ * progress. Rust: get_progress_snapshot(path) -> Result<ProgressSnapshot, AppError>
+ */
+export async function getProgressSnapshot(path: string): Promise<ProgressSnapshot> {
+  return invoke<ProgressSnapshot>("get_progress_snapshot", { path });
+}
+
+/**
+ * Write a non-authoritative Markdown snapshot of derived execution/delivery
+ * progress to .loopdeck/execution-summary.md. Never read back as state.
+ * Returns the written file's absolute path.
+ * Rust: export_execution_summary(path) -> Result<String, AppError>
+ */
+export async function exportExecutionSummary(path: string): Promise<string> {
+  return invoke<string>("export_execution_summary", { path });
 }
 
 /**
