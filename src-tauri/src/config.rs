@@ -159,6 +159,18 @@ pub struct ProjectEntry {
     /// `skip_serializing_if` keeps the registry tidy for the common case.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autonomous: bool,
+    /// Total `## Next Steps` checklist items parsed from `.loopdeck/loops.md`.
+    /// Re-read at every `list_projects`/`import_project` call (same treatment
+    /// as `current_loop`: doesn't gate whether a save happens, but is always
+    /// serialized — including `0` — since the frontend's `next_steps_done`
+    /// interpolation needs both fields present on every IPC response, not
+    /// just when non-zero.
+    #[serde(default)]
+    pub next_steps_total: usize,
+    /// Checked (`- [x]`) items within `next_steps_total`. Same treatment as
+    /// `next_steps_total` — always serialized, never skipped when zero.
+    #[serde(default)]
+    pub next_steps_done: usize,
 }
 
 /// serde `skip_serializing_if` predicate: omit `run_state` when `Idle` so the
@@ -191,6 +203,8 @@ impl Default for ProjectEntry {
             uncommitted: UncommittedStats::default(),
             run_state: RunState::Idle,
             autonomous: false,
+            next_steps_total: 0,
+            next_steps_done: 0,
         }
     }
 }
@@ -983,6 +997,23 @@ agent:
         entry.run_state = RunState::Working;
         let yaml = serde_yaml::to_string(&entry).unwrap();
         assert!(yaml.contains("run_state: working"));
+    }
+
+    #[test]
+    fn test_next_steps_zero_is_still_serialized() {
+        // Unlike `run_state`/`autonomous`, `next_steps_total`/`next_steps_done`
+        // must always be present on the wire — including `0` — because the
+        // frontend interpolates `next_steps_done` directly (e.g. "0 of 3 steps
+        // complete"). Omitting it when zero previously produced "undefined of
+        // 3 steps complete" for a waiting project with no steps checked yet.
+        let entry = ProjectEntry {
+            path: PathBuf::from("/tmp/x"),
+            name: "X".into(),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&entry).unwrap();
+        assert!(yaml.contains("next_steps_total: 0"));
+        assert!(yaml.contains("next_steps_done: 0"));
     }
 
     #[test]
