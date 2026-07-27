@@ -73,7 +73,13 @@ export function truncate(text: string, max: number): string {
 export function dateToTs(date: string): string {
   // If it already has a time component, return as-is.
   if (date.includes("T")) return date;
-  return `${date}T00:00:00.000Z`;
+  // Build local midnight (not UTC midnight) from the Y/M/D parts. `dateGroup`
+  // and `fmtTime` both read the resulting Date back out via *local* getters —
+  // anchoring to UTC midnight instead would round-trip to the previous
+  // calendar day in any timezone west of UTC (e.g. "2026-07-27" would land in
+  // the "Yesterday" bucket for anyone in America/Los_Angeles).
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(y, m - 1, d).toISOString();
 }
 
 /** Group a date string into a human-readable bucket. */

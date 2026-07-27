@@ -32,10 +32,15 @@ function accentsFor(name: string): [string, string] {
 
 type PillTone = "waiting" | "working" | "ready" | "idle";
 
+/** Next-steps items not yet checked off. A fully-completed checklist isn't "Ready". */
+function remainingSteps(p: ProjectEntry): number {
+  return p.next_steps_total - p.next_steps_done;
+}
+
 function statePill(p: ProjectEntry): { label: string; tone: PillTone } {
   if (p.run_state === "waiting") return { label: "Waiting on you", tone: "waiting" };
   if (p.run_state === "working") return { label: "Working", tone: "working" };
-  if (p.next_steps_total > 0) return { label: "Ready", tone: "ready" };
+  if (remainingSteps(p) > 0) return { label: "Ready", tone: "ready" };
   return { label: "Idle", tone: "idle" };
 }
 
@@ -57,8 +62,9 @@ function focusMeta(p: ProjectEntry): string {
       ? `Agent changed ${p.uncommitted.files} file${p.uncommitted.files === 1 ? "" : "s"}`
       : "Agent is working";
   }
-  if (p.next_steps_total > 0) {
-    return `${p.next_steps_total} next step${p.next_steps_total === 1 ? "" : "s"}`;
+  const remaining = remainingSteps(p);
+  if (remaining > 0) {
+    return `${remaining} next step${remaining === 1 ? "" : "s"}`;
   }
   return p.last_opened ? `Opened ${relativeTime(p.last_opened)}` : "Never opened";
 }
