@@ -160,13 +160,16 @@ pub struct ProjectEntry {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autonomous: bool,
     /// Total `## Next Steps` checklist items parsed from `.loopdeck/loops.md`.
-    /// Ephemeral — derived at read time, not meant to be a stable persisted
-    /// fact, so it's excluded from the registry when zero.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Re-read at every `list_projects`/`import_project` call (same treatment
+    /// as `current_loop`: doesn't gate whether a save happens, but is always
+    /// serialized — including `0` — since the frontend's `next_steps_done`
+    /// interpolation needs both fields present on every IPC response, not
+    /// just when non-zero.
+    #[serde(default)]
     pub next_steps_total: usize,
-    /// Checked (`- [x]`) items within `next_steps_total`. Ephemeral, same
-    /// rationale as `next_steps_total`.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Checked (`- [x]`) items within `next_steps_total`. Same treatment as
+    /// `next_steps_total` — always serialized, never skipped when zero.
+    #[serde(default)]
     pub next_steps_done: usize,
 }
 
@@ -174,11 +177,6 @@ pub struct ProjectEntry {
 /// ephemeral field doesn't clutter the persisted YAML.
 fn is_run_state_idle(state: &RunState) -> bool {
     matches!(state, RunState::Idle)
-}
-
-/// serde `skip_serializing_if` predicate for the ephemeral next-steps counts.
-fn is_zero(n: &usize) -> bool {
-    *n == 0
 }
 
 /// serde `skip_serializing_if` predicate for `AgentConfig::has_auth_token`:
@@ -999,6 +997,23 @@ agent:
         entry.run_state = RunState::Working;
         let yaml = serde_yaml::to_string(&entry).unwrap();
         assert!(yaml.contains("run_state: working"));
+    }
+
+    #[test]
+    fn test_next_steps_zero_is_still_serialized() {
+        // Unlike `run_state`/`autonomous`, `next_steps_total`/`next_steps_done`
+        // must always be present on the wire — including `0` — because the
+        // frontend interpolates `next_steps_done` directly (e.g. "0 of 3 steps
+        // complete"). Omitting it when zero previously produced "undefined of
+        // 3 steps complete" for a waiting project with no steps checked yet.
+        let entry = ProjectEntry {
+            path: PathBuf::from("/tmp/x"),
+            name: "X".into(),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&entry).unwrap();
+        assert!(yaml.contains("next_steps_total: 0"));
+        assert!(yaml.contains("next_steps_done: 0"));
     }
 
     #[test]
