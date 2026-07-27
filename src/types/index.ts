@@ -399,6 +399,59 @@ export interface PrdLoop {
   id?: string;
 }
 
+// ── Derived progress (Phase 5) — mirrors Rust `progress.rs` ─────────────────
+
+/** Execution status derived from stable-ID joins against execution.yaml. */
+export type ExecutionStatus =
+  | "planned"
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "abandoned"
+  | "unmatched";
+
+/** Local-first delivery status; `in_review`/`shipped` need an optional remote provider. */
+export type DeliveryStatus = "planned" | "implemented" | "committed" | "in_review" | "shipped";
+
+/** Whether recorded commit evidence is provably reachable from HEAD. */
+export type CommitReachability = "missing" | "reachable" | "unreachable";
+
+/** Derived state for a single stable loop ID. Mirrors Rust `LoopProgress`. */
+export interface LoopProgress {
+  execution: ExecutionStatus;
+  delivery: DeliveryStatus;
+  commit?: string;
+  commit_reachability: CommitReachability;
+  /** Set when the authored checkbox and the derived execution state disagree. */
+  discrepancy?: string;
+}
+
+/** Completed/total counts for a PRD or epic. Mirrors Rust `ProgressCount`. */
+export interface ProgressCount {
+  completed: number;
+  total: number;
+}
+
+/** An execution.yaml record whose ID has no matching PRD checklist item. */
+export interface UnmatchedExecution {
+  id: string;
+  title: string;
+  execution: ExecutionStatus;
+}
+
+/** Read model joining the spec layer to execution.yaml by stable ID. Mirrors Rust `ProgressSnapshot`. */
+export interface ProgressSnapshot {
+  /** Keyed by stable loop ID. */
+  loops: Record<string, LoopProgress>;
+  /** Keyed by `<epic>/<prd>`. */
+  prds: Record<string, ProgressCount>;
+  /** Keyed by epic slug. */
+  epics: Record<string, ProgressCount>;
+  unmatched: UnmatchedExecution[];
+  /** False when the project has no execution.yaml yet (legacy/empty mode). */
+  execution_file_present: boolean;
+}
+
 /** Tab navigation within ProjectDetail. */
 export type DetailTab = "overview" | "decisions" | "loops" | "epics" | "agent" | "graph";
 

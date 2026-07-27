@@ -9,7 +9,7 @@ import {
   CheckCircle2,
   Circle,
 } from "lucide-react";
-import type { Epic, Prd, PrdLoop } from "../../types";
+import type { Epic, Prd, PrdLoop, ProgressCount } from "../../types";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
 import { PageHeader } from "../layout/AppShell";
@@ -20,6 +20,9 @@ import { Progress } from "../ui/progress";
 interface EnrichedEpic extends Epic {
   projectName: string;
   projectPath: string;
+  /** Derived from execution.yaml when the project has migrated; undefined
+   * (checkbox-derived fallback) for projects still in legacy/empty mode. */
+  derivedProgress?: ProgressCount;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -38,8 +41,16 @@ const EPIC_STATUS_BG: Record<string, string> = {
   abandoned: "bg-muted/50",
 };
 
-/** Total + done counts across all phases of all PRDs in an epic. */
-function epicProgress(epic: Epic): { done: number; total: number } {
+/**
+ * Total + done counts across all phases of all PRDs in an epic. Prefers the
+ * execution.yaml-derived count (stable-ID based, not checkbox state) when the
+ * project has migrated to structured state; falls back to the authored
+ * checkbox/done_in_history count for legacy projects.
+ */
+function epicProgress(epic: EnrichedEpic): { done: number; total: number } {
+  if (epic.derivedProgress) {
+    return { done: epic.derivedProgress.completed, total: epic.derivedProgress.total };
+  }
   let done = 0;
   let total = 0;
   for (const prd of epic.prds) {
@@ -87,11 +98,16 @@ export function EpicsView() {
         if (cancelled) break;
         try {
           const grouped = await api.getEpicsByMilestone(p.path);
+          // Best-effort: legacy/empty-mode projects have no execution.yaml,
+          // so this stays undefined and epicProgress() falls back to checkboxes.
+          const snapshot = await api.getProgressSnapshot(p.path).catch(() => null);
           for (const [milestone, epics] of Object.entries(grouped)) {
             const enriched = epics.map((e) => ({
               ...e,
               projectName: p.name,
               projectPath: p.path,
+              derivedProgress:
+                snapshot?.execution_file_present ? snapshot.epics[e.slug] : undefined,
             }));
             const existing = map.get(milestone);
             if (existing) existing.push(...enriched);

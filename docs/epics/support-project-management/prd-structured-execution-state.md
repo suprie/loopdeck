@@ -411,19 +411,19 @@ Do not label an epic "done" when LoopDeck can only prove implementation.
 
 ### Phase 5 — Derived progress UI
 
-- [ ] `structured-state/execution-index` Join PRD loops to execution records exclusively by stable ID
-- [ ] `structured-state/derived-loop-status` Render planned, queued, in-progress, completed, abandoned, and unmatched states
-- [ ] `structured-state/derived-prd-progress` Derive PRD progress from required child loop IDs
-- [ ] `structured-state/derived-epic-progress` Derive epic progress from its PRDs without trusting manual completion frontmatter
-- [ ] `structured-state/status-discrepancies` Surface authored-checkbox and derived-state disagreement without rewriting the PRD
-- [ ] `structured-state/markdown-export` Add an explicit, non-authoritative Markdown execution-summary export
+- [x] `structured-state/execution-index` Join PRD loops to execution records exclusively by stable ID
+- [x] `structured-state/derived-loop-status` Render planned, queued, in-progress, completed, abandoned, and unmatched states
+- [x] `structured-state/derived-prd-progress` Derive PRD progress from required child loop IDs
+- [x] `structured-state/derived-epic-progress` Derive epic progress from its PRDs without trusting manual completion frontmatter
+- [x] `structured-state/status-discrepancies` Surface authored-checkbox and derived-state disagreement without rewriting the PRD
+- [x] `structured-state/markdown-export` Add an explicit, non-authoritative Markdown execution-summary export
 
 ### Phase 6 — Git delivery evidence
 
-- [ ] `structured-state/capture-commit` Allow completion to record a verified local commit SHA
-- [ ] `structured-state/validate-commit` Distinguish missing, reachable, and unreachable local commit evidence
-- [ ] `structured-state/derive-delivery` Render implemented versus committed without requiring network access
-- [ ] `structured-state/provider-boundary` Define an optional provider interface for in-review and shipped enrichment
+- [x] `structured-state/capture-commit` Allow completion to record a verified local commit SHA
+- [x] `structured-state/validate-commit` Distinguish missing, reachable, and unreachable local commit evidence
+- [x] `structured-state/derive-delivery` Render implemented versus committed without requiring network access
+- [x] `structured-state/provider-boundary` Define an optional provider interface for in-review and shipped enrichment
 
 ## Acceptance Criteria
 

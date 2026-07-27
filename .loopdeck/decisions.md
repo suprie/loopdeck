@@ -774,3 +774,9 @@
 - **Status**: accepted
 - **Context**: Phase 6 initially defined `DeliveryProvider` as returning `DeliveryStatus`. That made `InReview` and `Shipped` circular and unconstructable in core production code—the provider could only return a derived status it had already created—and strict dead-code validation correctly rejected both variants and the unused trait.
 - **Consequences**: Providers now return neutral `DeliveryEvidence { in_review, shipped }`. The progress read model maps that evidence into `InReview` or `Shipped` only after a reachable local commit establishes `Committed`; missing providers and provider errors retain the strongest local state. This activates the optional provider boundary without suppressing dead-code warnings or making remote access an offline runtime dependency.
+
+## 2026-07-27 — Derived progress lives in EpicsPanel/EpicsView, not a new tab
+
+- **Status**: accepted
+- **Context**: Phase 5's backend read model (`progress::snapshot`) and IPC commands already existed but were never rendered; the PRD's UX requirements ask for derived state "beside the original Markdown checklist," not a separate surface.
+- **Consequences**: `EpicsPanel.tsx` (per-project) gained per-loop execution/delivery badges, a discrepancy warning icon, PRD/epic progress bars, an unmatched-records panel, and an export-summary action; `EpicsView.tsx` (cross-project) now prefers the derived epic count over checkbox counting when a project has migrated. No new route or tab; legacy/empty-mode projects transparently fall back to checkbox-derived counts since `execution_file_present` gates every derived value.

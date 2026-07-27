@@ -1,12 +1,99 @@
 import { useState, useEffect, useCallback } from "react";
-import { Layers, Zap, CheckCircle2, Circle, Loader2, Pencil, ChevronRight } from "lucide-react";
+import {
+  Layers,
+  Zap,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  Pencil,
+  ChevronRight,
+  AlertTriangle,
+  FileDown,
+  GitCommitHorizontal,
+} from "lucide-react";
 import { toast } from "sonner";
-import type { Epic, PrdLoop, LoopStatus, AppError } from "../../types";
+import type {
+  Epic,
+  PrdLoop,
+  LoopStatus,
+  AppError,
+  ProgressSnapshot,
+  ProgressCount,
+  ExecutionStatus,
+  DeliveryStatus,
+} from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
+import { Progress } from "../ui/progress";
 import { SpecEditor } from "./SpecEditor";
 import { PrdContent } from "./PrdContent";
+
+// ── Derived progress helpers ─────────────────────────────────────────────────
+
+const EXECUTION_STATUS_LABEL: Record<ExecutionStatus, string> = {
+  planned: "planned",
+  queued: "queued",
+  in_progress: "in progress",
+  completed: "completed",
+  abandoned: "abandoned",
+  unmatched: "unmatched",
+};
+
+const EXECUTION_STATUS_COLOR: Record<ExecutionStatus, string> = {
+  planned: "var(--muted-foreground)",
+  queued: "var(--warning)",
+  in_progress: "var(--primary)",
+  completed: "var(--success)",
+  abandoned: "var(--muted-foreground)",
+  unmatched: "var(--destructive)",
+};
+
+const DELIVERY_STATUS_LABEL: Record<DeliveryStatus, string> = {
+  planned: "planned",
+  implemented: "implemented",
+  committed: "committed",
+  in_review: "in review",
+  shipped: "shipped",
+};
+
+/** Small pill showing a loop's derived execution state, plus a delivery chip
+ * once the loop is completed (implemented/committed/in review/shipped) — the
+ * PRD's precise progress-language distinction between "implemented" and
+ * "committed" needs its own label, not just the execution pill. */
+function DerivedStatusBadge({
+  execution,
+  delivery,
+}: {
+  execution: ExecutionStatus;
+  delivery: DeliveryStatus;
+}) {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      <span
+        className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider"
+        style={{ color: EXECUTION_STATUS_COLOR[execution] }}
+      >
+        {EXECUTION_STATUS_LABEL[execution]}
+      </span>
+      {delivery !== "planned" && (
+        <span
+          className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground"
+          title={`Delivery: ${DELIVERY_STATUS_LABEL[delivery]}`}
+        >
+          <GitCommitHorizontal size={10} />
+          {DELIVERY_STATUS_LABEL[delivery]}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Fraction label for a derived `ProgressCount`, e.g. "2/5". */
+function fraction(count: ProgressCount | undefined): string | null {
+  if (!count || count.total === 0) return null;
+  return `${count.completed}/${count.total}`;
+}
 
 interface EpicsPanelProps {
   projectPath: string;
@@ -15,14 +102,28 @@ interface EpicsPanelProps {
 export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [epics, setEpics] = useState<Epic[]>([]);
   const [loopStatus, setLoopStatus] = useState<LoopStatus | null>(null);
+  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   /** Relative path of the spec file being edited, or null. */
   const [editingSpec, setEditingSpec] = useState<string | null>(null);
   /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
+
+  // Derived progress is a best-effort enrichment: a project still in legacy
+  // mode (no execution.yaml) has no snapshot, and the panel falls back to
+  // checkbox-derived counts. A fetch failure here must not break the epics view.
+  const loadProgress = useCallback(async () => {
+    try {
+      const snapshot = await api.getProgressSnapshot(projectPath);
+      setProgress(snapshot.execution_file_present ? snapshot : null);
+    } catch {
+      setProgress(null);
+    }
+  }, [projectPath]);
 
   const load = useCallback(async () => {
     try {
@@ -38,7 +139,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [projectPath]);
+    loadProgress();
+  }, [projectPath, loadProgress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -61,10 +163,28 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
       }
     }
     run();
+    loadProgress();
     return () => {
       cancelled = true;
     };
-  }, [projectPath]);
+  }, [projectPath, loadProgress]);
+
+  const handleExportSummary = async () => {
+    setExporting(true);
+    try {
+      const written = await api.exportExecutionSummary(projectPath);
+      toast.success("Execution summary exported", {
+        description: written,
+      });
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to export summary", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const currentGoal = loopStatus?.current?.goal ?? null;
   const hasActiveLoop = !!loopStatus?.current;
@@ -136,6 +256,9 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
             : e,
         ),
       );
+      // The discrepancy badge depends on checked vs. derived execution state —
+      // refresh it so toggling doesn't leave a stale discrepancy warning.
+      loadProgress();
     } catch (err) {
       toast.error("Failed to toggle", { description: String(err) });
     } finally {
@@ -188,12 +311,57 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
         </div>
       )}
 
-      <div className="text-xs text-muted-foreground mb-4">
-        {epics.length} epic{epics.length !== 1 ? "s" : ""}
+      <div className="mb-4 flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          {epics.length} epic{epics.length !== 1 ? "s" : ""}
+        </span>
+        {progress && (
+          <button
+            onClick={handleExportSummary}
+            disabled={exporting}
+            title="Write a non-authoritative Markdown snapshot of derived execution progress to .loopdeck/execution-summary.md"
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+          >
+            {exporting ? (
+              <Loader2 size={11} className="animate-spin" />
+            ) : (
+              <FileDown size={11} />
+            )}
+            Export summary
+          </button>
+        )}
       </div>
 
+      {/* Unmatched execution records: an execution.yaml ID with no current
+          PRD checklist match — surfaced, never silently dropped. */}
+      {progress && progress.unmatched.length > 0 && (
+        <div className="mb-4 rounded-lg border border-[color-mix(in_oklab,var(--destructive)_35%,transparent)] bg-[color-mix(in_oklab,var(--destructive)_6%,transparent)] p-3">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+            <AlertTriangle size={12} style={{ color: "var(--destructive)" }} />
+            Unmatched execution records
+          </div>
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Recorded in execution.yaml but no PRD checklist item currently carries
+            this ID (renamed, removed, or from another project's history).
+          </p>
+          <ul className="mt-2 space-y-1">
+            {progress.unmatched.map((u) => (
+              <li key={u.id} className="flex items-center gap-2 text-xs">
+                <code className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  {u.id}
+                </code>
+                <span className="text-foreground">{u.title}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="space-y-4">
-        {epics.map((epic) => (
+        {epics.map((epic) => {
+          const epicCount = progress?.epics[epic.slug];
+          const epicFraction = fraction(epicCount);
+          return (
           <div
             key={epic.slug}
             className="rounded-xl border border-border bg-card p-4"
@@ -218,6 +386,22 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                 <Pencil className="size-3.5" />
               </button>
             </div>
+
+            {/* Derived epic progress — from execution.yaml, not checkbox state */}
+            {epicCount && epicFraction && (
+              <div className="mb-3 flex items-center gap-2">
+                <Progress
+                  value={Math.round((epicCount.completed / epicCount.total) * 100)}
+                  className="h-1.5"
+                />
+                <span
+                  className="shrink-0 text-[10px] font-mono text-muted-foreground"
+                  title="Completed loops / total loops with a stable ID, derived from execution.yaml"
+                >
+                  {epicFraction}
+                </span>
+              </div>
+            )}
 
             {/* Epic README editor */}
             {editingSpec === `${epic.slug}/README.md` && (
@@ -245,6 +429,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                 const prdIsActive =
                   hasActiveLoop &&
                   prd.phases.some((p) => p.loops.some((l) => l.title === currentGoal));
+                const prdCount = progress?.prds[`${epic.slug}/${prd.slug}`];
+                const prdFraction = fraction(prdCount);
                 return (
                 <div key={prd.file} className="rounded-lg border border-border/60 p-3">
                   <div className="flex items-center justify-between">
@@ -262,7 +448,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                       />
                       <span className="text-xs font-medium text-foreground">{prd.slug}</span>
                       <span className="text-[10px] text-muted-foreground">
-                        {loopCount} loop{loopCount !== 1 ? "s" : ""}
+                        {prdFraction ?? `${loopCount} loop${loopCount !== 1 ? "s" : ""}`}
                       </span>
                       {prdIsActive && (
                         <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[var(--primary)]">
@@ -335,6 +521,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                   // Legacy ID-less items can't be promoted (Phase 1):
                                   // the stable ID is the spec→execution join key.
                                   const noId = !loop.id;
+                                  const derived = loop.id ? progress?.loops[loop.id] : undefined;
                                   return (
                                     <li
                                       key={i}
@@ -365,6 +552,26 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                       >
                                         {loop.title}
                                       </span>
+
+                                      {/* Derived execution/delivery state — from execution.yaml,
+                                          independent of the authored checkbox above */}
+                                      {derived && (
+                                        <DerivedStatusBadge
+                                          execution={derived.execution}
+                                          delivery={derived.delivery}
+                                        />
+                                      )}
+                                      {derived?.discrepancy && (
+                                        <span
+                                          className="mt-0.5 shrink-0"
+                                          title={derived.discrepancy}
+                                        >
+                                          <AlertTriangle
+                                            size={11}
+                                            style={{ color: "var(--warning)" }}
+                                          />
+                                        </span>
+                                      )}
 
                                       {/* Promote action — only on not-done loops with a stable ID */}
                                       {!done && (
@@ -422,7 +629,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
               )}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
