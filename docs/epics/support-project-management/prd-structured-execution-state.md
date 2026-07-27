@@ -377,28 +377,28 @@ Do not label an epic "done" when LoopDeck can only prove implementation.
 
 ### Phase 1 — Stable IDs in the spec layer
 
-- [ ] `structured-state/parse-loop-id` Extend `PrdLoop` with a stable ID parsed separately from its title
-- [ ] `structured-state/validate-loop-ids` Detect duplicate and malformed IDs with file-and-line diagnostics
-- [ ] `structured-state/author-loop-ids` Update `loopdeck-epic-author` to generate stable IDs
-- [ ] `structured-state/render-legacy-items` Render legacy ID-less items but disable Promote with a remediation
-- [ ] `structured-state/update-dogfood-prds` Add IDs to LoopDeck's existing active PRD checklist items
+- [x] `structured-state/parse-loop-id` Extend `PrdLoop` with a stable ID parsed separately from its title
+- [x] `structured-state/validate-loop-ids` Detect duplicate and malformed IDs with file-and-line diagnostics
+- [x] `structured-state/author-loop-ids` Update `loopdeck-epic-author` to generate stable IDs
+- [x] `structured-state/render-legacy-items` Render legacy ID-less items but disable Promote with a remediation
+- [x] `structured-state/update-dogfood-prds` Add IDs to LoopDeck's existing active PRD checklist items
 
 ### Phase 2 — Execution schema and persistence
 
-- [ ] `structured-state/execution-types` Define versioned Rust types for current, queue, origin, history, outcome, and Git evidence
-- [ ] `structured-state/execution-validation` Validate schema version, uniqueness, transitions, and expected revision
-- [ ] `structured-state/execution-persistence` Load, back up, and atomically write `.loopdeck/execution.yaml`
-- [ ] `structured-state/execution-recovery` Add malformed-primary recovery without destructive automatic restoration
-- [ ] `structured-state/execution-tests` Cover round-trip, stale revision, duplicate ID, unknown version, backup recovery, and atomic completion
+- [x] `structured-state/execution-types` Define versioned Rust types for current, queue, origin, history, outcome, and Git evidence
+- [x] `structured-state/execution-validation` Validate schema version, uniqueness, transitions, and expected revision
+- [x] `structured-state/execution-persistence` Load, back up, and atomically write `.loopdeck/execution.yaml`
+- [x] `structured-state/execution-recovery` Add malformed-primary recovery without destructive automatic restoration
+- [x] `structured-state/execution-tests` Cover round-trip, stale revision, duplicate ID, unknown version, backup recovery, and atomic completion
 
 ### Phase 3 — State transitions and agent integration
 
-- [ ] `structured-state/promote-by-id` Replace title-based promotion with a validated stable-ID transition
-- [ ] `structured-state/complete-loop` Implement atomic current-to-history completion
-- [ ] `structured-state/abandon-loop` Implement abandonment with a required reason
-- [ ] `structured-state/state-command` Provide the narrow LoopDeck-owned state command for hooks and skills
-- [ ] `structured-state/update-memory-skill` Update `loopdeck-memory` and loop-running skills to use validated transitions
-- [ ] `structured-state/remove-freeform-runtime-edits` Remove bundled instructions that directly edit runtime Markdown
+- [x] `structured-state/promote-by-id` Replace title-based promotion with a validated stable-ID transition
+- [x] `structured-state/complete-loop` Implement atomic current-to-history completion
+- [x] `structured-state/abandon-loop` Implement abandonment with a required reason
+- [x] `structured-state/state-command` Provide the narrow LoopDeck-owned state command for hooks and skills
+- [x] `structured-state/update-memory-skill` Update `loopdeck-memory` and loop-running skills to use validated transitions
+- [x] `structured-state/remove-freeform-runtime-edits` Remove bundled instructions that directly edit runtime Markdown
 
 ### Phase 4 — Migration and compatibility
 
