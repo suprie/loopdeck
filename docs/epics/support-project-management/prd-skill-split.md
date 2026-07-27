@@ -2,14 +2,51 @@
 prd: prd-skill-split
 epic: support-project-management
 milestone: "0.2.0"
-status: proposed
+status: accepted
 description: >
   Split the single fat loopdeck-orchestrator skill into three focused skills
   (runner + author + memory) and add a version-aware refresh so the split
   reaches existing projects. Strips strategy out of skills; mechanics only.
+  Shipped as Option A: orchestrator kept (slimmed), not removed — see the
+  Amendment below.
 ---
 
 # PRD — Skill Split + Managed-Skills Refresh
+
+## Amendment — Option A shipped instead of literal removal (2026-07-25)
+
+This PRD's original text (below, otherwise unchanged) calls for **removing**
+`loopdeck-orchestrator` and replacing it with the three mechanics skills. That
+is not what shipped. The 2026-07-25 decision in `decisions.md` chose
+**Option A** instead: keep a slimmed `loopdeck-orchestrator` (owning the
+spawn → stitch → verify → ship flow) *alongside* the three new skills, rather
+than deleting it. Rationale: the orchestrator's ship-flow responsibilities
+(worktree discipline, parallel-build coordination, PRD verification, PR
+creation) aren't planning/strategy in the job-1/job-2 sense this PRD's
+Problem Statement describes — removing it would have deleted working
+mechanics, not stripped strategy.
+
+Practical effect on the checklists below: every item is implemented **except**
+the two that specifically call for deleting the orchestrator
+(`skill-split/remove-orchestrator-const`,
+`skill-split/orchestrator-removal-migration`) and the two Goals rows they
+correspond to. Those are marked **superseded**, not done — they were
+deliberately not implemented, and per the 2026-07-27 "near-miss" decision
+this is intentional every time it's re-encountered, not a to-do. Do not
+"finish" them by deleting the orchestrator without a fresh decision to
+reverse Option A.
+
+Two items were reconsidered and rejected on 2026-07-27 as a near-miss: a
+session read the unchecked boxes as staleness and briefly re-implemented the
+literal removal before catching the conflict with the 2026-07-25 decision and
+reverting. See both dated entries in `decisions.md` for the full account.
+
+Remaining genuinely open work (not a deviation, just unfinished):
+`skill-split/prefix-convention-doc` (no CONTRIBUTING.md exists in this repo
+yet) and confirming `skill-split/dogfood-refresh` against this repo's own
+`.claude/skills/` directly (it's gitignored and currently absent locally,
+though the refresh mechanism was dogfooded elsewhere per the 2026-07-25
+decision).
 
 ## Overview
 
@@ -46,16 +83,16 @@ without a refresh mechanism.
 
 ## Goals
 
-| Priority | Goal |
-|----------|------|
-| P0 | `loopdeck-orchestrator` removed from the embedded skill set; replaced by three focused skills |
-| P0 | `loopdeck-loop-runner` — runtime mechanics only: read Current, implement, record, memory conventions |
-| P0 | `loopdeck-epic-author` — authoring aid: elaborate a coarse goal into epic/PRD structure via clarifying questions; produces reviewable drafts; does not commit or promote |
-| P0 | `loopdeck-memory` — `decisions.md` + `loops.md` write conventions |
-| P0 | Version-aware refresh: app version > manifest version overwrites `loopdeck-`-prefixed skills |
-| P0 | One-time migration: existing `loopdeck-orchestrator` directory removed on refresh, logged |
-| P1 | `refresh_skills(project_path)` IPC command + "Refresh skills" button in ProjectDetail |
-| P1 | `loopdeck-loop-runner` gains the read-context rule: follow `**Epic**`/`**PRD**` back-reference to load the origin PRD as context before executing |
+| Priority | Goal | Shipped |
+|----------|------|---------|
+| P0 | ~~`loopdeck-orchestrator` removed from the embedded skill set; replaced by three focused skills~~ | **Superseded (Option A):** kept, slimmed to the spawn→stitch→verify→ship flow; three skills added alongside it, not as a replacement |
+| P0 | `loopdeck-loop-runner` — runtime mechanics only: read Current, implement, record, memory conventions | Done |
+| P0 | `loopdeck-epic-author` — authoring aid: elaborate a coarse goal into epic/PRD structure via clarifying questions; produces reviewable drafts; does not commit or promote | Done |
+| P0 | `loopdeck-memory` — `decisions.md` + `loops.md` write conventions | Done |
+| P0 | Version-aware refresh: app version > manifest version overwrites `loopdeck-`-prefixed skills | Done |
+| P0 | ~~One-time migration: existing `loopdeck-orchestrator` directory removed on refresh, logged~~ | **Superseded (Option A):** no removal migration — the orchestrator stays installed |
+| P1 | `refresh_skills(project_path)` IPC command + "Refresh skills" button in ProjectDetail | Done (`commands/project.rs::refresh_skills`, `ProjectDetail.tsx`) |
+| P1 | `loopdeck-loop-runner` gains the read-context rule: follow `**Epic**`/`**PRD**` back-reference to load the origin PRD as context before executing | Done (`templates/skills/loopdeck-loop-runner/SKILL.md`) |
 
 ## Non-Goals
 
@@ -165,26 +202,26 @@ fires again. Logged, not silent.
 
 ### Phase 1 — Author the three new SKILL.md templates
 
-- [ ] `skill-split/loop-runner-skill` Write `templates/skills/loopdeck-loop-runner/SKILL.md` — mechanics + read-context rule
-- [ ] `skill-split/epic-author-skill` Write `templates/skills/loopdeck-epic-author/SKILL.md` — elaboration pattern, clarifying-question set, posture rule, format contract with `prd-spec-layer.md`
-- [ ] `skill-split/memory-skill` Write `templates/skills/loopdeck-memory/SKILL.md` — decisions.md + loops.md write conventions (extracted from orchestrator)
+- [x] `skill-split/loop-runner-skill` Write `templates/skills/loopdeck-loop-runner/SKILL.md` — mechanics + read-context rule
+- [x] `skill-split/epic-author-skill` Write `templates/skills/loopdeck-epic-author/SKILL.md` — elaboration pattern, clarifying-question set, posture rule, format contract with `prd-spec-layer.md`
+- [x] `skill-split/memory-skill` Write `templates/skills/loopdeck-memory/SKILL.md` — decisions.md + loops.md write conventions (extracted from orchestrator)
 
 ### Phase 2 — Rewire `skills.rs`
 
-- [ ] `skill-split/embed-skills` Add `include_str!` + `NAME_*` + `skill_content()` entries for the three new skills
-- [ ] `skill-split/determine-skills` Update `determine_skills`: always-insert the three new names; remove `NAME_ORCHESTRATOR`
-- [ ] `skill-split/remove-orchestrator-const` Remove the `loopdeck-orchestrator` const + match arm + name constant
-- [ ] `skill-split/skill-manifest` Add `SkillManifest` struct + read/write helpers (`.loopdeck-manifest.json`)
-- [ ] `skill-split/version-refresh` Replace the exists-check in `copy_skills` with the version-aware refresh rule
-- [ ] `skill-split/orchestrator-removal-migration` Add the one-time orchestrator-removal migration block
-- [ ] `skill-split/update-skill-tests` Update tests: `test_orchestrator_always_included` → `test_core_skills_always_included`; add version-refresh + migration tests
+- [x] `skill-split/embed-skills` Add `include_str!` + `NAME_*` + `skill_content()` entries for the three new skills
+- [x] `skill-split/determine-skills` Update `determine_skills`: always-insert the three new names — **kept `NAME_ORCHESTRATOR`** in the always-insert set (Option A) instead of removing it
+- [ ] `skill-split/remove-orchestrator-const` ~~Remove the `loopdeck-orchestrator` const + match arm + name constant~~ — **superseded (Option A):** not implemented, and not a to-do; see Amendment
+- [x] `skill-split/skill-manifest` Add `SkillManifest` struct + read/write helpers (`.loopdeck-manifest.json`)
+- [x] `skill-split/version-refresh` Replace the exists-check in `copy_skills` with the version-aware refresh rule
+- [ ] `skill-split/orchestrator-removal-migration` ~~Add the one-time orchestrator-removal migration block~~ — **superseded (Option A):** not implemented, and not a to-do; see Amendment
+- [x] `skill-split/update-skill-tests` Update tests: `test_orchestrator_always_included` → `test_core_skills_always_included` (`skills.rs:577` — still asserts the orchestrator is present, per Option A); version-refresh + migration tests added
 
 ### Phase 3 — Expose refresh + dogfood
 
-- [ ] `skill-split/refresh-skills-command` `refresh_skills(project_path)` IPC command (wraps version-aware `copy_skills`)
-- [ ] `skill-split/refresh-skills-button` "Refresh skills" button in ProjectDetail Overview tab (next to Rescan)
-- [ ] `skill-split/prefix-convention-doc` Document the `loopdeck-` prefix convention in CONTRIBUTING (or a stub for 0.2.0)
-- [ ] `skill-split/dogfood-refresh` Run Refresh on LoopDeck's own repo; verify the three new skills land and the old orchestrator is gone
+- [x] `skill-split/refresh-skills-command` `refresh_skills(project_path)` IPC command (wraps version-aware `copy_skills`) — `commands/project.rs::refresh_skills`
+- [x] `skill-split/refresh-skills-button` "Refresh skills" button in ProjectDetail Overview tab (next to Rescan) — `ProjectDetail.tsx`
+- [ ] `skill-split/prefix-convention-doc` Document the `loopdeck-` prefix convention in CONTRIBUTING (or a stub for 0.2.0) — no `CONTRIBUTING.md` exists in this repo yet; still open
+- [ ] `skill-split/dogfood-refresh` Run Refresh on LoopDeck's own repo; verify the three new skills land — **note:** under Option A the old orchestrator is expected to remain, not be gone. Not yet exercised directly against this repo's own `.claude/skills/` (gitignored, currently absent locally); still open
 
 ## Open Questions
 
