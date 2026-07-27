@@ -192,9 +192,11 @@ export async function applyMigration(path: string): Promise<ExecutionState> {
 
 /**
  * Derive loop/PRD/epic execution + delivery progress from stable IDs joined
- * against execution.yaml. `execution_file_present` is false in legacy/empty
- * mode (no execution.yaml yet) — the caller falls back to checkbox-derived
- * progress. Rust: get_progress_snapshot(path) -> Result<ProgressSnapshot, AppError>
+ * against execution.yaml. Structured records are authoritative when present;
+ * authored checkbox/history completion fills loops with no execution record.
+ * `execution_file_present` is false in legacy/empty mode (no execution.yaml
+ * yet), where the caller derives all progress from checkboxes.
+ * Rust: get_progress_snapshot(path) -> Result<ProgressSnapshot, AppError>
  */
 export async function getProgressSnapshot(path: string): Promise<ProgressSnapshot> {
   return invoke<ProgressSnapshot>("get_progress_snapshot", { path });
