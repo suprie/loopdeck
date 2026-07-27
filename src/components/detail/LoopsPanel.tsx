@@ -28,12 +28,14 @@ interface LoopsPanelProps {
 
 const LOOP_STATUS_COLORS: Record<string, string> = {
   in_progress: "var(--primary)",
+  queued: "var(--warning)",
   completed: "var(--success)",
   abandoned: "var(--muted-foreground)",
 };
 
 const LOOP_STATUS_BG: Record<string, string> = {
   in_progress: "bg-[color-mix(in_oklab,var(--primary)_12%,transparent)]",
+  queued: "bg-[color-mix(in_oklab,var(--warning)_12%,transparent)]",
   completed: "bg-[color-mix(in_oklab,var(--success)_12%,transparent)]",
   abandoned: "bg-muted",
 };
@@ -86,7 +88,7 @@ function StructuredCard({
   isCurrent,
 }: {
   loop: { id: string; title: string };
-  status: "in_progress" | "completed" | "abandoned";
+  status: "in_progress" | "queued" | "completed" | "abandoned";
   date: string;
   isCurrent?: boolean;
 }) {
@@ -163,7 +165,7 @@ function StructuredView({ loaded }: { loaded: LoadedExecution }) {
               <StructuredCard
                 key={q.id}
                 loop={q}
-                status="completed"
+                status="queued"
                 date={dateOnly(q.queued_at)}
               />
             ))}
@@ -235,20 +237,23 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
       setExec(null);
       const loops = await api.getLoops(projectPath);
       setStatus(loops);
-      if (loops.current || loops.history.length > 0) {
-        setMode("legacy");
-        // Offer migration only when the preview says it's available.
-        try {
-          const p = await api.getMigrationPreview(projectPath);
-          setPreview(
-            p.loops_md_present && !p.execution_yaml_present ? p : null,
-          );
-        } catch {
-          setPreview(null);
-        }
-      } else {
-        setMode("empty");
+      // Offer migration whenever loops.md exists, including empty and
+      // next-step-only legacy files.
+      try {
+        const p = await api.getMigrationPreview(projectPath);
+        const available =
+          p.loops_md_present && !p.execution_yaml_present;
+        setPreview(available ? p : null);
+        setMode(
+          available || loops.current || loops.history.length > 0
+            ? "legacy"
+            : "empty",
+        );
+      } catch {
         setPreview(null);
+        setMode(
+          loops.current || loops.history.length > 0 ? "legacy" : "empty",
+        );
       }
     } catch (err) {
       setError(String(err));
@@ -305,11 +310,7 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
     return <StructuredView loaded={exec} />;
   }
 
-  if (
-    mode === "empty" ||
-    !status ||
-    (!status.current && status.history.length === 0)
-  ) {
+  if (mode === "empty" || !status) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <Repeat size={32} className="text-muted-foreground/30 mb-3" />
@@ -396,6 +397,19 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
             ))}
           </div>
         </section>
+      )}
+
+      {!status.current && status.history.length === 0 && (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <Repeat size={28} className="text-muted-foreground/30 mb-3" />
+          <h3 className="text-sm font-semibold text-foreground mb-1.5">
+            No loop records to display
+          </h3>
+          <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
+            This legacy file is empty or contains only next steps. You can still
+            migrate it to structured execution state.
+          </p>
+        </div>
       )}
     </div>
   );

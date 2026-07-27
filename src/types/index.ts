@@ -30,14 +30,15 @@ export interface DirEntry {
 }
 
 /** A skill installed for a project, surfaced by the composer's `/`-skill
- *  discovery menu. Read from `<repo>/.claude/skills/<dir>/SKILL.md`.
+ *  discovery menu. Read from the active harness's project skill root:
+ *  `.claude/skills` for Claude or `.agents/skills` for Codex.
  *
  *  `name` is the frontmatter `name` (e.g. `loopdeck:rust-expert`) — the
- *  invocation token the `claude` CLI recognizes, so the menu inserts it
+ *  invocation token the active harness recognizes, so the menu inserts it
  *  verbatim as `/<name>`. It is distinct from `directory`, the on-disk folder
  *  name (`loopdeck-rust-expert`). */
 export interface SkillEntry {
-  /** Frontmatter `name` — the invocation token the `claude` CLI recognizes. */
+  /** Frontmatter `name` — the invocation token the active harness recognizes. */
   name: string;
   /** On-disk skill directory name, e.g. `loopdeck-rust-expert`. */
   directory: string;

@@ -99,7 +99,7 @@ export function MigrationCard({
             )}
           </div>
 
-          {unmatchedCount > 0 && (
+          {(unmatchedCount > 0 || unconvertedCount > 0) && (
             <>
               <button
                 onClick={() => setExpanded((v) => !v)}
@@ -109,7 +109,7 @@ export function MigrationCard({
                   size={12}
                   className={`transition-transform ${expanded ? "rotate-180" : ""}`}
                 />
-                {expanded ? "Hide" : "Show"} unmatched records
+                {expanded ? "Hide" : "Show"} reconciliation details
               </button>
               {expanded && (
                 <ul className="mt-2 space-y-1 text-[11px] text-muted-foreground border-l-2 border-border pl-3">
@@ -130,8 +130,30 @@ export function MigrationCard({
                       </span>
                     </li>
                   ))}
+                  {preview.unconverted_next_steps.map((step, index) => (
+                    <li
+                      key={`next-step-${index}`}
+                      className="flex items-start gap-2"
+                    >
+                      <AlertTriangle
+                        size={11}
+                        className="mt-0.5 shrink-0"
+                        style={{ color: "var(--warning)" }}
+                      />
+                      <span>
+                        <code className="font-mono text-[10px]">
+                          next-step/{index + 1}
+                        </code>{" "}
+                        · [{step.checked ? "x" : " "}] {step.text}
+                        <span className="text-muted-foreground/70">
+                          {" "}
+                          — no stable loop ID
+                        </span>
+                      </span>
+                    </li>
+                  ))}
                   <li className="text-[10px] text-muted-foreground/70 pt-1">
-                    Unmatched records are preserved in{" "}
+                    Unmatched records and next steps are preserved in{" "}
                     <code className="font-mono">loops.legacy.md</code> and are not
                     written to execution.yaml.
                   </li>

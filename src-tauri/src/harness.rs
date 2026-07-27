@@ -28,6 +28,17 @@ impl HarnessSession {
         }
     }
 
+    /// Whether this cached harness can safely accept another turn.
+    ///
+    /// Codex marks itself unusable when a wedged child must be terminated
+    /// after ignoring Stop; `with_session` then replaces it on the next send.
+    pub fn is_usable(&mut self) -> bool {
+        match self {
+            Self::Claude(_) => true,
+            Self::Codex(session) => session.is_usable(),
+        }
+    }
+
     pub fn spawn(
         cwd: &Path,
         config: &AgentConfig,

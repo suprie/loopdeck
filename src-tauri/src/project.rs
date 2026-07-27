@@ -76,7 +76,7 @@ fn create_files_and_directories(repo_path: &Path) -> Result<(), AppError> {
 }
 
 fn setup_skills(repo_path: &Path, markers: &[String]) -> Result<(), AppError> {
-    // Copy relevant skill templates to .claude/skills/
+    // Copy relevant skill templates to the Claude and Codex skill roots.
     eprintln!("Copying skills");
     skills::copy_skills(repo_path, markers)?;
 
@@ -484,25 +484,29 @@ mod tests {
 
         bootstrap_project(&dir, &name, &markers, false).unwrap();
 
-        // Verify skills were copied
-        let skills_dir = dir.join(".claude").join("skills");
-        assert!(skills_dir.exists());
-        assert!(skills_dir
-            .join("loopdeck-orchestrator")
-            .join("SKILL.md")
-            .exists());
-        assert!(skills_dir
-            .join("loopdeck-rust-expert")
-            .join("SKILL.md")
-            .exists());
-        assert!(skills_dir
-            .join("loopdeck-vite-senior-engineer")
-            .join("SKILL.md")
-            .exists());
-        assert!(skills_dir
-            .join("loopdeck-tauri-expert")
-            .join("SKILL.md")
-            .exists());
+        // Verify skills were copied for both supported harnesses.
+        for skills_dir in [
+            dir.join(".claude").join("skills"),
+            dir.join(".agents").join("skills"),
+        ] {
+            assert!(skills_dir.exists());
+            assert!(skills_dir
+                .join("loopdeck-orchestrator")
+                .join("SKILL.md")
+                .exists());
+            assert!(skills_dir
+                .join("loopdeck-rust-expert")
+                .join("SKILL.md")
+                .exists());
+            assert!(skills_dir
+                .join("loopdeck-vite-senior-engineer")
+                .join("SKILL.md")
+                .exists());
+            assert!(skills_dir
+                .join("loopdeck-tauri-expert")
+                .join("SKILL.md")
+                .exists());
+        }
 
         // Verify hooks were set up (Claude Code format: matcher groups -> hooks array)
         let settings_path = dir.join(".claude").join("settings.json");

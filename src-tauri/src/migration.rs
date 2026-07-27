@@ -642,6 +642,17 @@ pub fn apply(repo_path: &Path, now: DateTime<Utc>) -> Result<ExecutionState, App
         ));
     }
 
+    // Never replace a backup from an earlier migration. On Unix, rename(2)
+    // replaces an existing destination, so discovering this only after writing
+    // execution.yaml would both destroy the preserved snapshot and leave a
+    // partially migrated project.
+    if legacy_path.exists() {
+        return Err(AppError::ExecutionState(
+            ".loopdeck/loops.legacy.md already exists; move or reconcile it before migrating"
+                .to_string(),
+        ));
+    }
+
     // Recompute server-side and validate before touching disk.
     let content = limits::read_bounded_to_string(&loops_path, limits::SPEC_MAX_BYTES)?;
     let legacy = parse_loops_for_migration(&content);
@@ -1049,6 +1060,30 @@ mod tests {
         std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
         let err = apply(&dir, now()).unwrap_err();
         assert!(matches!(err, AppError::ExecutionState(_)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_refuses_to_overwrite_existing_legacy_backup() {
+        let dir = temp_repo("existing_backup", LEGACY_MD);
+        let loops_path = memory::loops_md_path(&dir);
+        let exec_path = execution::execution_path(&dir);
+        let legacy_path = dir.join(".loopdeck").join("loops.legacy.md");
+        let preserved = b"preserved earlier migration\n";
+        std::fs::write(&legacy_path, preserved).unwrap();
+
+        let err = apply(&dir, now()).unwrap_err();
+        assert!(matches!(err, AppError::ExecutionState(_)));
+        assert!(
+            !exec_path.exists(),
+            "refusal must happen before execution.yaml is written"
+        );
+        assert!(loops_path.exists(), "loops.md must remain untouched");
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            preserved,
+            "existing backup must remain byte-identical"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

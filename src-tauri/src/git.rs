@@ -3,6 +3,16 @@ use std::path::Path;
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
+/// Whether optional local commit evidence can be proved from the current
+/// repository without network access.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitReachability {
+    Missing,
+    Reachable,
+    Unreachable,
+}
+
 /// Build a `git` command pinned to the vetted, resolved binary and aimed at
 /// `repo_path` via `-C`. Returns `None` when the `git` binary can't be resolved
 /// (see `binary::git`) — callers treat that as "no git info", matching the
@@ -17,6 +27,69 @@ fn git_command(repo_path: &Path) -> Option<Command> {
     let mut cmd = Command::new(git);
     cmd.args(["-C"]).arg(repo_path);
     Some(cmd)
+}
+
+/// Classify recorded commit evidence. A commit is reachable only when it
+/// resolves to a commit object and is an ancestor of the current `HEAD`.
+pub fn commit_reachability(repo_path: &Path, commit: Option<&str>) -> CommitReachability {
+    let Some(commit) = commit.map(str::trim).filter(|value| !value.is_empty()) else {
+        return CommitReachability::Missing;
+    };
+    if !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return CommitReachability::Unreachable;
+    }
+
+    let Some(mut resolve) = git_command(repo_path) else {
+        return CommitReachability::Unreachable;
+    };
+    let revision = format!("{commit}^{{commit}}");
+    let Ok(resolved) = resolve
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(&revision)
+        .output()
+    else {
+        return CommitReachability::Unreachable;
+    };
+    if !resolved.status.success() {
+        return CommitReachability::Unreachable;
+    }
+
+    let canonical = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+    let Some(mut ancestor) = git_command(repo_path) else {
+        return CommitReachability::Unreachable;
+    };
+    match ancestor
+        .args(["merge-base", "--is-ancestor"])
+        .arg(&canonical)
+        .arg("HEAD")
+        .status()
+    {
+        Ok(status) if status.success() => CommitReachability::Reachable,
+        _ => CommitReachability::Unreachable,
+    }
+}
+
+/// Resolve user-supplied evidence to the canonical commit SHA, rejecting
+/// missing or unreachable objects before they enter execution state.
+pub fn verified_commit(repo_path: &Path, commit: &str) -> Result<String, String> {
+    if commit_reachability(repo_path, Some(commit)) != CommitReachability::Reachable {
+        return Err(format!(
+            "commit evidence \"{}\" is missing or not reachable from HEAD",
+            commit.trim()
+        ));
+    }
+    let mut resolve = git_command(repo_path)
+        .ok_or_else(|| "git is unavailable; commit evidence cannot be verified".to_string())?;
+    let revision = format!("{}^{{commit}}", commit.trim());
+    let output = resolve
+        .args(["rev-parse", "--verify"])
+        .arg(&revision)
+        .output()
+        .map_err(|e| format!("failed to verify commit evidence: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("commit evidence \"{}\" is invalid", commit.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Git and filesystem freshness info for a project directory.

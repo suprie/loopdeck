@@ -13,7 +13,9 @@ use super::state::{resolve_root, AppState};
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionState, GitEvidence, LoadedExecution, LoopOrigin};
+use crate::git;
 use crate::migration::{self, MigrationPreview};
+use crate::progress::{self, ProgressSnapshot};
 use chrono::Utc;
 use std::path::Path;
 use tauri::State;
@@ -69,7 +71,13 @@ pub async fn complete_current_loop(
     debug!("complete_current_loop called for path: {path}, commit: {commit:?}");
     let root = resolve_root(&state, &path)?;
     let loaded = execution::load(&root)?;
-    let git = commit.map(|sha| GitEvidence { commit: sha });
+    let git = commit
+        .map(|sha| {
+            git::verified_commit(&root, &sha)
+                .map(|commit| GitEvidence { commit })
+                .map_err(AppError::ExecutionState)
+        })
+        .transpose()?;
     let next = loaded
         .state
         .complete_current(Utc::now(), git, promote_next)?;
@@ -110,6 +118,29 @@ pub async fn promote_next_queued_loop(
     let next = loaded.state.promote_next_from_queue(Utc::now())?;
     execution::save(&root, &next, loaded.state.revision)?;
     Ok(next)
+}
+
+/// Derive loop, PRD, epic, and local delivery progress from stable IDs.
+#[tauri::command]
+pub async fn get_progress_snapshot(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ProgressSnapshot, AppError> {
+    debug!("get_progress_snapshot called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+    progress::snapshot(&root)
+}
+
+/// Write an explicit non-authoritative Markdown snapshot. The generated file
+/// is never read back as runtime state.
+#[tauri::command]
+pub async fn export_execution_summary(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    debug!("export_execution_summary called for path: {path}");
+    let root = resolve_root(&state, &path)?;
+    Ok(progress::export_markdown(&root)?.display().to_string())
 }
 
 /// Compute a read-only migration preview for a project still on legacy
