@@ -426,7 +426,10 @@ export interface LoopProgress {
   discrepancy?: string;
 }
 
-/** Completed/total counts for a PRD or epic. Mirrors Rust `ProgressCount`. */
+/**
+ * Completed/total counts for a PRD or epic. Structured records win per loop;
+ * authored completion fills loops without a structured record.
+ */
 export interface ProgressCount {
   completed: number;
   total: number;

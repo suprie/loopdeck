@@ -1,7 +1,8 @@
 //! Stable-ID-derived execution and delivery progress (milestone 0.2.1).
 //!
-//! This is a read model. Human-authored titles and checkboxes are presentation
-//! and discrepancy inputs only; identity and completion come from loop IDs.
+//! This is a read model. Loop IDs remain the identity join. Structured records
+//! are authoritative when present; checklist/history completion fills gaps for
+//! spec loops that have no execution record yet.
 
 use crate::epic::{self, Epic};
 use crate::error::AppError;
@@ -142,7 +143,10 @@ fn derive(
                     let execution = indexed
                         .map(|value| value.execution)
                         .unwrap_or(ExecutionStatus::Planned);
-                    if execution == ExecutionStatus::Completed {
+                    let completed = indexed
+                        .map(|_| execution == ExecutionStatus::Completed)
+                        .unwrap_or(item.checked || item.done_in_history);
+                    if completed {
                         prd_progress.completed += 1;
                     }
                     let commit = indexed.and_then(|value| value.commit.clone());
@@ -157,7 +161,7 @@ fn derive(
                     };
                     let delivery =
                         enrich_delivery(repo_path, commit.as_deref(), local_delivery, provider);
-                    let discrepancy = match (item.checked, execution) {
+                    let discrepancy = indexed.and_then(|_| match (item.checked, execution) {
                         (true, status) if status != ExecutionStatus::Completed => Some(
                             "Authored checkbox is checked, but structured execution has not completed"
                                 .to_string(),
@@ -167,7 +171,7 @@ fn derive(
                                 .to_string(),
                         ),
                         _ => None,
-                    };
+                    });
                     loops.insert(
                         id.to_string(),
                         LoopProgress {
@@ -396,6 +400,21 @@ mod tests {
         assert!(progress.discrepancy.is_some());
         assert_eq!(result.prds["epic/prd"].total, 1);
         assert_eq!(result.prds["epic/prd"].completed, 0);
+    }
+
+    #[test]
+    fn authored_completion_fills_missing_execution_record() {
+        let epics = vec![epic_with_loop("prd/legacy-complete", true)];
+        let result = derive(Path::new("."), &epics, &ExecutionState::default(), None);
+
+        assert_eq!(result.prds["epic/prd"].total, 1);
+        assert_eq!(result.prds["epic/prd"].completed, 1);
+        assert_eq!(result.epics["epic"].completed, 1);
+        assert_eq!(
+            result.loops["prd/legacy-complete"].execution,
+            ExecutionStatus::Planned
+        );
+        assert!(result.loops["prd/legacy-complete"].discrepancy.is_none());
     }
 
     #[test]

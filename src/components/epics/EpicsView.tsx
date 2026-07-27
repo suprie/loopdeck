@@ -20,8 +20,8 @@ import { Progress } from "../ui/progress";
 interface EnrichedEpic extends Epic {
   projectName: string;
   projectPath: string;
-  /** Derived from execution.yaml when the project has migrated; undefined
-   * (checkbox-derived fallback) for projects still in legacy/empty mode. */
+  /** Derived from execution.yaml plus authored fallback for loops without a
+   * structured record; undefined for projects still in legacy/empty mode. */
   derivedProgress?: ProgressCount;
 }
 
@@ -43,9 +43,9 @@ const EPIC_STATUS_BG: Record<string, string> = {
 
 /**
  * Total + done counts across all phases of all PRDs in an epic. Prefers the
- * execution.yaml-derived count (stable-ID based, not checkbox state) when the
- * project has migrated to structured state; falls back to the authored
- * checkbox/done_in_history count for legacy projects.
+ * backend-derived count when the project has structured state. The backend
+ * uses structured completion where a record exists and authored completion
+ * for checklist items that have not been migrated into execution state.
  */
 function epicProgress(epic: EnrichedEpic): { done: number; total: number } {
   if (epic.derivedProgress) {
