@@ -338,8 +338,19 @@ pub(crate) fn interrupt_slot(state: &AppState, path: &Path) -> Result<InterruptS
 /// finished at" timestamps globally; the frontend derives its own transient
 /// "done" affordance from streaming-result events if desired.
 pub(crate) fn derive_run_states(state: &AppState, projects: &mut [ProjectEntry]) {
-    // Snapshot the pending-slot keys without holding the locks across the
-    // (potentially async-blocking) inner session `try_lock`.
+    // Slots are created once per project and reused across turns (see
+    // `question_slot`/`permission_slot`/`plan_slot`), so their *keys* persist
+    // forever once a project has ever had a prompt. A path is actually
+    // pending only when its slot's inner `Option` is `Some` right now.
+    fn currently_pending<T>(
+        map: &std::collections::HashMap<PathBuf, Arc<Mutex<Option<T>>>>,
+    ) -> Vec<PathBuf> {
+        map.iter()
+            .filter(|(_, slot)| matches!(slot.lock(), Ok(guard) if guard.is_some()))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     let pending_paths: std::collections::HashSet<PathBuf> = {
         let perms = state
             .pending_permissions
@@ -354,11 +365,10 @@ pub(crate) fn derive_run_states(state: &AppState, projects: &mut [ProjectEntry])
             // If we can't observe pending state, leave everything as-is.
             return;
         };
-        perms
-            .keys()
-            .chain(answers.keys())
-            .chain(plans.keys())
-            .cloned()
+        currently_pending(&perms)
+            .into_iter()
+            .chain(currently_pending(&answers))
+            .chain(currently_pending(&plans))
             .collect()
     };
 
@@ -427,5 +437,61 @@ mod tests {
     #[test]
     fn busy_cached_session_is_preserved_until_next_send() {
         assert!(!should_replace_cached_session(None, AgentHarness::Codex,));
+    }
+
+    fn empty_state() -> AppState {
+        AppState {
+            config: Mutex::new(GlobalConfig::default()),
+            claude_sessions: Mutex::new(HashMap::new()),
+            pending_answers: Mutex::new(HashMap::new()),
+            pending_permissions: Mutex::new(HashMap::new()),
+            pending_plans: Mutex::new(HashMap::new()),
+            interrupt_slots: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Regression: `question_slot`/`permission_slot`/`plan_slot` create their
+    /// map entry once and reuse it across turns, so the slot's *key* survives
+    /// forever after a project's first-ever prompt. A resolved (now-`None`)
+    /// slot must NOT pin the project to `Waiting` on later calls.
+    #[test]
+    fn resolved_slot_does_not_pin_run_state_to_waiting() {
+        let state = empty_state();
+        let path = PathBuf::from("/tmp/resolved-slot-project");
+        state
+            .pending_permissions
+            .lock()
+            .unwrap()
+            .insert(path.clone(), Arc::new(Mutex::new(None)));
+
+        let mut projects = vec![ProjectEntry {
+            path: path.clone(),
+            ..Default::default()
+        }];
+        derive_run_states(&state, &mut projects);
+
+        assert_eq!(projects[0].run_state, RunState::Idle);
+    }
+
+    #[test]
+    fn still_pending_slot_reports_waiting() {
+        let state = empty_state();
+        let path = PathBuf::from("/tmp/pending-slot-project");
+        state.pending_answers.lock().unwrap().insert(
+            path.clone(),
+            Arc::new(Mutex::new(Some(crate::claude_session::PendingQuestion {
+                request_id: "req-1".into(),
+                questions: Vec::new(),
+                sender: None,
+            }))),
+        );
+
+        let mut projects = vec![ProjectEntry {
+            path: path.clone(),
+            ..Default::default()
+        }];
+        derive_run_states(&state, &mut projects);
+
+        assert_eq!(projects[0].run_state, RunState::Waiting);
     }
 }
