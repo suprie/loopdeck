@@ -369,6 +369,11 @@ export interface PinnedAnswer {
   answer: string;
 }
 
+/** serde `rename_all = "snake_case"`. Whether a queued phase's pre-flight
+ * interview has been resolved — `queue_run` refuses to start while any
+ * queued phase is still `pending`. */
+export type InterviewStatus = "pending" | "answered" | "skipped";
+
 /** Queue-time consent for the whole run. LoopDeck never asks again once the
  * run starts. */
 export interface RunConsent {
@@ -390,6 +395,7 @@ export interface RunPhase {
   execution_id: string;
   status: RunPhaseStatus;
   interview: PinnedAnswer[];
+  interview_status: InterviewStatus;
   /** Other phases in this plan (by `execution_id`) that must complete before
    * this one is eligible under `continue_independent`. */
   depends_on: string[];

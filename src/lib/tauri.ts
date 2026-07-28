@@ -245,6 +245,36 @@ export async function getRunStatus(path: string): Promise<RunPlan | null> {
 }
 
 /**
+ * Run one queued phase's pre-flight interview turn (prd-run-queue Phase 3):
+ * a bounded session whose `AskUserQuestion` calls render as the same
+ * question cards chat already shows. Awaits the whole turn, including any
+ * parked question, so it only resolves once the user has answered (or the
+ * agent decided nothing was ambiguous) — call this from an active UI
+ * session, not a background poll. Pins the answers into the phase's
+ * `interview` and marks `interview_status` "answered".
+ * Rust: run_phase_interview(path, execution_id) -> Result<RunPlan, AppError>
+ */
+export async function runPhaseInterview(
+  path: string,
+  executionId: string,
+): Promise<RunPlan> {
+  return invoke<RunPlan>("run_phase_interview", { path, executionId });
+}
+
+/**
+ * Explicitly skip a queued phase's pre-flight interview — no session is
+ * run; `interview_status` becomes "skipped", unblocking `queueRun` for a
+ * phase judged unambiguous.
+ * Rust: skip_phase_interview(path, execution_id) -> Result<RunPlan, AppError>
+ */
+export async function skipPhaseInterview(
+  path: string,
+  executionId: string,
+): Promise<RunPlan> {
+  return invoke<RunPlan>("skip_phase_interview", { path, executionId });
+}
+
+/**
  * Get all epics from docs/epics/, each with its PRDs and phase checklists.
  * Returns an empty list if docs/epics/ does not exist.
  * Rust: get_epics(path: String) -> Result<Vec<Epic>, AppError>

@@ -123,6 +123,75 @@ pub(crate) fn build_phase_prompt(
     prompt
 }
 
+/// Build the prompt for one queued phase's pre-flight interview turn
+/// (Phase 3) — a single bounded session, run while the user is present,
+/// whose entire job is to surface ambiguity in that one phase's acceptance
+/// criteria via `AskUserQuestion` before the phase runs unattended tonight.
+///
+/// Mirrors the orchestrator's Phase 1 "Ask Clarifying Questions" step, but
+/// scoped to one phase instead of a whole PRD, and closed off with a
+/// greppable summary block (mirroring `extract_verdict`'s marker convention)
+/// so [`extract_interview_answers`] can pin the answers without re-deriving
+/// them from raw tool-call history.
+pub(crate) fn build_interview_prompt(execution_id: &str, loc: &LoopLocation) -> String {
+    format!(
+        "You are preparing loop `{execution_id}` — \"{title}\" (epic `{epic}`, \
+         PRD `{prd}`, phase `{phase}`) to run **unattended, overnight** — no \
+         human will be present once the run starts. Read the phase's \
+         acceptance criteria in its PRD and identify anything genuinely \
+         ambiguous that would make you guess mid-run. Ask the user via \
+         `AskUserQuestion` now, while they're present, and wait for their \
+         answers. If nothing is ambiguous, ask no questions.\n\n\
+         Do not implement anything — this turn only clarifies. When you are \
+         done (whether or not you asked anything), end your final message \
+         with exactly this block, restating each question you asked and the \
+         user's answer verbatim, or `(none)` if you asked nothing:\n\n\
+         ## Pre-flight Answers\n\
+         - Q: <question text>\n\
+         \x20 A: <answer text>\n",
+        title = loc.title,
+        epic = loc.epic,
+        prd = loc.prd,
+        phase = loc.phase,
+    )
+}
+
+/// Parse the `## Pre-flight Answers` block [`build_interview_prompt`] asks
+/// for out of a completed interview turn's final response text.
+///
+/// Looks for the **last** `## Pre-flight Answers` occurrence (same
+/// last-one-wins rationale as `extract_verdict` — the turn's own reasoning
+/// may quote the format while explaining it) and reads `- Q: … / A: …` pairs
+/// from the lines that follow, stopping at the next heading or end of text.
+/// A malformed or missing block yields an empty list rather than an error —
+/// callers treat "no answers" identically to "nothing was ambiguous."
+pub(crate) fn extract_interview_answers(text: &str) -> Vec<PinnedAnswer> {
+    const MARKER: &str = "## Pre-flight Answers";
+    let Some(idx) = text.rfind(MARKER) else {
+        return Vec::new();
+    };
+    let body = &text[idx + MARKER.len()..];
+
+    let mut answers = Vec::new();
+    let mut pending_question: Option<String> = None;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("- Q:") {
+            pending_question = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("A:") {
+            if let Some(question) = pending_question.take() {
+                answers.push(PinnedAnswer {
+                    question,
+                    answer: rest.trim().to_string(),
+                });
+            }
+        } else if trimmed.starts_with('#') {
+            break;
+        }
+    }
+    answers
+}
+
 /// Startup reconciliation, mirroring `conversation::reconcile_interrupted`:
 /// a `Running` phase left on disk from a killed/crashed process is not
 /// actually running on a fresh process — nothing has resumed it yet — so
@@ -226,6 +295,65 @@ mod tests {
     }
 
     #[test]
+    fn build_interview_prompt_names_the_phase_and_the_marker() {
+        let loc = LoopLocation {
+            epic: "overnight-orchestration".into(),
+            prd: "prd-run-queue".into(),
+            phase: "Phase 3".into(),
+            title: "Pre-flight interview".into(),
+        };
+        let prompt = build_interview_prompt("prd-run-queue/phase-3", &loc);
+        assert!(prompt.contains("prd-run-queue/phase-3"));
+        assert!(prompt.contains("Pre-flight interview"));
+        assert!(prompt.contains("AskUserQuestion"));
+        assert!(prompt.contains("## Pre-flight Answers"));
+    }
+
+    #[test]
+    fn extract_interview_answers_parses_one_pair() {
+        let text = "I asked one question.\n\n## Pre-flight Answers\n\
+                     - Q: Which port should the server bind?\n  A: 8080\n";
+        let answers = extract_interview_answers(text);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].question, "Which port should the server bind?");
+        assert_eq!(answers[0].answer, "8080");
+    }
+
+    #[test]
+    fn extract_interview_answers_parses_multiple_pairs() {
+        let text = "## Pre-flight Answers\n\
+                     - Q: Q1?\n  A: A1\n\
+                     - Q: Q2?\n  A: A2\n";
+        let answers = extract_interview_answers(text);
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[1].question, "Q2?");
+        assert_eq!(answers[1].answer, "A2");
+    }
+
+    #[test]
+    fn extract_interview_answers_empty_when_none_asked() {
+        let text = "## Pre-flight Answers\n(none)\n";
+        assert!(extract_interview_answers(text).is_empty());
+    }
+
+    #[test]
+    fn extract_interview_answers_empty_when_marker_absent() {
+        assert!(extract_interview_answers("no marker here").is_empty());
+    }
+
+    #[test]
+    fn extract_interview_answers_uses_last_occurrence() {
+        // The turn's own reasoning may quote the format while explaining it —
+        // the real block is last, same convention as `extract_verdict`.
+        let text = "The format is `## Pre-flight Answers` then `- Q:` / `A:` \
+                     pairs.\n\n## Pre-flight Answers\n- Q: Real question?\n  A: Real answer\n";
+        let answers = extract_interview_answers(text);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].question, "Real question?");
+        assert_eq!(answers[0].answer, "Real answer");
+    }
+
+    #[test]
     fn reconcile_running_phases_downgrades_running_to_interrupted() {
         use crate::runplan::{RunPhase, RunPlan};
         use chrono::{TimeZone, Utc};
@@ -246,6 +374,7 @@ mod tests {
                     execution_id: "p/1".into(),
                     status: RunPhaseStatus::Running,
                     interview: vec![],
+                    interview_status: Default::default(),
                     depends_on: vec![],
                     park_payload: None,
                 },
@@ -253,6 +382,7 @@ mod tests {
                     execution_id: "p/2".into(),
                     status: RunPhaseStatus::Queued,
                     interview: vec![],
+                    interview_status: Default::default(),
                     depends_on: vec![],
                     park_payload: None,
                 },

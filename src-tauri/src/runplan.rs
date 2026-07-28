@@ -62,6 +62,19 @@ pub struct PinnedAnswer {
     pub answer: String,
 }
 
+/// Whether a queued phase's pre-flight interview has been resolved.
+/// `queue_run` refuses to start while any queued phase is still `Pending`
+/// (PRD Phase 3: "block run start until every queued phase's interview is
+/// answered or explicitly skipped").
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InterviewStatus {
+    #[default]
+    Pending,
+    Answered,
+    Skipped,
+}
+
 /// Queue-time consent for the whole run (ADR-1). LoopDeck never asks again
 /// once the run starts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -97,6 +110,10 @@ pub struct RunPhase {
     pub status: RunPhaseStatus,
     #[serde(default)]
     pub interview: Vec<PinnedAnswer>,
+    /// Set by `run_phase_interview`/`skip_phase_interview` (Phase 3). Starts
+    /// `Pending` for every newly queued phase.
+    #[serde(default)]
+    pub interview_status: InterviewStatus,
     /// Other phases in this plan (by `execution_id`) that must complete
     /// before this one is eligible under `continue_independent`. Defaults to
     /// the authored order — each phase depends on its predecessor — unless
@@ -192,6 +209,7 @@ mod tests {
                     question: "Which stall policy?".to_string(),
                     answer: "halt".to_string(),
                 }],
+                interview_status: InterviewStatus::Answered,
                 depends_on: vec![],
                 park_payload: None,
             }],
@@ -223,6 +241,7 @@ phases:
         let phase = &plan.phases[0];
         assert_eq!(phase.status, RunPhaseStatus::Queued);
         assert!(phase.interview.is_empty());
+        assert_eq!(phase.interview_status, InterviewStatus::Pending);
         assert!(phase.depends_on.is_empty());
         assert_eq!(phase.park_payload, None);
     }
