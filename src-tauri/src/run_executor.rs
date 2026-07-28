@@ -390,9 +390,9 @@ mod tests {
             title: "t".into(),
         };
         let prompt = build_phase_prompt("e/p-1", &loc, &[], true);
-        assert!(prompt.contains(
-            "pre-authorized at queue time to open a draft pull request unattended"
-        ));
+        assert!(
+            prompt.contains("pre-authorized at queue time to open a draft pull request unattended")
+        );
         assert!(prompt.contains("skip Phase 4's interactive confirmation"));
         assert!(prompt.contains("--draft"));
         assert!(prompt.contains("no `--web`"));
