@@ -21,6 +21,7 @@ mod persist;
 mod progress;
 mod project;
 pub mod retry;
+mod run_executor;
 mod runplan;
 mod scanner;
 mod secrets;
@@ -102,6 +103,26 @@ pub fn run() {
         }
     }
 
+    // Same restart-recovery reasoning as the transcript reconciliation above,
+    // for `prd-run-queue` Phase 2's run plans: a `Running` phase left on disk
+    // by a killed/crashed process is not actually running on this fresh
+    // process (`AppState.run_handles` starts empty) — downgrade it to
+    // `Interrupted` so it's requeueable instead of the plan silently claiming
+    // forward progress that never happened.
+    for project in &config.projects {
+        match run_executor::reconcile_running_phases(&project.path) {
+            Ok(true) => tracing::info!(
+                "reconciled interrupted run plan for {}",
+                project.path.display()
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "failed to reconcile run plan for {}: {e}",
+                project.path.display()
+            ),
+        }
+    }
+
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -112,6 +133,7 @@ pub fn run() {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
+            run_handles: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             // Composer + scan (composer.rs)
@@ -153,6 +175,10 @@ pub fn run() {
             // Migration from legacy loops.md → execution.yaml — 0.2.1 Phase 4
             commands::execution::get_migration_preview,
             commands::execution::apply_migration,
+            // Run queue — prd-run-queue Phase 2
+            commands::run_queue::queue_run,
+            commands::run_queue::cancel_run,
+            commands::run_queue::get_run_status,
             // Agent config + auth token + diagnostics (config_cmds.rs)
             commands::config_cmds::get_agent_config,
             commands::config_cmds::set_agent_config,

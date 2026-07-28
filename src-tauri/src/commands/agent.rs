@@ -3,8 +3,8 @@
 //! fresh-start pipeline, and the loop-prompt builder).
 
 use super::state::{
-    interrupt_slot, permission_slot, plan_slot, project_busy, question_slot, resolve_agent_config,
-    resolve_permission_policy, resolve_root, with_session, AppState,
+    fire_interrupt, interrupt_slot, permission_slot, plan_slot, project_busy, question_slot,
+    resolve_agent_config, resolve_permission_policy, resolve_root, with_session, AppState,
 };
 use crate::agents::{AgentResponse, ClaudeEvent};
 use crate::claude_session::{ParkSlots, QuestionAnswers};
@@ -644,25 +644,13 @@ pub async fn agent_interrupt(path: String, state: State<'_, AppState>) -> Result
     debug!("agent_interrupt called for path: {path}");
     let repo_path = PathBuf::from(&path);
 
-    // Pop + fire the sender. There's at most one per project (cleared at turn
-    // end), so this is a single take. `send` failing means the receiver was
-    // already dropped (turn ended between the UI click and here) — treat as a
-    // no-op success so the button feels responsive either way.
-    let fired = {
-        let guard = state
-            .interrupt_slots
-            .lock()
-            .map_err(|_| AppError::LockError)?;
-        guard
-            .get(&repo_path)
-            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
-            .map(|sender| sender.send(()).is_ok())
-    };
-
-    if !fired.unwrap_or(false) {
-        debug!("agent_interrupt: no in-flight turn for {path} (no-op)");
-    } else {
+    // `send` failing means the receiver was already dropped (turn ended
+    // between the UI click and here) — treat as a no-op success so the
+    // button feels responsive either way.
+    if fire_interrupt(&state, &repo_path)? {
         info!("agent_interrupt fired for: {path}");
+    } else {
+        debug!("agent_interrupt: no in-flight turn for {path} (no-op)");
     }
     Ok(())
 }
@@ -1465,7 +1453,13 @@ async fn spawn_fresh(
 /// Fresh-start send pipeline used by `agent_start_loop`. Mirrors
 /// `send_and_record` but spawns a brand-new session (no `--resume`) and rejects
 /// when busy instead of queueing. See `spawn_fresh` for the lifecycle.
-async fn start_fresh_and_record(
+///
+/// `pub(crate)` so the `prd-run-queue` executor (`commands::run_queue`) can
+/// drive one orchestrated turn per queued phase through the same
+/// retry/transcript/park-slot pipeline a human-initiated "Start Loop" uses —
+/// an unattended phase run and a manual one are the same primitive, run
+/// without a human clicking the button each time.
+pub(crate) async fn start_fresh_and_record(
     state: &AppState,
     path: &Path,
     prompt: &str,

@@ -14,11 +14,6 @@
 //! or `.bak` recovery here: a run plan has exactly one writer (the in-app
 //! executor), not the mix of CLI + UI callers `execution.yaml` supports.
 
-// Phase 1 (this module) ships the data layer only; the executor + IPC
-// commands (Phase 2) are the first production callers. Remove this allow
-// once they land — mirrors `execution.rs`'s identical Phase 2→3 gap.
-#![allow(dead_code)]
-
 use crate::error::AppError;
 use crate::limits;
 use crate::persist;
@@ -108,10 +103,12 @@ pub struct RunPhase {
     /// the picker UI (Phase 5) edits edges explicitly.
     #[serde(default)]
     pub depends_on: Vec<String>,
-    /// Set when `status == Parked`: the reason shown in the morning report.
-    /// Phase 4 (stall-policy runtime) replaces this with the actual
-    /// question / permission-card payload; this placeholder only needs to
-    /// round-trip today.
+    /// The reason shown in the morning report when a phase doesn't complete.
+    /// Set when `status == Parked` (Phase 4 fills this with the actual
+    /// question/permission-card payload) **or** `status == Failed` (Phase 2's
+    /// executor sets it to the non-green verdict or turn error — Phase 2 has
+    /// no interactive-stall handling yet, so a phase that doesn't advance is
+    /// always a hard failure, never a park).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park_payload: Option<String>,
 }
