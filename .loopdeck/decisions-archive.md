@@ -757,3 +757,9 @@
 - **Status**: accepted
 - **Context**: Reviewing merged PR #11 found three edge cases in the Phase 4 migration surface: POSIX `rename` may replace an existing `loops.legacy.md`; the UI offered migration only when legacy current/history records existed, excluding empty and next-step-only files; and queued structured records were labeled completed.
 - **Consequences**: Fresh migration now refuses before writing `execution.yaml` when `loops.legacy.md` already exists, preserving the earlier snapshot byte-for-byte; a regression test pins the no-write behavior. The Loops panel now offers migration whenever `loops.md` exists, reconciliation details include unconverted next steps, and queued records render as queued. Phase 4's PRD checklist is closed after post-merge verification.
+
+## 2026-07-26 — Install and discover skills per agent harness
+
+- **Status**: accepted
+- **Context**: LoopDeck installed and listed every project skill exclusively from `.claude/skills`. Codex repository discovery uses `.agents/skills`, so Codex sessions could neither fetch the bundled LoopDeck skills nor surface Codex-only project skills in the composer.
+- **Consequences**: Managed skill installation now targets both `.claude/skills` and `.agents/skills`, with an independent `.loopdeck-manifest.json` in each root so Refresh Skills backfills a missing Codex installation even when Claude is already current. Composer discovery snapshots the configured harness and reads only its native root. This duplicates the small bundled `SKILL.md` files intentionally; symlinks were rejected because LoopDeck is cross-platform and each root needs independent refresh state.

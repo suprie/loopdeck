@@ -1007,7 +1007,10 @@ fn build_next_loop_prompt(path: &Path) -> String {
 
 /// Scan `.loopdeck/loops.md` for the first unchecked `- [ ]` step under
 /// `## Next Steps`. Returns `None` if the file is missing, the section is
-/// absent, or every step is already checked.
+/// absent, or every remaining step is a `Review & merge:` bookkeeping
+/// reminder (the `loopdeck-open-pr` skill appends those after opening a PR —
+/// they're not implementable work, so "start next loop" must skip past them
+/// rather than asking an agent to "implement" a merge link).
 fn next_unchecked_loop_step(path: &Path) -> Option<String> {
     let content = limits::read_bounded_to_string(
         path.join(".loopdeck").join("loops.md"),
@@ -1026,7 +1029,11 @@ fn next_unchecked_loop_step(path: &Path) -> Option<String> {
         }
         if in_next_steps {
             if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-                return Some(rest.trim().to_string());
+                let rest = rest.trim();
+                if rest.to_ascii_lowercase().starts_with("review & merge:") {
+                    continue;
+                }
+                return Some(rest.to_string());
             }
         }
     }
@@ -1628,6 +1635,41 @@ mod tests {
         std::fs::write(
             dir.join(".loopdeck").join("loops.md"),
             "# Loops\n\n## Next Steps\n- [x] one\n- [x] two\n",
+        )
+        .unwrap();
+
+        assert!(next_unchecked_loop_step(&dir).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn next_unchecked_step_skips_review_and_merge_reminders() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
+        std::fs::write(
+            dir.join(".loopdeck").join("loops.md"),
+            "# Loops\n\n## Next Steps\n\
+             - [ ] Review & merge: https://github.com/foo/bar/pull/1\n\
+             - [ ] Actually implement the thing\n\n## History\n",
+        )
+        .unwrap();
+
+        let step = next_unchecked_loop_step(&dir);
+        assert_eq!(step.as_deref(), Some("Actually implement the thing"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn next_unchecked_step_none_when_only_review_reminders_left() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".loopdeck")).unwrap();
+        std::fs::write(
+            dir.join(".loopdeck").join("loops.md"),
+            "# Loops\n\n## Next Steps\n\
+             - [ ] Review & merge: https://github.com/foo/bar/pull/1\n\
+             - [ ] Review & merge: https://github.com/foo/bar/pull/2\n",
         )
         .unwrap();
 

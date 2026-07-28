@@ -3,12 +3,6 @@
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
 
-## 2026-07-26 — Install and discover skills per agent harness
-
-- **Status**: accepted
-- **Context**: LoopDeck installed and listed every project skill exclusively from `.claude/skills`. Codex repository discovery uses `.agents/skills`, so Codex sessions could neither fetch the bundled LoopDeck skills nor surface Codex-only project skills in the composer.
-- **Consequences**: Managed skill installation now targets both `.claude/skills` and `.agents/skills`, with an independent `.loopdeck-manifest.json` in each root so Refresh Skills backfills a missing Codex installation even when Claude is already current. Composer discovery snapshots the configured harness and reads only its native root. This duplicates the small bundled `SKILL.md` files intentionally; symlinks were rejected because LoopDeck is cross-platform and each root needs independent refresh state.
-
 ## 2026-07-27 — Bound graceful Codex interruption and replace wedged children
 
 - **Status**: accepted
@@ -91,3 +85,9 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: The PRD's Design section says the pre-flight interview reuses "the existing question-card IPC surface" — a bounded session whose `AskUserQuestion` calls render as the same cards chat already shows. `start_fresh_and_record` already parks and resumes on those cards internally (via `ParkSlots`/`QuestionSlot`), but it returns only the turn's final `AgentResponse`, not the raw `QuestionAnswers` map exchanged mid-turn — plumbing that map out would mean touching `claude_session.rs`'s park/resume internals for a one-off consumer.
 - **Consequences**: `run_executor::build_interview_prompt` instructs the agent to close its final message with a `## Pre-flight Answers` block restating each Q/A pair verbatim; `extract_interview_answers` parses that block with the same last-occurrence-wins rule `extract_verdict` already established for verify verdicts (a turn's own reasoning may quote the format while explaining it — the real block is last). This reuses an already-proven pattern instead of adding a second way to extract structured data from a turn. Trade-off: the parsed answers are only as faithful as the agent's own restatement, not a verbatim capture of the underlying `QuestionAnswers` — acceptable here since the same trust boundary already applies to every other agent-authored artifact this codebase reads back (verify verdicts, commit messages, PR bodies).
 - **Detail**: New `RunPhase.interview_status: InterviewStatus` (`Pending`/`Answered`/`Skipped`) is the actual gate `queue_run` checks — `interview: Vec<PinnedAnswer>` alone couldn't distinguish "not yet interviewed" from "interviewed, nothing was ambiguous" (both are an empty list). `skip_phase_interview` sets `Skipped` without running a session. See `.loopdeck/loops.md` `## Current` for the full file/symbol breakdown.
+
+## 2026-07-28 — "Start next loop" skips `Review & merge:` reminders instead of "implementing" them
+
+- **Status**: accepted
+- **Context**: `loopdeck-open-pr`'s Phase 7 appends `- [ ] Review & merge: <url>` to `.loopdeck/loops.md`'s `## Next Steps` as a human bookkeeping reminder. `next_unchecked_loop_step` (`commands/agent.rs`) treated every `- [ ]` line in that section as equally actionable, so after a user merged a PR and pulled, "Start next loop" picked the still-unchecked merge reminder and told the agent to "implement" it — the agent's only compliant move was to check the box, which read to the user as the app silently marking a real task done instead of starting new work.
+- **Consequences**: `next_unchecked_loop_step` now skips any `- [ ] Review & merge:` line (case-insensitive prefix match) and keeps scanning for the next real step; if only reminders remain it falls through to the existing "propose the next loop" prompt instead of fabricating work. Fix is scoped to the one function with the false positive — did not touch `loopdeck-open-pr`'s insertion behavior, since the reminder itself is still useful for a human. Flagged as a background task: the distinction is still a hardcoded string match rather than part of the `loops.md` format itself, so a future skill adding a different non-actionable reminder type would reproduce the same bug class.
