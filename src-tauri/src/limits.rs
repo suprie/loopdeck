@@ -87,6 +87,12 @@ pub const README_MAX_BYTES: u64 = 64 * 1024;
 /// ever grows material.
 pub const EXECUTION_MAX_BYTES: u64 = 1024 * 1024;
 
+/// Max bytes of `.loopdeck/run-plan.yaml` read wholesale.
+///
+/// A queued run plus its pinned interview answers and park payloads; 1 MiB
+/// matches `EXECUTION_MAX_BYTES` and is far beyond any real overnight run.
+pub const RUN_PLAN_MAX_BYTES: u64 = 1024 * 1024;
+
 /// Max bytes of a spec / PRD / epic Markdown file read wholesale.
 ///
 /// These live under `docs/epics/` (human-authored) and `.loopdeck/` (agent-

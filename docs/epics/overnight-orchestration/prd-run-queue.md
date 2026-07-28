@@ -2,7 +2,7 @@
 prd: prd-run-queue
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: proposed
+status: accepted
 description: >
   A persisted RunPlan model and a sequential queue executor: the user selects
   phases in the Epics view, answers a pre-flight interview while present, and
@@ -91,10 +91,10 @@ Directional; refine during implementation.
 
 ### Phase 1 — Run plan data model
 
-- [ ] Define `RunPlan`/`RunPhase`/`StallPolicy`/`RunBudgets` structs in a new `src-tauri/src/runplan.rs` with serde defaults and atomic persistence to `.loopdeck/run-plan.yaml`
-- [ ] Reference queued phases by stable execution IDs from `execution.rs` (no free-text phase names)
-- [ ] Record queue-time consent (draft-PR authorization, budget values, stall policy) as explicit plan fields
-- [ ] Unit tests: serde round-trip, missing-field defaults, malformed-file error surface
+- [x] Define `RunPlan`/`RunPhase`/`StallPolicy`/`RunBudgets` structs in a new `src-tauri/src/runplan.rs` with serde defaults and atomic persistence to `.loopdeck/run-plan.yaml` (2026-07-28) — `runplan.rs:37,85,99,121`; `save_to_path` writes via `persist::atomic_write`
+- [x] Reference queued phases by stable execution IDs from `execution.rs` (no free-text phase names) (2026-07-28) — `RunPhase.execution_id: String` (`runplan.rs:100`), doc comment cross-references `epic::PrdLoop::id`
+- [x] Record queue-time consent (draft-PR authorization, budget values, stall policy) as explicit plan fields (2026-07-28) — `RunPlan.consent`/`.budgets`/`.stall_policy` (`runplan.rs:126,128,130`)
+- [x] Unit tests: serde round-trip, missing-field defaults, malformed-file error surface (2026-07-28) — `runplan.rs:205,213,234` (+ save/load-through-disk round trip), all passing
 
 ### Phase 2 — Queue executor
 

@@ -27,6 +27,9 @@ pub enum AppError {
     #[error("Execution state error: {0}")]
     ExecutionState(String),
 
+    #[error("Run plan error: {0}")]
+    RunPlan(String),
+
     #[error("Lock poisoned")]
     LockError,
 
@@ -65,6 +68,7 @@ impl Serialize for AppError {
                 AppError::Scan(_) => "scan",
                 AppError::Config(_) => "config",
                 AppError::ExecutionState(_) => "executionState",
+                AppError::RunPlan(_) => "runPlan",
                 AppError::LockError => "lockError",
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
                 AppError::Conflict(_) => "conflict",
