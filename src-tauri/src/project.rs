@@ -520,9 +520,10 @@ mod tests {
         let stop_hooks = stop_groups[0]["hooks"].as_array().unwrap();
         assert_eq!(stop_hooks.len(), 2);
 
-        // PreToolUse: 1 matcher group with matcher "Skill", 1 command hook inside
+        // PreToolUse: 2 matcher groups — "Skill" (1 hook) and the dirty-flag
+        // matcher (1 hook)
         let ptuse_groups = root["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(ptuse_groups.len(), 1);
+        assert_eq!(ptuse_groups.len(), 2);
         assert_eq!(ptuse_groups[0]["matcher"].as_str().unwrap(), "Skill");
         let ptuse_hooks = ptuse_groups[0]["hooks"].as_array().unwrap();
         assert_eq!(ptuse_hooks.len(), 1);
@@ -530,12 +531,38 @@ mod tests {
             ptuse_hooks[0]["command"].as_str().unwrap(),
             "python3 .loopdeck/hooks/orchestrator-start.py"
         );
+        assert_eq!(
+            ptuse_groups[1]["matcher"].as_str().unwrap(),
+            "Edit|Write|MultiEdit|NotebookEdit"
+        );
+        assert_eq!(
+            ptuse_groups[1]["hooks"].as_array().unwrap()[0]["command"]
+                .as_str()
+                .unwrap(),
+            "python3 .loopdeck/hooks/loopdeck-dirty-flag.py"
+        );
+
+        // PostToolUse: 1 matcher group, 1 command hook inside
+        let ptu_groups = root["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu_groups.len(), 1);
+        assert_eq!(
+            ptu_groups[0]["matcher"].as_str().unwrap(),
+            "Edit|Write|MultiEdit"
+        );
+        assert_eq!(
+            ptu_groups[0]["hooks"].as_array().unwrap()[0]["command"]
+                .as_str()
+                .unwrap(),
+            "python3 .loopdeck/hooks/loopdeck-decisions-cap.py"
+        );
 
         // Verify hook scripts were copied to .loopdeck/hooks/
         let hooks_dir = dir.join(".loopdeck").join("hooks");
         assert!(hooks_dir.join("loopdeck-stop-hook.py").exists());
         assert!(hooks_dir.join("loopdeck-memory-write.sh").exists());
         assert!(hooks_dir.join("orchestrator-start.py").exists());
+        assert!(hooks_dir.join("loopdeck-dirty-flag.py").exists());
+        assert!(hooks_dir.join("loopdeck-decisions-cap.py").exists());
 
         fs::remove_dir_all(&dir).unwrap();
     }
