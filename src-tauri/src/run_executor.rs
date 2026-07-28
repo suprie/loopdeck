@@ -85,6 +85,7 @@ pub(crate) fn build_phase_prompt(
     execution_id: &str,
     loc: &LoopLocation,
     interview: &[PinnedAnswer],
+    draft_pr_authorized: bool,
 ) -> String {
     let mut prompt = format!(
         "You are working on this LoopDeck project as part of an unattended \
@@ -116,10 +117,26 @@ pub(crate) fn build_phase_prompt(
         "\n\nWhen done, update `.loopdeck/loops.md` (mark the step `[x]`, refresh \
          `## Current`) and append any architectural decisions to \
          `.loopdeck/decisions.md` per the memory convention. Run the full \
-         verify→ship flow (Phases 6-7) — no human is present to gate a PR \
-         open, so stop after Phase 6's `**Verdict:**` line unless the plan's \
-         consent explicitly authorizes a draft PR.",
+         verify→ship flow (Phases 6-7)",
     );
+    if draft_pr_authorized {
+        prompt.push_str(
+            " — this run was pre-authorized at queue time to open a draft pull \
+             request unattended (RunConsent.draft_pr_authorized = true). When you \
+             reach the `loopdeck-open-pr` skill, this prompt is your explicit \
+             pre-authorization for its unattended path: skip Phase 4's interactive \
+             confirmation and run Phase 6 as `gh pr create --draft` (no `--web`). \
+             The PR must be opened as a draft only — never mark it ready for \
+             review or merge it. If Phase 6's `**Verdict:**` is not PASS, stop \
+             before invoking `loopdeck-open-pr` at all.",
+        );
+    } else {
+        prompt.push_str(
+            " — no human is present to gate a PR open, so stop after Phase 6's \
+             `**Verdict:**` line unless the plan's consent explicitly authorizes a \
+             draft PR.",
+        );
+    }
 
     prompt
 }
@@ -331,7 +348,7 @@ mod tests {
             question: "Which stall policy?".into(),
             answer: "halt".into(),
         }];
-        let prompt = build_phase_prompt("prd-run-queue/phase-2", &loc, &interview);
+        let prompt = build_phase_prompt("prd-run-queue/phase-2", &loc, &interview, false);
         assert!(prompt.contains("prd-run-queue/phase-2"));
         assert!(prompt.contains("Queue executor"));
         assert!(prompt.contains("Which stall policy?"));
@@ -346,8 +363,41 @@ mod tests {
             phase: "ph".into(),
             title: "t".into(),
         };
-        let prompt = build_phase_prompt("e/p-1", &loc, &[]);
+        let prompt = build_phase_prompt("e/p-1", &loc, &[], false);
         assert!(!prompt.contains("already answered"));
+    }
+
+    #[test]
+    fn build_phase_prompt_default_stops_after_verdict_without_draft_pr_language() {
+        let loc = LoopLocation {
+            epic: "e".into(),
+            prd: "p".into(),
+            phase: "ph".into(),
+            title: "t".into(),
+        };
+        let prompt = build_phase_prompt("e/p-1", &loc, &[], false);
+        assert!(prompt.contains("stop after Phase 6's `**Verdict:**` line"));
+        assert!(!prompt.contains("--draft"));
+        assert!(!prompt.contains("pre-authorized"));
+    }
+
+    #[test]
+    fn build_phase_prompt_authorized_grants_draft_pr_skip() {
+        let loc = LoopLocation {
+            epic: "e".into(),
+            prd: "p".into(),
+            phase: "ph".into(),
+            title: "t".into(),
+        };
+        let prompt = build_phase_prompt("e/p-1", &loc, &[], true);
+        assert!(
+            prompt.contains("pre-authorized at queue time to open a draft pull request unattended")
+        );
+        assert!(prompt.contains("skip Phase 4's interactive confirmation"));
+        assert!(prompt.contains("--draft"));
+        assert!(prompt.contains("no `--web`"));
+        assert!(prompt.contains("never mark it ready for review or merge it"));
+        assert!(!prompt.contains("stop after Phase 6's `**Verdict:**` line unless"));
     }
 
     #[test]
