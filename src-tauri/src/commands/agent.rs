@@ -99,7 +99,7 @@ pub async fn agent_start_loop_streaming(
     let root = resolve_root(&state, &path)?;
 
     let prompt = build_next_loop_prompt(&root);
-    start_fresh_and_record_streaming(&state, &root, &prompt, &on_event).await?;
+    let _ = start_fresh_and_record_streaming(&state, &root, &prompt, &on_event).await?;
     info!("agent_start_loop_streaming complete for: {path}");
     Ok(())
 }
@@ -1540,12 +1540,17 @@ pub(crate) async fn start_fresh_and_record(
 
 /// Streaming variant of `start_fresh_and_record`, used by
 /// `agent_start_loop_streaming`. Same fresh-start + reject-when-busy semantics.
-async fn start_fresh_and_record_streaming(
+/// `pub(crate)` (rather than private) because `commands::run_queue`'s
+/// executor reuses this pipeline too (Phase 4) — a streaming send is what
+/// lets a mid-run `AskUserQuestion`/permission/plan card actually park
+/// instead of being auto-denied like the non-streaming `send_message` path
+/// does when it has no channel to surface a card on.
+pub(crate) async fn start_fresh_and_record_streaming(
     state: &AppState,
     path: &Path,
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
-) -> Result<(), AppError> {
+) -> Result<AgentResponse, AppError> {
     let session_arc = spawn_fresh(state, path).await?;
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
@@ -1602,7 +1607,7 @@ async fn start_fresh_and_record_streaming(
         tracing::warn!("failed to append assistant turn to transcript: {e}");
     }
 
-    Ok(())
+    Ok(response)
 }
 
 #[cfg(test)]

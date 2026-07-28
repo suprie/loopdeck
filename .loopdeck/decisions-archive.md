@@ -763,3 +763,9 @@
 - **Status**: accepted
 - **Context**: LoopDeck installed and listed every project skill exclusively from `.claude/skills`. Codex repository discovery uses `.agents/skills`, so Codex sessions could neither fetch the bundled LoopDeck skills nor surface Codex-only project skills in the composer.
 - **Consequences**: Managed skill installation now targets both `.claude/skills` and `.agents/skills`, with an independent `.loopdeck-manifest.json` in each root so Refresh Skills backfills a missing Codex installation even when Claude is already current. Composer discovery snapshots the configured harness and reads only its native root. This duplicates the small bundled `SKILL.md` files intentionally; symlinks were rejected because LoopDeck is cross-platform and each root needs independent refresh state.
+
+## 2026-07-27 — Bound graceful Codex interruption and replace wedged children
+
+- **Status**: accepted
+- **Context**: Removing the false active-turn stdout timeout correctly allowed long silent tools, but exposed a distinct failure mode: a genuinely wedged app-server could ignore `turn/interrupt`. LoopDeck then waited indefinitely for `turn/completed`, leaving the per-project mutex and UI stuck on “Agent is working” even after Stop was pressed.
+- **Consequences**: Once Stop is requested, Codex gets a 15-second grace period to complete the interrupted turn. If the deadline expires, LoopDeck closes stdin, terminates the child, returns a specific harness error, and clears the normal turn/interaction state through the existing error path. The dead session reports itself unusable; `with_session` replaces an idle unusable Codex cache entry on the next send while still preserving any currently locked in-flight session. Active turns remain unbounded before Stop, so legitimate long-running silent tools are not reclassified as stuck.

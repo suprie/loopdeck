@@ -10,7 +10,8 @@
 
 use crate::epic::LoopLocation;
 use crate::error::AppError;
-use crate::runplan::{self, PinnedAnswer, RunPhaseStatus};
+use crate::runplan::{self, PinnedAnswer, RunPhaseStatus, RunPlan, StallPolicy};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -190,6 +191,61 @@ pub(crate) fn extract_interview_answers(text: &str) -> Vec<PinnedAnswer> {
         }
     }
     answers
+}
+
+/// Compute which of `plan`'s still-`Queued` phases become blocked once
+/// `parked_id` parks, per `policy` (`prd-run-queue.md` Phase 4).
+///
+/// `StallPolicy::Halt`: every remaining `Queued` phase is blocked — a park
+/// stops the whole run, preserving strict sequence.
+///
+/// `StallPolicy::ContinueIndependent`: a `Queued` phase is blocked only if
+/// its `depends_on` chain reaches `parked_id`, directly or transitively
+/// through another phase this same call also blocks. A phase with no such
+/// path stays `Queued` — the executor is free to run it next. Computed as a
+/// fixed point over `plan.phases` so edge order doesn't matter.
+///
+/// Pure and side-effect-free: returns the blocked execution IDs; the caller
+/// applies the `Parked` status/payload writes and persists the plan.
+pub(crate) fn phases_blocked_by_park(
+    plan: &RunPlan,
+    parked_id: &str,
+    policy: StallPolicy,
+) -> Vec<String> {
+    match policy {
+        StallPolicy::Halt => plan
+            .phases
+            .iter()
+            .filter(|p| p.status == RunPhaseStatus::Queued)
+            .map(|p| p.execution_id.clone())
+            .collect(),
+        StallPolicy::ContinueIndependent => {
+            let mut blocked: HashSet<String> = std::iter::once(parked_id.to_string()).collect();
+            loop {
+                let mut changed = false;
+                for phase in &plan.phases {
+                    if phase.status != RunPhaseStatus::Queued
+                        || blocked.contains(&phase.execution_id)
+                    {
+                        continue;
+                    }
+                    if phase.depends_on.iter().any(|d| blocked.contains(d)) {
+                        blocked.insert(phase.execution_id.clone());
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            blocked.remove(parked_id);
+            plan.phases
+                .iter()
+                .filter(|p| p.status == RunPhaseStatus::Queued && blocked.contains(&p.execution_id))
+                .map(|p| p.execution_id.clone())
+                .collect()
+        }
+    }
 }
 
 /// Startup reconciliation, mirroring `conversation::reconcile_interrupted`:
@@ -409,5 +465,75 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!reconcile_running_phases(&dir).unwrap());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── phases_blocked_by_park ──────────────────────────────────────────
+
+    fn queued(id: &str, depends_on: &[&str]) -> runplan::RunPhase {
+        runplan::RunPhase {
+            execution_id: id.to_string(),
+            status: RunPhaseStatus::Queued,
+            interview: vec![],
+            interview_status: Default::default(),
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            park_payload: None,
+        }
+    }
+
+    fn plan_with(phases: Vec<runplan::RunPhase>) -> RunPlan {
+        use chrono::{TimeZone, Utc};
+        use std::path::PathBuf;
+        RunPlan {
+            id: "run-1".to_string(),
+            project: PathBuf::from("/repo"),
+            created: Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap(),
+            consent: Default::default(),
+            budgets: Default::default(),
+            stall_policy: StallPolicy::ContinueIndependent,
+            phases,
+        }
+    }
+
+    #[test]
+    fn continue_independent_parks_only_the_dependent_chain() {
+        // p1 (parking) <- p2 depends on p1 <- p3 depends on p2. p4 is
+        // unrelated and must stay eligible to run.
+        let plan = plan_with(vec![
+            queued("p1", &[]),
+            queued("p2", &["p1"]),
+            queued("p3", &["p2"]),
+            queued("p4", &[]),
+        ]);
+        let mut blocked = phases_blocked_by_park(&plan, "p1", StallPolicy::ContinueIndependent);
+        blocked.sort();
+        assert_eq!(blocked, vec!["p2".to_string(), "p3".to_string()]);
+    }
+
+    #[test]
+    fn continue_independent_leaves_unrelated_phases_queued() {
+        let plan = plan_with(vec![queued("p1", &[]), queued("p2", &[])]);
+        let blocked = phases_blocked_by_park(&plan, "p1", StallPolicy::ContinueIndependent);
+        assert!(blocked.is_empty());
+    }
+
+    #[test]
+    fn continue_independent_ignores_non_queued_phases() {
+        let mut plan = plan_with(vec![queued("p1", &[]), queued("p2", &["p1"])]);
+        plan.phases[1].status = RunPhaseStatus::Completed;
+        let blocked = phases_blocked_by_park(&plan, "p1", StallPolicy::ContinueIndependent);
+        assert!(blocked.is_empty());
+    }
+
+    #[test]
+    fn halt_blocks_every_remaining_queued_phase() {
+        let mut plan = plan_with(vec![
+            queued("p1", &[]),
+            queued("p2", &[]),
+            queued("p3", &[]),
+        ]);
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        let mut blocked = phases_blocked_by_park(&plan, "p4-not-in-plan", StallPolicy::Halt);
+        blocked.sort();
+        assert_eq!(blocked, vec!["p2".to_string(), "p3".to_string()]);
     }
 }
