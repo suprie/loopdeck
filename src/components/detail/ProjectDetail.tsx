@@ -256,7 +256,9 @@ function StuckQuestionCallout({ projectPath }: { projectPath: string }) {
 
   return (
     <div className="border-b border-amber-500/30 bg-amber-500/5 px-6 py-3">
-      <AskUserQuestionCard questions={pending.questions} onSubmit={onSubmit} />
+      <div className="max-h-[45vh] overflow-y-auto">
+        <AskUserQuestionCard questions={pending.questions} onSubmit={onSubmit} />
+      </div>
     </div>
   );
 }

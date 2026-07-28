@@ -92,3 +92,9 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: Detecting a mid-run `AskUserQuestion`/permission/plan stall requires the executor's phase turns to run through the streaming pipeline (the non-streaming path auto-denies these cards instead of parking), and `claude_session.rs`'s park site can't be cancelled early — it isn't selected against any interrupt once entered, only against its own 30-minute `TURN_DEADLINE` backstop.
 - **Consequences**: `execute_run` now sends each phase via `start_fresh_and_record_streaming` with a no-op sink channel and catches the new `AppError::TurnParked` (fired at `TURN_DEADLINE`) to mark the phase `Parked` instead of `Failed`; a pure `run_executor::phases_blocked_by_park` then applies the plan's `StallPolicy` to the remaining `Queued` phases. A stall is unavoidably a ~30-minute-worst-case cost per phase in this codebase's current single-session-per-project architecture — shortening it needs a session-model change out of this PRD's sequencing/state scope.
 - **Detail**: `.loopdeck/loops.md` `## Current` (2026-07-28 `prd-run-queue` Phase 4 entry) has the full file/symbol breakdown.
+
+## 2026-07-29 — Fix unscrollable AskUserQuestionCard in ProjectDetail's stuck-prompt callout
+- **Status**: accepted
+- **Context**: `Chat.tsx` already wraps `AskUserQuestionCard` in `max-h-[45vh] overflow-y-auto` so a question with many options/questions stays reachable. `ProjectDetail.tsx`'s `StuckQuestionCallout` (the tab-agnostic banner) mounted the same card with no scroll constraint, so 5+ questions overflowed the callout with no way to reach the Submit button.
+- **Consequences**: Wrapped the card in the same `max-h-[45vh] overflow-y-auto` div as `Chat.tsx`, matching the existing pattern instead of inventing a new one.
+
