@@ -96,11 +96,23 @@ pub async fn queue_run(
     Ok(())
 }
 
-/// Cancel the in-progress run for a project. Fires the run's cancel flag
-/// (checked between phases) and, since the executor may be mid-turn, also
-/// interrupts the live session the same way a user-initiated Stop would —
-/// cancel takes effect immediately rather than waiting for the current
-/// phase's turn to finish on its own. No-op error if no run is active.
+/// Cancel the in-progress run for a project. Fires the run's cancel flag,
+/// checked between phases — the earliest point the executor's loop can react.
+///
+/// Also fires the project's `interrupt_slots` sender via `fire_interrupt`, the
+/// same one `agent_interrupt` uses for a user-initiated Stop — but today this
+/// has **no effect on the current phase's turn**: the executor drives turns
+/// through `start_fresh_and_record`, which calls the non-streaming
+/// `ClaudeSession::send_message`, and `send_message` takes an `InterruptSlot`
+/// parameter only to discard it (`_interrupt_slot`, see its doc comment in
+/// `claude_session.rs`) — only the streaming pipeline honors it. So in
+/// practice `cancel_run` takes effect **between** phases, not mid-turn, same
+/// as the flag alone. The `fire_interrupt` call is harmless (a lone sender
+/// with no live receiver on this path) and becomes load-bearing the day the
+/// executor moves to the streaming pipeline (Phase 4, alongside real
+/// mid-turn stall detection) — kept rather than removed, but documented
+/// honestly here instead of implying it already works. No-op error if no run
+/// is active.
 #[tauri::command]
 pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
