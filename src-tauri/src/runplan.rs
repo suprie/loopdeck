@@ -14,11 +14,6 @@
 //! or `.bak` recovery here: a run plan has exactly one writer (the in-app
 //! executor), not the mix of CLI + UI callers `execution.yaml` supports.
 
-// Phase 1 (this module) ships the data layer only; the executor + IPC
-// commands (Phase 2) are the first production callers. Remove this allow
-// once they land — mirrors `execution.rs`'s identical Phase 2→3 gap.
-#![allow(dead_code)]
-
 use crate::error::AppError;
 use crate::limits;
 use crate::persist;

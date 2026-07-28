@@ -17,6 +17,7 @@ pub mod config_cmds;
 pub mod epics;
 pub mod execution;
 pub mod project;
+pub mod run_queue;
 pub mod state;
 
 // `AppState` is the one type consumed at the call site in `lib.rs`

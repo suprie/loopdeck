@@ -13,6 +13,7 @@ import type {
   LoadedExecution,
   MigrationPreview,
   ProgressSnapshot,
+  RunPlan,
   AgentResponse,
   ClaudeEvent,
   ConversationTurn,
@@ -210,6 +211,37 @@ export async function getProgressSnapshot(path: string): Promise<ProgressSnapsho
  */
 export async function exportExecutionSummary(path: string): Promise<string> {
   return invoke<string>("export_execution_summary", { path });
+}
+
+/**
+ * Persist `plan` to .loopdeck/run-plan.yaml and run its queued phases in
+ * order until the queue is empty, a phase misses a PASS verify verdict, or
+ * cancel_run is called. Rejects if a run is already in progress for this
+ * project. Resolves only once the run stops — poll getRunStatus for live
+ * per-phase progress while it's in flight.
+ * Rust: queue_run(path: String, plan: RunPlan) -> Result<RunPlan, AppError>
+ */
+export async function queueRun(path: string, plan: RunPlan): Promise<RunPlan> {
+  return invoke<RunPlan>("queue_run", { path, plan });
+}
+
+/**
+ * Flag the in-progress run for a project to stop before its next phase.
+ * No-op if no run is in flight. Does not interrupt a phase already mid-turn
+ * (see the Rust module doc on commands::run_queue for why).
+ * Rust: cancel_run(path: String) -> Result<(), AppError>
+ */
+export async function cancelRun(path: string): Promise<void> {
+  return invoke<void>("cancel_run", { path });
+}
+
+/**
+ * Read the persisted run plan for a project, if any. `null` means nothing
+ * has ever been queued.
+ * Rust: get_run_status(path: String) -> Result<Option<RunPlan>, AppError>
+ */
+export async function getRunStatus(path: string): Promise<RunPlan | null> {
+  return invoke<RunPlan | null>("get_run_status", { path });
 }
 
 /**

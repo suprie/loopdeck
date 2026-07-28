@@ -61,6 +61,13 @@ pub struct AppState {
     /// writes the `interrupt` control_request, ending the turn while keeping
     /// the live process (and its context) alive.
     pub interrupt_slots: Mutex<HashMap<PathBuf, InterruptSlot>>,
+    /// Per-project cancel flag for an in-progress `prd-run-queue` run
+    /// (`commands::run_queue::queue_run`). Presence of a key doubles as "a run
+    /// is currently executing for this project" (guards against a second
+    /// concurrent `queue_run`); `cancel_run` flips the flag, which the
+    /// executor's loop checks between phases. See `commands::run_queue` for
+    /// why this doesn't interrupt a phase already mid-turn.
+    pub run_cancel: Mutex<HashMap<PathBuf, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// A single child entry of a project directory, for the chat composer's
@@ -447,6 +454,7 @@ mod tests {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
+            run_cancel: Mutex::new(HashMap::new()),
         }
     }
 

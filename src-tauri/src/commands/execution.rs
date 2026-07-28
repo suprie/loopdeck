@@ -46,14 +46,22 @@ pub async fn promote_loop_by_id(
 ) -> Result<ExecutionState, AppError> {
     debug!("promote_loop_by_id called for path: {path}, id: {loop_id}");
     let root = resolve_root(&state, &path)?;
+    promote_by_id(&root, &loop_id)
+}
 
-    let found = find_prd_loop(&root, &loop_id)?;
-    let loaded = execution::load(&root)?;
+/// Domain-only promote: resolve `loop_id` against `docs/epics/` and promote it
+/// into `current`. No `AppState`/IPC dependency, so it's shared by the
+/// `promote_loop_by_id` command and the `prd-run-queue` executor
+/// (`commands::run_queue`), which already has a resolved project root and
+/// doesn't otherwise need `AppState` for this step.
+pub(crate) fn promote_by_id(root: &Path, loop_id: &str) -> Result<ExecutionState, AppError> {
+    let found = find_prd_loop(root, loop_id)?;
+    let loaded = execution::load(root)?;
     let next =
         loaded
             .state
-            .promote_loop_into_current(&loop_id, &found.title, found.origin, Utc::now())?;
-    execution::save(&root, &next, loaded.state.revision)?;
+            .promote_loop_into_current(loop_id, &found.title, found.origin, Utc::now())?;
+    execution::save(root, &next, loaded.state.revision)?;
     Ok(next)
 }
 
@@ -70,10 +78,20 @@ pub async fn complete_current_loop(
 ) -> Result<ExecutionState, AppError> {
     debug!("complete_current_loop called for path: {path}, commit: {commit:?}");
     let root = resolve_root(&state, &path)?;
-    let loaded = execution::load(&root)?;
+    complete_with_commit(&root, commit, promote_next)
+}
+
+/// Domain-only complete: same as `complete_current_loop` minus the `AppState`
+/// dependency — shared with the `prd-run-queue` executor.
+pub(crate) fn complete_with_commit(
+    root: &Path,
+    commit: Option<String>,
+    promote_next: bool,
+) -> Result<ExecutionState, AppError> {
+    let loaded = execution::load(root)?;
     let git = commit
         .map(|sha| {
-            git::verified_commit(&root, &sha)
+            git::verified_commit(root, &sha)
                 .map(|commit| GitEvidence { commit })
                 .map_err(AppError::ExecutionState)
         })
@@ -81,7 +99,7 @@ pub async fn complete_current_loop(
     let next = loaded
         .state
         .complete_current(Utc::now(), git, promote_next)?;
-    execution::save(&root, &next, loaded.state.revision)?;
+    execution::save(root, &next, loaded.state.revision)?;
     Ok(next)
 }
 

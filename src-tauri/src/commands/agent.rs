@@ -1465,7 +1465,10 @@ async fn spawn_fresh(
 /// Fresh-start send pipeline used by `agent_start_loop`. Mirrors
 /// `send_and_record` but spawns a brand-new session (no `--resume`) and rejects
 /// when busy instead of queueing. See `spawn_fresh` for the lifecycle.
-async fn start_fresh_and_record(
+/// `pub(crate)`: also called directly by the `prd-run-queue` executor
+/// (`commands::run_queue`), which spawns one fresh session per queued phase —
+/// the exact fresh-start semantics this helper already implements.
+pub(crate) async fn start_fresh_and_record(
     state: &AppState,
     path: &Path,
     prompt: &str,

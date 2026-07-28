@@ -98,11 +98,11 @@ Directional; refine during implementation.
 
 ### Phase 2 — Queue executor
 
-- [ ] Add a sequential executor task that spawns one orchestrated session per queued phase via the existing `claude_session` spawn path
-- [ ] Advance the queue only on a green verify verdict; record per-phase transitions into `execution.yaml`
-- [ ] Reuse `retry.rs` backoff for transient gateway failures inside a phase
-- [ ] Make the queue resumable: on app restart, reload the plan and mark previously `running` phases `interrupted` for requeue
-- [ ] IPC commands `queue_run` / `cancel_run` / `get_run_status` plus TS wrappers and types
+- [x] Add a sequential executor task that spawns one orchestrated session per queued phase via the existing `claude_session` spawn path (2026-07-28) — `commands/run_queue.rs::queue_run`'s own async loop calls `commands::agent::start_fresh_and_record` (made `pub(crate)`) once per eligible phase; no separate background-task registry (see decision of same date)
+- [x] Advance the queue only on a green verify verdict; record per-phase transitions into `execution.yaml` (2026-07-28) — `run_executor::parse_verdict` greps the turn's final text for the last `**Verdict:** PASS|WARN|BLOCK`; only `PASS` advances via `commands/execution.rs`'s new `promote_by_id`/`complete_with_commit` (`AppState`-free helpers shared with the `promote_loop_by_id`/`complete_current_loop` commands)
+- [x] Reuse `retry.rs` backoff for transient gateway failures inside a phase (2026-07-28) — free: `start_fresh_and_record` already wraps `send_with_retry` (`retry::is_overloaded`/`next_backoff`), no new retry code needed
+- [x] Make the queue resumable: on app restart, reload the plan and mark previously `running` phases `interrupted` for requeue (2026-07-28) — `run_executor::reconcile_after_restart`, called per registered project in `lib.rs`'s startup, mirroring the existing `conversation::reconcile_interrupted` loop
+- [x] IPC commands `queue_run` / `cancel_run` / `get_run_status` plus TS wrappers and types (2026-07-28) — `commands/run_queue.rs` + `lib.rs` registration; `queueRun`/`cancelRun`/`getRunStatus` in `lib/tauri.ts`; `RunPlan`/`RunPhase`/`RunPhaseStatus`/`StallPolicy`/`PinnedAnswer`/`RunConsent`/`RunBudgets` in `types/index.ts`. **Known limitation** (documented in `commands/run_queue.rs`'s module doc): cancellation and stall/park detection both ride the non-streaming pipeline, which doesn't honor the interrupt slot — `cancel_run` takes effect between phases, not mid-turn; Phase 4 owns real park detection + the `StallPolicy` skip-ahead behavior.
 
 ### Phase 3 — Pre-flight interview
 

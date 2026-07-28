@@ -1,5 +1,23 @@
 # Decisions Archive
 
+## 2026-07-26 — Provider-neutral harness sessions with Codex app-server
+
+- **Status**: accepted
+- **Context**: LoopDeck's agent pipeline was hard-wired to persistent Claude stream-JSON sessions. Codex needs equivalent streaming, resume, approvals, user questions, and interruption without duplicating the command and UI pipelines or sharing provider credentials.
+- **Consequences**: Commands now hold a provider-neutral `HarnessSession` selected by `AgentConfig.harness`. Claude remains the default for backward-compatible config files. Codex runs a persistent `codex app-server` JSONL session, maps its events and server requests into LoopDeck's existing conversation/control surfaces, and relies on the installed Codex CLI account and provider configuration rather than Claude's token or base URL. Codex transcript IDs are stored with a `codex:` prefix, and untagged legacy IDs remain Claude-owned, preventing accidental cross-provider resume. Switching harnesses replaces an idle cached session; an active session finishes safely and is replaced on the next send.
+
+## 2026-07-26 — Route Codex actions through LoopDeck's approval boundary
+
+- **Status**: accepted
+- **Context**: Codex's `workspaceWrite` + `on-request` preset permits commands and file edits inside the workspace without an app-server approval request. That bypasses LoopDeck's default confirm-changes UI and prevents its destructive-command floor from evaluating actions that Codex performs autonomously.
+- **Consequences**: Codex turns always use `readOnly` + `on-request`, forcing commands and edits through app-server approval requests. LoopDeck's existing `PermissionPolicy` then parks normal projects for a user decision, auto-allows safe requests in autonomous projects, and denies destructive commands before autonomy is considered. Codex effort is cleared when switching providers and defaults to the model's advertised setting unless the user explicitly supplies an override. Regression tests pin turn security parameters, confirm/autonomous/floor decisions, approval context mapping, and idle/busy harness replacement.
+
+## 2026-07-26 — Phase 4 post-merge migration hardening
+
+- **Status**: accepted
+- **Context**: Reviewing merged PR #11 found three edge cases in the Phase 4 migration surface: POSIX `rename` may replace an existing `loops.legacy.md`; the UI offered migration only when legacy current/history records existed, excluding empty and next-step-only files; and queued structured records were labeled completed.
+- **Consequences**: Fresh migration now refuses before writing `execution.yaml` when `loops.legacy.md` already exists, preserving the earlier snapshot byte-for-byte; a regression test pins the no-write behavior. The Loops panel now offers migration whenever `loops.md` exists, reconciliation details include unconverted next steps, and queued records render as queued. Phase 4's PRD checklist is closed after post-merge verification.
+
 ## 2026-06-22 — Use Tauri v2 for desktop shell
 - **Status**: accepted
 - **Context**: We needed a cross-platform desktop shell for LoopDeck. Electron was the default, but bundle size and the need for a performant filesystem scanner pushed us to evaluate alternatives.

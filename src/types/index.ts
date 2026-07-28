@@ -343,6 +343,60 @@ export interface MigrationPreview {
   loops_md_present: boolean;
 }
 
+// ── Run queue (.loopdeck/run-plan.yaml) — 0.4.0 prd-run-queue ────
+// Mirrors Rust `runplan.rs`. `created` is an RFC3339 string (chrono).
+
+/** serde `rename_all = "snake_case")`. Chosen once, at queue time. */
+export type StallPolicy = "continue_independent" | "halt";
+
+/** serde `rename_all = "lowercase"`. */
+export type RunPhaseStatus =
+  | "queued"
+  | "running"
+  | "parked"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "killed";
+
+/** A pre-flight clarifying question and its pinned answer (Phase 3). */
+export interface PinnedAnswer {
+  question: string;
+  answer: string;
+}
+
+/** Queue-time consent for the whole run. */
+export interface RunConsent {
+  draft_pr_authorized: boolean;
+}
+
+/** Optional hard budget caps; `undefined` means "use the enforcing PRD's default." */
+export interface RunBudgets {
+  per_phase_token_cap?: number;
+  per_phase_wall_clock_secs?: number;
+  total_run_wall_clock_secs?: number;
+}
+
+/** One queued phase, joined to the spec/execution layer by stable execution ID. */
+export interface RunPhase {
+  execution_id: string;
+  status: RunPhaseStatus;
+  interview: PinnedAnswer[];
+  depends_on: string[];
+  park_payload?: string;
+}
+
+/** The on-disk shape of `.loopdeck/run-plan.yaml`. */
+export interface RunPlan {
+  id: string;
+  project: string;
+  created: string;
+  consent: RunConsent;
+  budgets: RunBudgets;
+  stall_policy: StallPolicy;
+  phases: RunPhase[];
+}
+
 /**
  * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
  * Mirrors Rust `Epic` in epic.rs.

@@ -21,6 +21,7 @@ mod persist;
 mod progress;
 mod project;
 pub mod retry;
+mod run_executor;
 mod runplan;
 mod scanner;
 mod secrets;
@@ -102,6 +103,27 @@ pub fn run() {
         }
     }
 
+    // Reconcile in-progress runs (`prd-run-queue` Phase 2, P1 resumability). A
+    // run-queue executor killed mid-phase by a restart/crash leaves that
+    // phase `Running` in `.loopdeck/run-plan.yaml` with no process left to
+    // finish it; downgrade it to `Interrupted` now so the picker UI (Phase 5)
+    // can offer to requeue it rather than the run looking permanently stuck.
+    // Same best-effort, log-don't-fail shape as the reconciliation above; a
+    // project with no run-plan.yaml is a silent no-op (`Ok(false)`).
+    for project in &config.projects {
+        match run_executor::reconcile_after_restart(&project.path) {
+            Ok(true) => tracing::info!(
+                "reconciled interrupted run-queue phase for {}",
+                project.path.display()
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "failed to reconcile run-queue state for {}: {e}",
+                project.path.display()
+            ),
+        }
+    }
+
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -112,6 +134,7 @@ pub fn run() {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
+            run_cancel: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             // Composer + scan (composer.rs)
@@ -153,6 +176,10 @@ pub fn run() {
             // Migration from legacy loops.md → execution.yaml — 0.2.1 Phase 4
             commands::execution::get_migration_preview,
             commands::execution::apply_migration,
+            // Run-queue executor (run_queue.rs) — 0.4.0 prd-run-queue Phase 2
+            commands::run_queue::queue_run,
+            commands::run_queue::cancel_run,
+            commands::run_queue::get_run_status,
             // Agent config + auth token + diagnostics (config_cmds.rs)
             commands::config_cmds::get_agent_config,
             commands::config_cmds::set_agent_config,
