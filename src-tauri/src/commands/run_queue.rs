@@ -14,8 +14,11 @@ use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, LoopOrigin};
-use crate::run_executor::{self, build_phase_prompt, extract_verdict, RunHandle, RunVerdict};
-use crate::runplan::{self, RunPhaseStatus, RunPlan};
+use crate::run_executor::{
+    self, build_interview_prompt, build_phase_prompt, extract_interview_answers, extract_verdict,
+    RunHandle, RunVerdict,
+};
+use crate::runplan::{self, InterviewStatus, RunPhaseStatus, RunPlan};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -62,6 +65,15 @@ pub async fn queue_run(
         return Err(AppError::RunPlan(
             "the run plan has no queued phases".into(),
         ));
+    }
+
+    if let Some(phase) = plan.phases.iter().find(|p| {
+        p.status == RunPhaseStatus::Queued && p.interview_status == InterviewStatus::Pending
+    }) {
+        return Err(AppError::RunPlan(format!(
+            "phase \"{}\" has not been interviewed — answer or skip its pre-flight interview before queuing the run",
+            phase.execution_id
+        )));
     }
 
     if execution::load(&root)?.state.current.is_some() {
@@ -154,6 +166,104 @@ pub async fn get_run_status(
         run_executor::reconcile_running_phases(&root)?;
     }
     runplan::load(&root)
+}
+
+/// Run one queued phase's pre-flight interview turn (Phase 3) — a bounded
+/// session, driven through the same `start_fresh_and_record` pipeline as a
+/// phase run itself, whose `AskUserQuestion` calls surface as the same
+/// question cards the chat already shows. Awaits the whole turn, including
+/// any parked question, so it only returns once the user has answered (or
+/// the agent decided nothing was ambiguous) — that's what "while the user is
+/// present" means here: the caller is expected to be an active UI session,
+/// not a background poll.
+///
+/// Pins the parsed answers into `plan.phases[execution_id].interview`, marks
+/// its `interview_status` `Answered` (even when zero questions were asked —
+/// that's still a resolved interview, distinct from `Pending`), and persists
+/// the plan. Errors if no plan is queued or the phase isn't found in it;
+/// does not require the phase to still be `Queued` (re-running an interview
+/// on a `Parked`/`Failed` phase before a retry is allowed).
+#[tauri::command]
+pub async fn run_phase_interview(
+    path: String,
+    execution_id: String,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+
+    let plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
+    if !plan.phases.iter().any(|p| p.execution_id == execution_id) {
+        return Err(AppError::RunPlan(format!(
+            "phase \"{execution_id}\" is not in the run plan"
+        )));
+    }
+
+    let loc = epic::find_loop_by_id(&root, &execution_id).ok_or_else(|| {
+        AppError::RunPlan(format!(
+            "queued phase \"{execution_id}\" no longer exists in docs/epics/"
+        ))
+    })?;
+
+    let prompt = build_interview_prompt(&execution_id, &loc);
+    let response = start_fresh_and_record(&state, &root, &prompt).await?;
+    let answers = extract_interview_answers(&response.result);
+
+    // Reload rather than reuse the plan loaded before the (possibly long)
+    // interview turn — `cancel_run`/the executor could have touched other
+    // phases meanwhile; only this phase's fields are ours to set.
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
+    let idx = plan
+        .phases
+        .iter()
+        .position(|p| p.execution_id == execution_id)
+        .ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "phase \"{execution_id}\" was removed from the run plan during its interview"
+            ))
+        })?;
+    plan.phases[idx].interview = answers;
+    plan.phases[idx].interview_status = InterviewStatus::Answered;
+    runplan::save(&root, &plan)?;
+
+    info!(
+        "interview answered for phase \"{execution_id}\" in {}",
+        root.display()
+    );
+    Ok(plan)
+}
+
+/// Explicitly skip a queued phase's pre-flight interview — no session is
+/// run, `interview` is left as-is (typically empty), `interview_status`
+/// becomes `Skipped`. Lets the user unblock `queue_run` for a phase they've
+/// judged unambiguous without opening a turn for it.
+#[tauri::command]
+pub async fn skip_phase_interview(
+    path: String,
+    execution_id: String,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
+    let idx = plan
+        .phases
+        .iter()
+        .position(|p| p.execution_id == execution_id)
+        .ok_or_else(|| {
+            AppError::RunPlan(format!("phase \"{execution_id}\" is not in the run plan"))
+        })?;
+
+    plan.phases[idx].interview_status = InterviewStatus::Skipped;
+    runplan::save(&root, &plan)?;
+
+    info!(
+        "interview skipped for phase \"{execution_id}\" in {}",
+        root.display()
+    );
+    Ok(plan)
 }
 
 /// The sequential executor loop: one orchestrated turn per queued phase, in

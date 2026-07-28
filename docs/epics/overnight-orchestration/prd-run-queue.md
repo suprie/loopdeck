@@ -106,9 +106,9 @@ Directional; refine during implementation.
 
 ### Phase 3 — Pre-flight interview
 
-- [ ] Add an interview pass that runs the orchestrator's clarify step for every queued phase before the run starts, while the user is present
-- [ ] Pin interview answers into the `RunPlan` and inject them into each phase's session prompt
-- [ ] Block run start until every queued phase's interview is answered or explicitly skipped
+- [x] Add an interview pass that runs the orchestrator's clarify step for every queued phase before the run starts, while the user is present (2026-07-28) — `commands/run_queue.rs::run_phase_interview` drives one bounded turn per phase through the existing `start_fresh_and_record` pipeline (same question-card IPC surface chat already uses), built from `run_executor::build_interview_prompt`; the turn's `## Pre-flight Answers` closing block is parsed by `run_executor::extract_interview_answers` (last-occurrence, mirrors `extract_verdict`'s marker convention)
+- [x] Pin interview answers into the `RunPlan` and inject them into each phase's session prompt (2026-07-28) — `run_phase_interview` writes the parsed answers to `RunPhase.interview` and saves the plan; injection into the phase's own turn was already wired in Phase 2's `build_phase_prompt`, which this phase's answers now actually populate
+- [x] Block run start until every queued phase's interview is answered or explicitly skipped (2026-07-28) — new `RunPhase.interview_status: InterviewStatus` (`Pending` default / `Answered` / `Skipped`); `queue_run` refuses with a named-phase error while any `Queued` phase is still `Pending`; `skip_phase_interview` sets `Skipped` without running a session, for a phase the user judges unambiguous. No UI wiring yet — that's Phase 5's "Interview UI" item; this phase is IPC + persistence only (`run_phase_interview`/`skip_phase_interview` commands + TS wrappers/types)
 
 ### Phase 4 — Stall policy runtime
 
