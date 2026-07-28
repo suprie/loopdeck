@@ -365,7 +365,12 @@ async fn execute_run(
         )?;
         execution::save(root, &promoted, loaded.state.revision)?;
 
-        let prompt = build_phase_prompt(&execution_id, &loc, &interview);
+        let prompt = build_phase_prompt(
+            &execution_id,
+            &loc,
+            &interview,
+            plan.consent.draft_pr_authorized,
+        );
         // No-op sink: this run has no live UI channel of its own, but the
         // streaming pipeline is what makes AskUserQuestion/permission/plan
         // cards park instead of auto-deny — see this function's doc comment.

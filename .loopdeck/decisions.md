@@ -3,12 +3,6 @@
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
 
-## 2026-07-27 — Provider boundary returns evidence, not derived status
-
-- **Status**: accepted
-- **Context**: Phase 6 initially defined `DeliveryProvider` as returning `DeliveryStatus`. That made `InReview` and `Shipped` circular and unconstructable in core production code—the provider could only return a derived status it had already created—and strict dead-code validation correctly rejected both variants and the unused trait.
-- **Consequences**: Providers now return neutral `DeliveryEvidence { in_review, shipped }`. The progress read model maps that evidence into `InReview` or `Shipped` only after a reachable local commit establishes `Committed`; missing providers and provider errors retain the strongest local state. This activates the optional provider boundary without suppressing dead-code warnings or making remote access an offline runtime dependency.
-
 ## 2026-07-27 — Derived progress lives in EpicsPanel/EpicsView, not a new tab
 
 - **Status**: accepted
@@ -98,3 +92,9 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: `Chat.tsx` already wraps `AskUserQuestionCard` in `max-h-[45vh] overflow-y-auto` so a question with many options/questions stays reachable. `ProjectDetail.tsx`'s `StuckQuestionCallout` (the tab-agnostic banner) mounted the same card with no scroll constraint, so 5+ questions overflowed the callout with no way to reach the Submit button.
 - **Consequences**: Wrapped the card in the same `max-h-[45vh] overflow-y-auto` div as `Chat.tsx`, matching the existing pattern instead of inventing a new one.
 
+## 2026-07-29 — Wired `RunConsent.draft_pr_authorized` through to a real unattended-draft-PR bypass
+
+- **Status**: accepted
+- **Context**: `RunConsent.draft_pr_authorized` (`runplan.rs`) has existed since Phase 1 with a doc comment claiming it "authorizes `gh pr create --draft` with no interactive confirmation" — but it was dead: never read by `run_executor`/`run_queue`, and `loopdeck-open-pr`'s Phase 4 confirm gate had zero conditional/bypass language, so a queued overnight run could never actually open a PR without a human present to answer "proceed, edit, or abort?".
+- **Consequences**: `build_phase_prompt` (`run_executor.rs`) now takes `draft_pr_authorized: bool`, threaded from `plan.consent.draft_pr_authorized` at its one call site (`commands/run_queue.rs::execute_run`); when true it tells the agent, in plain text, that this run is pre-authorized to skip `loopdeck-open-pr`'s Phase 4 confirmation and open Phase 6 as `gh pr create --draft` (no `--web`) — the `false` branch reproduces the prior prompt text byte-for-byte, so non-consented runs are unaffected. `loopdeck-open-pr`'s SKILL.md (and its byte-identical mirror in `templates/skills/loopdeck-open-pr/`) gained a new Phase 4a that checks for that exact stated authorization before the (unchanged) Phase 4b confirmation gate, plus a `--draft`/no-`--web` Phase 6a variant — the confirm gate stays the unconditional default for every interactively-invoked run; only a run whose prompt explicitly states pre-authorization can skip it. Draft-only is enforced in both the prompt text and the skill doc: nothing in this change ever readies or merges a PR automatically.
+- **Detail**: The interactive "Start next loop" path (`commands/agent.rs`) is untouched — it always confirms, by design, matching the session's own publish-safety rules. The Phase 5 picker UI that would let a human actually set `draft_pr_authorized=true` from the app doesn't exist yet (out of scope here); this only finishes the executor↔skill wiring for when that UI lands. See PR #33 (same session) for the complementary fix: `next_unchecked_loop_step` now skips `- [ ] Review & merge:` bookkeeping lines instead of "implementing" them — relevant because Phase 7 still appends that same reminder line after a draft PR opens, and a human still has to act on it manually.

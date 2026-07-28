@@ -41,6 +41,7 @@
 
 ## Next Steps
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/37 (fix: AskUserQuestionCard scroll in ProjectDetail's stuck-prompt callout)
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/36 (Wire RunConsent.draft_pr_authorized through to a real unattended-draft-PR bypass)
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/35
 - [x] Review & merge: https://github.com/suprie/loopdeck/pull/33 (Start next loop skips stale Review & merge reminders)
 - [x] Review & merge: https://github.com/suprie/loopdeck/pull/32 (prd-run-queue Phase 3 — Pre-flight interview)

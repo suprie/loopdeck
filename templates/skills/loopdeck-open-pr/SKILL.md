@@ -1,6 +1,6 @@
 ---
 name: loopdeck:open-pr
-description: Ship the current branch as a reviewable pull request. Use when the user says "open a PR", "create pull request", "ship this", "ready to ship", or when an orchestrated feature is complete and verified. Runs pre-flight checks (gh auth, feature branch, remote origin), gathers context from .loopdeck memory + git log + working-tree status, generates a PR body (Summary / What changed / PRD / Decisions / Test plan) with the Test plan inferred from the project's stack markers, shows the body for confirmation, then — only after the user confirms — commits any uncommitted work (message authored from the verified scope), pushes, and runs gh pr create --web. No commit, push, or publish before the body confirmation.
+description: Ship the current branch as a reviewable pull request. Use when the user says "open a PR", "create pull request", "ship this", "ready to ship", or when an orchestrated feature is complete and verified. Runs pre-flight checks (gh auth, feature branch, remote origin), gathers context from .loopdeck memory + git log + working-tree status, generates a PR body (Summary / What changed / PRD / Decisions / Test plan) with the Test plan inferred from the project's stack markers, shows the body for confirmation, then — only after the user confirms — commits any uncommitted work (message authored from the verified scope), pushes, and runs gh pr create --web. No commit, push, or publish before the body confirmation. For a run pre-authorized by an unattended overnight queue, Phase 4's confirmation and Phase 6's --web are skipped in favor of a --draft PR — see Phase 4.
 allowed-tools: [Read, Bash, Grep]
 ---
 
@@ -45,11 +45,14 @@ and opens the PR.
 │  4. Show body → user confirms (proceed/edit/abort)     │
 │     (the gate for commit + push + publish; discloses   │
 │     any uncommitted files + the commit message)        │
+│     — SKIPPED when the invoking prompt states           │
+│       unattended pre-authorization                      │
 ├──────────────────────────────────────────────────────┤
-│  5. Commit uncommitted work + push (gated by Phase 4)  │
-│     git add -A → git commit (if dirty) → push -u       │
+│  5. Commit uncommitted work + push (gated by Phase 4,  │
+│     or by the stated pre-authorization)                │
 ├──────────────────────────────────────────────────────┤
-│  6. gh pr create --title … --body-file … --web         │
+│  6. gh pr create --title … --body-file … --web          │
+│     (or --draft, no --web, when pre-authorized)         │
 ├──────────────────────────────────────────────────────┤
 │  7. Append PR URL to .loopdeck/loops.md ## Next Steps  │
 └──────────────────────────────────────────────────────┘
@@ -230,6 +233,25 @@ prefer `pnpm`; `yarn.lock` → prefer `yarn`.
 
 ## Phase 4: Show the Body for Confirmation (the commit + push + publish gate)
 
+### 4a. Unattended pre-authorization check
+
+Before printing anything, check whether **the prompt that invoked this skill**
+explicitly states that this run was pre-authorized at queue time to open a
+draft pull request unattended (LoopDeck's run-queue executor writes this
+exact framing into the turn prompt when `RunConsent.draft_pr_authorized` was
+set at queue time — see `run_executor.rs::build_phase_prompt`). Do **not**
+infer this from context, tone, or the absence of a human in the
+conversation — only an explicit statement in the invoking prompt counts.
+
+- **Explicitly pre-authorized** → skip straight to Phase 5 (no confirmation
+  prompt). Use the **`--draft`, no `--web`** variant of Phase 6 (a draft PR,
+  never auto-readied — a human must still ready or merge it by hand).
+- **Not explicitly pre-authorized** (the default — including every
+  interactively-invoked run of this skill) → continue with the confirmation
+  gate below, exactly as always.
+
+### 4b. Confirmation gate (default path)
+
 **Print the complete drafted PR body** (in a fenced code block), the derived
 title, and — if `git status --porcelain` (Phase 2) is non-empty — an explicit
 **disclosure** of:
@@ -251,8 +273,9 @@ Then explicitly ask the user:
 - **abort** → stop. No commit, no push, no publish.
 
 Do **not** stage, commit, push, or call `gh pr create` until the user says
-proceed. This gate is the only thing standing between a drafted-but-unreviewed
-body and a commit + push + public publish.
+proceed, **unless 4a found explicit unattended pre-authorization**. This gate
+is the only thing standing between a drafted-but-unreviewed body and a
+commit + push + public publish.
 
 ## Phase 5: Commit Uncommitted Work + Push (gated by Phase 4)
 
@@ -330,6 +353,31 @@ params), so the human has a final review click before the PR is actually created
 
 Report the URL `gh` returned to the user.
 
+### 6a. Unattended variant (`--draft`, no `--web`)
+
+If Phase 4a found explicit pre-authorization, open the PR as a **draft**,
+headlessly, instead:
+
+```bash
+tmpfile="$(mktemp)"
+cat > "$tmpfile" <<'BODY'
+<confirmed PR body verbatim>
+BODY
+
+gh pr create --title "<derived title>" --body-file "$tmpfile" --draft
+status=$?
+rm -f "$tmpfile"
+exit $status
+```
+
+No `--web` — there is no human to click through the browser confirmation
+overnight; this form returns a real `…/pull/N` URL on stdout directly. **The
+PR is opened as a draft and nothing in this skill ever readies it or merges
+it** — that stays a manual human action regardless of consent.
+
+Report the URL `gh` returned (in an unattended run it flows into Phase 7
+exactly like the interactive path).
+
 ## Phase 7: Record the PR URL in `.loopdeck/loops.md`
 
 Append a review/merge checklist item to the `## Next Steps` section. The skill
@@ -373,9 +421,18 @@ created and reported in Phase 6.
 - **No squash, no history rewrite, no force-push.** Existing WIP commits are
   pushed as-is; the human chooses the merge strategy at merge time. A rejected
   push stops the skill — it is never forced past.
-- **Confirm before publishing.** `git push` and `gh pr create` are the two
-  outward-facing actions. Both run only after the user approves the drafted body
-  (Phase 4), which also discloses any uncommitted files and the commit message.
+- **Confirm before publishing, unless explicitly pre-authorized for an
+  unattended run.** `git push` and `gh pr create` are the two outward-facing
+  actions. By default both run only after the user approves the drafted body
+  (Phase 4), which also discloses any uncommitted files and the commit
+  message. The only exception is a run whose invoking prompt explicitly
+  states unattended pre-authorization (Phase 4a) — that path skips the
+  confirmation prompt but is still bound by the next rule.
+- **Pre-authorized runs still only ever produce a draft.** Unattended
+  pre-authorization (Phase 4a) permits skipping the Phase 4 confirmation and
+  using `gh pr create --draft` (no `--web`) at Phase 6 — it never permits
+  marking the PR ready for review or merging it. That step always requires a
+  human, with or without consent.
 - **Honest body + honest commit.** Do not list tests as run if they were not.
   The Test plan is a reviewer checklist. The commit message is the same title +
   Summary the user confirmed — never an invented or generic "WIP" message.
