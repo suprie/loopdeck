@@ -9,8 +9,9 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::start_fresh_and_record;
+use super::agent::{start_fresh_and_record, start_fresh_and_record_streaming};
 use super::state::{fire_interrupt, resolve_root, AppState};
+use crate::agents::ClaudeEvent;
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, LoopOrigin};
@@ -22,6 +23,7 @@ use crate::runplan::{self, InterviewStatus, RunPhaseStatus, RunPlan};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tracing::{info, warn};
 
@@ -112,19 +114,18 @@ pub async fn queue_run(
 /// checked between phases — the earliest point the executor's loop can react.
 ///
 /// Also fires the project's `interrupt_slots` sender via `fire_interrupt`, the
-/// same one `agent_interrupt` uses for a user-initiated Stop — but today this
-/// has **no effect on the current phase's turn**: the executor drives turns
-/// through `start_fresh_and_record`, which calls the non-streaming
-/// `ClaudeSession::send_message`, and `send_message` takes an `InterruptSlot`
-/// parameter only to discard it (`_interrupt_slot`, see its doc comment in
-/// `claude_session.rs`) — only the streaming pipeline honors it. So in
-/// practice `cancel_run` takes effect **between** phases, not mid-turn, same
-/// as the flag alone. The `fire_interrupt` call is harmless (a lone sender
-/// with no live receiver on this path) and becomes load-bearing the day the
-/// executor moves to the streaming pipeline (Phase 4, alongside real
-/// mid-turn stall detection) — kept rather than removed, but documented
-/// honestly here instead of implying it already works. No-op error if no run
-/// is active.
+/// same one `agent_interrupt` uses for a user-initiated Stop. Since Phase 4
+/// moved the executor onto the streaming pipeline
+/// (`start_fresh_and_record_streaming`), this now genuinely interrupts the
+/// current phase's turn **while it is actively reading** — the streaming read
+/// loop `select!`s the next stdout line against the interrupt receiver (see
+/// `claude_session.rs::send_message_streaming`). It still has **no effect on
+/// an already-parked card** (an unanswered `AskUserQuestion`/permission/plan
+/// approval): `answer_control_request`'s park site isn't selected against
+/// anything but its own deadline once entered, so a cancel during a park
+/// waits out `TURN_DEADLINE` like any other unattended stall (see
+/// `run_executor::phases_blocked_by_park`'s caller for the same limit). No-op
+/// error if no run is active.
 #[tauri::command]
 pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
@@ -269,13 +270,48 @@ pub async fn skip_phase_interview(
 /// The sequential executor loop: one orchestrated turn per queued phase, in
 /// the plan's authored (vec) order.
 ///
-/// **Phase 2 scope** — no dependency-graph skip and no interactive-stall
-/// parking yet (`depends_on`/`StallPolicy` are recorded but not consulted;
-/// Phase 4 wires that in). A non-green verdict or a turn-level error stops
-/// the run at that phase rather than trying the next one, since without
-/// Phase 4's stall-vs-failure distinction, continuing past an unresolved
-/// phase would let a later phase build on work its dependency didn't
-/// actually finish.
+/// **Interactive-stall handling (Phase 4)** — each phase's turn runs through
+/// the *streaming* pipeline (`start_fresh_and_record_streaming`, with a
+/// no-op sink `Channel`) rather than Phase 2/3's non-streaming
+/// `start_fresh_and_record`. This isn't cosmetic: `claude_session.rs`'s
+/// `answer_control_request` only parks an `AskUserQuestion` / manual-approval
+/// / plan-approval card when a channel is present — on the non-streaming path
+/// (`channel: None`) it auto-denies the card immediately instead of parking.
+/// Streaming is what makes a genuine mid-run stall observable at all. The
+/// no-op channel means this run has no live UI narration of its own (Phase
+/// 5's run-queue view), but the pending card still lands in the same shared
+/// `AppState` slots `agent_pending_question`/`_permission`/`_plan` read — a
+/// human watching the app live can answer it exactly like any other pending
+/// card, and the turn then completes normally (never reaching the
+/// `TurnParked` arm below at all).
+///
+/// A stalled card is only detectable once it exceeds `TURN_DEADLINE` (30
+/// min): `claude_session.rs`'s park site is not selected against any
+/// cancellation once entered (see its own doc comment — "during a parked
+/// approval/question the loop is off the read, so an interrupt there won't
+/// be observed this turn"), so there's no way to notice or bound a stall
+/// earlier from outside `claude_session.rs` without a larger session-model
+/// change (out of this PRD's scope — sequencing/state, not environment).
+/// `park the phase instead of waiting` (PRD Phase 4) means "instead of the
+/// *run* waiting forever / stopping outright," per the `TurnParked` handling
+/// below — not that detection is instant.
+///
+/// On `AppError::TurnParked`, the phase becomes `Parked` (not `Failed`) with
+/// the pending card's payload recorded for the morning report, and
+/// [`run_executor::phases_blocked_by_park`] marks the phases the plan's
+/// `StallPolicy` says can't proceed: under `ContinueIndependent` that's only
+/// the parked phase's dependents (everything else stays `Queued` and the loop
+/// tries it next); under `Halt` that's every remaining `Queued` phase, which
+/// leaves nothing for the loop to pick up — no separate early-return branch
+/// needed. Either way `execution.yaml`'s `current` loop is abandoned (not
+/// left dangling) so the next phase (if any) can be promoted — by the time
+/// `continue_independent` reaches a next phase, that phase's `spawn_fresh`
+/// would replace the parked session anyway (Phase 2's existing "fresh
+/// process per phase" design), so there is no still-resumable session to
+/// preserve by leaving `current` untouched.
+///
+/// A non-green verify verdict or any other turn-level error is unchanged
+/// from Phase 2: the phase is `Failed` and the run stops.
 async fn execute_run(
     state: &AppState,
     root: &Path,
@@ -330,7 +366,11 @@ async fn execute_run(
         execution::save(root, &promoted, loaded.state.revision)?;
 
         let prompt = build_phase_prompt(&execution_id, &loc, &interview);
-        let outcome = start_fresh_and_record(state, root, &prompt).await;
+        // No-op sink: this run has no live UI channel of its own, but the
+        // streaming pipeline is what makes AskUserQuestion/permission/plan
+        // cards park instead of auto-deny — see this function's doc comment.
+        let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
+        let outcome = start_fresh_and_record_streaming(state, root, &prompt, &channel).await;
 
         match outcome {
             Ok(response) => {
@@ -363,6 +403,39 @@ async fn execute_run(
                     execution::save(root, &abandoned, loaded.state.revision)?;
                     return Ok(());
                 }
+            }
+            Err(AppError::TurnParked(detail)) => {
+                plan.phases[idx].status = RunPhaseStatus::Parked;
+                plan.phases[idx].park_payload = Some(detail.clone());
+
+                for blocked_id in
+                    run_executor::phases_blocked_by_park(&plan, &execution_id, plan.stall_policy)
+                {
+                    if let Some(p) = plan
+                        .phases
+                        .iter_mut()
+                        .find(|p| p.execution_id == blocked_id)
+                    {
+                        p.status = RunPhaseStatus::Parked;
+                        p.park_payload = Some(format!(
+                            "blocked: depends on parked phase \"{execution_id}\""
+                        ));
+                    }
+                }
+                runplan::save(root, &plan)?;
+
+                let loaded = execution::load(root)?;
+                let abandoned = loaded.state.abandon_current(
+                    format!("phase parked: {detail}"),
+                    chrono::Utc::now(),
+                    false,
+                )?;
+                execution::save(root, &abandoned, loaded.state.revision)?;
+                // No early return: under `ContinueIndependent` the loop
+                // naturally advances to try the next still-`Queued` phase;
+                // under `Halt`, `phases_blocked_by_park` already parked every
+                // remaining phase, so the top-of-iteration status check skips
+                // them and the run ends here regardless.
             }
             Err(e) => {
                 plan.phases[idx].status = RunPhaseStatus::Failed;

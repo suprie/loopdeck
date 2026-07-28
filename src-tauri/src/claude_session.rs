@@ -153,15 +153,35 @@ async fn park_until<T>(deadline: tokio::time::Instant, rx: oneshot::Receiver<T>)
 
 /// The error surfaced when a parked prompt exceeds [`TURN_DEADLINE`].
 ///
-/// Shared by the AskUserQuestion and manual-approval park sites so the
-/// "abandoned, lock released" message stays consistent. The live session
-/// survives (the park site already wrote the `interrupt` control_request), so
-/// the caller can re-send to resume the conversation.
-fn turn_deadline_expired_error() -> AppError {
-    AppError::Agent(format!(
+/// Shared by the AskUserQuestion, manual-approval, and plan-approval park
+/// sites so the "abandoned, lock released" message stays consistent. The live
+/// session survives (the park site already wrote the `interrupt`
+/// control_request), so the caller can re-send to resume the conversation.
+///
+/// `AppError::TurnParked` (not `Agent`) — an unattended caller (the
+/// `prd-run-queue` executor) needs to tell this apart from a genuine turn
+/// failure without parsing the message text. `pending_detail` names what was
+/// left unanswered (the question text, the tool + input, or the plan) so an
+/// unattended caller has something concrete to show in a morning report;
+/// capped at a few hundred chars since a `Write`/`Edit` input or a long plan
+/// could otherwise blow up the message.
+fn turn_deadline_expired_error(pending_detail: &str) -> AppError {
+    const MAX_DETAIL_CHARS: usize = 200;
+    let detail: String = if pending_detail.chars().count() > MAX_DETAIL_CHARS {
+        format!(
+            "{}…",
+            pending_detail
+                .chars()
+                .take(MAX_DETAIL_CHARS)
+                .collect::<String>()
+        )
+    } else {
+        pending_detail.to_string()
+    };
+    AppError::TurnParked(format!(
         "turn deadline ({} minutes) elapsed while parked for a decision — the \
          project lock was released; the live session survived, so re-send to \
-         resume",
+         resume. Pending: {detail}",
         TURN_DEADLINE.as_secs() / 60
     ))
 }
@@ -837,7 +857,9 @@ impl ClaudeSession {
             }
             ParkOutcome::Expired => {
                 self.write_interrupt_control_request().await;
-                return Err(turn_deadline_expired_error());
+                return Err(turn_deadline_expired_error(&format!(
+                    "plan approval — {plan}"
+                )));
             }
         };
 
@@ -987,7 +1009,15 @@ impl ClaudeSession {
                 // conversation), then surface an error to release the
                 // per-project lock. See `TURN_DEADLINE`.
                 self.write_interrupt_control_request().await;
-                return Err(turn_deadline_expired_error());
+                let detail = format!(
+                    "AskUserQuestion — {}",
+                    questions
+                        .iter()
+                        .map(|q| q.question.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                return Err(turn_deadline_expired_error(&detail));
             }
         };
 
@@ -1140,7 +1170,8 @@ impl ClaudeSession {
                 // the conversation), then surface an error to release the
                 // per-project lock. See `TURN_DEADLINE`.
                 self.write_interrupt_control_request().await;
-                return Err(turn_deadline_expired_error());
+                let detail = format!("{} — {input_str}", request.tool_name);
+                return Err(turn_deadline_expired_error(&detail));
             }
         };
 
@@ -2156,12 +2187,24 @@ mod tests {
 
     #[test]
     fn turn_deadline_expired_error_describes_lock_release() {
-        let msg = match turn_deadline_expired_error() {
-            AppError::Agent(m) => m,
-            _ => panic!("expected AppError::Agent variant"),
+        let msg = match turn_deadline_expired_error("AskUserQuestion — which port?") {
+            AppError::TurnParked(m) => m,
+            _ => panic!("expected AppError::TurnParked variant"),
         };
         assert!(msg.contains("turn deadline"), "msg: {msg}");
         assert!(msg.contains("lock was released"), "msg: {msg}");
+        assert!(msg.contains("which port?"), "msg: {msg}");
+    }
+
+    #[test]
+    fn turn_deadline_expired_error_truncates_long_detail() {
+        let long_input = "x".repeat(500);
+        let msg = match turn_deadline_expired_error(&long_input) {
+            AppError::TurnParked(m) => m,
+            _ => panic!("expected AppError::TurnParked variant"),
+        };
+        assert!(!msg.contains(&long_input), "detail should be truncated");
+        assert!(msg.contains('…'), "msg: {msg}");
     }
 
     #[tokio::test]

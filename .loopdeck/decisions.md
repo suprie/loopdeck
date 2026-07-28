@@ -3,12 +3,6 @@
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
 
-## 2026-07-27 — Bound graceful Codex interruption and replace wedged children
-
-- **Status**: accepted
-- **Context**: Removing the false active-turn stdout timeout correctly allowed long silent tools, but exposed a distinct failure mode: a genuinely wedged app-server could ignore `turn/interrupt`. LoopDeck then waited indefinitely for `turn/completed`, leaving the per-project mutex and UI stuck on “Agent is working” even after Stop was pressed.
-- **Consequences**: Once Stop is requested, Codex gets a 15-second grace period to complete the interrupted turn. If the deadline expires, LoopDeck closes stdin, terminates the child, returns a specific harness error, and clears the normal turn/interaction state through the existing error path. The dead session reports itself unusable; `with_session` replaces an idle unusable Codex cache entry on the next send while still preserving any currently locked in-flight session. Active turns remain unbounded before Stop, so legitimate long-running silent tools are not reclassified as stuck.
-
 ## 2026-07-27 — Provider boundary returns evidence, not derived status
 
 - **Status**: accepted
@@ -91,3 +85,10 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: `loopdeck-open-pr`'s Phase 7 appends `- [ ] Review & merge: <url>` to `.loopdeck/loops.md`'s `## Next Steps` as a human bookkeeping reminder. `next_unchecked_loop_step` (`commands/agent.rs`) treated every `- [ ]` line in that section as equally actionable, so after a user merged a PR and pulled, "Start next loop" picked the still-unchecked merge reminder and told the agent to "implement" it — the agent's only compliant move was to check the box, which read to the user as the app silently marking a real task done instead of starting new work.
 - **Consequences**: `next_unchecked_loop_step` now skips any `- [ ] Review & merge:` line (case-insensitive prefix match) and keeps scanning for the next real step; if only reminders remain it falls through to the existing "propose the next loop" prompt instead of fabricating work. Fix is scoped to the one function with the false positive — did not touch `loopdeck-open-pr`'s insertion behavior, since the reminder itself is still useful for a human. Flagged as a background task: the distinction is still a hardcoded string match rather than part of the `loops.md` format itself, so a future skill adding a different non-actionable reminder type would reproduce the same bug class.
+
+## 2026-07-28 — `prd-run-queue` Phase 4: stalls only detectable via streaming + `TURN_DEADLINE`, not interrupted early
+
+- **Status**: accepted
+- **Context**: Detecting a mid-run `AskUserQuestion`/permission/plan stall requires the executor's phase turns to run through the streaming pipeline (the non-streaming path auto-denies these cards instead of parking), and `claude_session.rs`'s park site can't be cancelled early — it isn't selected against any interrupt once entered, only against its own 30-minute `TURN_DEADLINE` backstop.
+- **Consequences**: `execute_run` now sends each phase via `start_fresh_and_record_streaming` with a no-op sink channel and catches the new `AppError::TurnParked` (fired at `TURN_DEADLINE`) to mark the phase `Parked` instead of `Failed`; a pure `run_executor::phases_blocked_by_park` then applies the plan's `StallPolicy` to the remaining `Queued` phases. A stall is unavoidably a ~30-minute-worst-case cost per phase in this codebase's current single-session-per-project architecture — shortening it needs a session-model change out of this PRD's sequencing/state scope.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-07-28 `prd-run-queue` Phase 4 entry) has the full file/symbol breakdown.

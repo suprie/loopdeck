@@ -42,6 +42,15 @@ pub enum AppError {
     #[error("Agent error: {0}")]
     Agent(String),
 
+    /// A turn ended because it was parked on an unanswered `AskUserQuestion` /
+    /// manual-approval / plan-approval card past `TURN_DEADLINE`, not because
+    /// of a transport/child failure. Distinct from `Agent` so callers driving
+    /// unattended runs (`prd-run-queue`'s executor) can tell "nobody was there
+    /// to answer" apart from a genuine turn failure — the former parks the
+    /// phase and moves on; the latter fails it.
+    #[error("Turn parked: {0}")]
+    TurnParked(String),
+
     #[error("Background task failed: {0}")]
     BlockingTask(String),
 
@@ -73,6 +82,7 @@ impl Serialize for AppError {
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
                 AppError::Conflict(_) => "conflict",
                 AppError::Agent(_) => "agent",
+                AppError::TurnParked(_) => "turnParked",
                 AppError::BlockingTask(_) => "blockingTask",
                 AppError::Limit(_) => "limit",
             },
