@@ -98,11 +98,11 @@ Directional; refine during implementation.
 
 ### Phase 2 — Queue executor
 
-- [ ] Add a sequential executor task that spawns one orchestrated session per queued phase via the existing `claude_session` spawn path
-- [ ] Advance the queue only on a green verify verdict; record per-phase transitions into `execution.yaml`
-- [ ] Reuse `retry.rs` backoff for transient gateway failures inside a phase
-- [ ] Make the queue resumable: on app restart, reload the plan and mark previously `running` phases `interrupted` for requeue
-- [ ] IPC commands `queue_run` / `cancel_run` / `get_run_status` plus TS wrappers and types
+- [x] Add a sequential executor task that spawns one orchestrated session per queued phase via the existing `claude_session` spawn path (2026-07-28) — `commands/run_queue.rs::execute_run` calls the (now `pub(crate)`) `commands::agent::start_fresh_and_record` per phase, in the plan's authored `Vec<RunPhase>` order; `queue_run` spawns it via `tokio::spawn` off a cloned `AppHandle` so the IPC call returns immediately
+- [x] Advance the queue only on a green verify verdict; record per-phase transitions into `execution.yaml` (2026-07-28) — `run_executor::extract_verdict` greps the turn's final `AgentResponse.result` for `loopdeck-prd-verifier`'s `**Verdict:** PASS|WARN|BLOCK` line (last occurrence, so the skill's own explanatory text can't be mistaken for the roll-up); only `PASS` marks the phase `Completed` and calls `ExecutionState::complete_current`. `WARN`/`BLOCK`/no-verdict/a turn error all mark the phase `Failed` (with the reason in `park_payload`), call `ExecutionState::abandon_current`, and stop the run — Phase 2 has no stall-vs-failure distinction yet (Phase 4), so a non-green result is treated as a hard stop, not a skip-ahead
+- [x] Reuse `retry.rs` backoff for transient gateway failures inside a phase (2026-07-28) — free: `start_fresh_and_record`'s existing `send_with_retry` (already used by human-initiated "Start Loop") already wraps every turn in `retry.rs`'s 529-overload backoff; reusing that function for phase turns means this item needed no new code
+- [x] Make the queue resumable: on app restart, reload the plan and mark previously `running` phases `interrupted` for requeue (2026-07-28) — `run_executor::reconcile_running_phases`, called from `lib.rs`'s startup loop (mirroring the existing `conversation::reconcile_interrupted` per-project pass) and defensively again in `queue_run`/`get_run_status` when no in-memory `RunHandle` exists for the project
+- [x] IPC commands `queue_run` / `cancel_run` / `get_run_status` plus TS wrappers and types (2026-07-28) — `commands/run_queue.rs` (registered in `lib.rs`); `cancel_run` fires the run's cancel flag *and* the project's existing interrupt slot (`commands::state::fire_interrupt`, extracted from `agent_interrupt` so both share one implementation) so cancellation doesn't wait for the in-flight turn to finish on its own. TS: `RunPlan`/`RunPhase`/`RunPhaseStatus`/`StallPolicy`/`PinnedAnswer`/`RunConsent`/`RunBudgets` in `types/index.ts`, `queueRun`/`cancelRun`/`getRunStatus` in `lib/tauri.ts`
 
 ### Phase 3 — Pre-flight interview
 

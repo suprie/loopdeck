@@ -343,6 +343,73 @@ export interface MigrationPreview {
   loops_md_present: boolean;
 }
 
+// ── Run queue (prd-run-queue Phase 1-2) ────────────────────────────────────
+// Mirrors `src-tauri/src/runplan.rs`. The on-disk shape of
+// `.loopdeck/run-plan.yaml`, driven by the sequential executor
+// (`commands::run_queue`).
+
+/** serde `rename_all = "snake_case"`. What happens to the rest of the queue
+ * when a phase parks mid-run. Chosen once, at queue time. */
+export type StallPolicy = "continue_independent" | "halt";
+
+/** serde `rename_all = "lowercase"`. Where a queued phase is in the run. */
+export type RunPhaseStatus =
+  | "queued"
+  | "running"
+  | "parked"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "killed";
+
+/** A pre-flight clarifying question and its answer, pinned into the plan
+ * before the run starts and injected into the phase's session prompt. */
+export interface PinnedAnswer {
+  question: string;
+  answer: string;
+}
+
+/** Queue-time consent for the whole run. LoopDeck never asks again once the
+ * run starts. */
+export interface RunConsent {
+  draft_pr_authorized: boolean;
+}
+
+/** Hard budget caps for the run. All optional: `undefined` means "use the
+ * unattended-ship default," not "unbounded" — this module only records the
+ * values it was queued with. */
+export interface RunBudgets {
+  per_phase_token_cap?: number;
+  per_phase_wall_clock_secs?: number;
+  total_run_wall_clock_secs?: number;
+}
+
+/** One queued phase, joined to the spec/execution layer by its stable
+ * execution ID (never a free-text phase name). */
+export interface RunPhase {
+  execution_id: string;
+  status: RunPhaseStatus;
+  interview: PinnedAnswer[];
+  /** Other phases in this plan (by `execution_id`) that must complete before
+   * this one is eligible under `continue_independent`. */
+  depends_on: string[];
+  /** Set when `status` is `parked` (Phase 4) or `failed` (Phase 2: the
+   * non-green verdict or turn error) — the reason shown in the morning
+   * report. */
+  park_payload?: string;
+}
+
+/** The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`. */
+export interface RunPlan {
+  id: string;
+  project: string;
+  created: string;
+  consent: RunConsent;
+  budgets: RunBudgets;
+  stall_policy: StallPolicy;
+  phases: RunPhase[];
+}
+
 /**
  * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
  * Mirrors Rust `Epic` in epic.rs.

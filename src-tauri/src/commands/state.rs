@@ -23,6 +23,7 @@ use crate::error::AppError;
 use crate::harness::HarnessSession;
 use crate::paths;
 use crate::permission::PermissionPolicy;
+use crate::run_executor::RunHandle;
 use crate::secrets;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,6 +62,32 @@ pub struct AppState {
     /// writes the `interrupt` control_request, ending the turn while keeping
     /// the live process (and its context) alive.
     pub interrupt_slots: Mutex<HashMap<PathBuf, InterruptSlot>>,
+    /// Per-project handle for an in-progress queued run (`prd-run-queue`
+    /// Phase 2). Presence of a key is the "a run is active" signal `queue_run`
+    /// checks before starting another; the executor task removes its own
+    /// entry when the run ends (completed, failed, or cancelled). Separate
+    /// from `run-plan.yaml`'s on-disk phase statuses, which is the source of
+    /// truth for *what happened*; this map only tracks *whether a live task
+    /// is driving it right now*, so a restart (no entry, ever) is
+    /// distinguishable from a still-running process.
+    pub run_handles: Mutex<HashMap<PathBuf, RunHandle>>,
+}
+
+/// Pop and fire the interrupt sender for `path`, if a turn is in flight.
+/// Shared by `agent_interrupt` (user-initiated Stop) and `cancel_run`
+/// (`prd-run-queue` Phase 2) — same mechanism, two initiators. Returns
+/// whether a live turn was actually interrupted (vs. a no-op when the slot
+/// was empty).
+pub(crate) fn fire_interrupt(state: &AppState, path: &Path) -> Result<bool, AppError> {
+    let guard = state
+        .interrupt_slots
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(guard
+        .get(path)
+        .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+        .map(|sender| sender.send(()).is_ok())
+        .unwrap_or(false))
 }
 
 /// A single child entry of a project directory, for the chat composer's
@@ -447,6 +474,7 @@ mod tests {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
+            run_handles: Mutex::new(HashMap::new()),
         }
     }
 
