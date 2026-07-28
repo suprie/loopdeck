@@ -21,6 +21,7 @@ mod persist;
 mod progress;
 mod project;
 pub mod retry;
+mod runplan;
 mod scanner;
 mod secrets;
 mod skills;

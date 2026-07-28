@@ -1,1 +1,1 @@
-Derived progress UI (0.2.1 Phase 5/6) — per-loop badges, PRD/epic progress, Markdown export
+prd-run-queue Phase 1 done (RunPlan data model) — Phase 2 (queue executor) next
