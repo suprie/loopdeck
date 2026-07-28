@@ -194,3 +194,13 @@ pub fn run() {
         std::process::exit(1);
     }
 }
+
+// Deliberate clippy violation for CI-gate smoke test (prd-safety-prereqs Phase 3).
+// This branch is never merged.
+#[allow(dead_code)]
+fn throwaway_ci_smoke_check(flag: bool) -> bool {
+    if flag == true {
+        return true;
+    }
+    return false;
+}
