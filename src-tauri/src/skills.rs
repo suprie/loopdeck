@@ -40,6 +40,8 @@ const HOOK_STOP_PY: &str = include_str!("../../templates/hooks/loopdeck-stop-hoo
 const HOOK_MEMORY_WRITE_SH: &str = include_str!("../../templates/hooks/loopdeck-memory-write.sh");
 const HOOK_ORCHESTRATOR_START_PY: &str =
     include_str!("../../templates/hooks/orchestrator-start.py");
+const HOOK_DECISIONS_CAP_PY: &str = include_str!("../../templates/hooks/loopdeck-decisions-cap.py");
+const HOOK_DIRTY_FLAG_PY: &str = include_str!("../../templates/hooks/loopdeck-dirty-flag.py");
 
 // ── Skill name constants (directory names) ──
 
@@ -323,11 +325,13 @@ fn copy_skills_with_version(
 ///
 /// # Hook entries created
 ///
-/// | Event      | Command                                              | Matcher  |
-/// |------------|------------------------------------------------------|----------|
-/// | Stop       | `python3 .loopdeck/hooks/loopdeck-stop-hook.py`       | (none)   |
-/// | Stop       | `bash .loopdeck/hooks/loopdeck-memory-write.sh`       | (none)   |
-/// | PreToolUse | `python3 .loopdeck/hooks/orchestrator-start.py`       | `Skill`  |
+/// | Event       | Command                                              | Matcher                |
+/// |-------------|-------------------------------------------------------|------------------------|
+/// | Stop        | `python3 .loopdeck/hooks/loopdeck-stop-hook.py`        | (none)                 |
+/// | Stop        | `bash .loopdeck/hooks/loopdeck-memory-write.sh`        | (none)                 |
+/// | PreToolUse  | `python3 .loopdeck/hooks/orchestrator-start.py`        | `Skill`                |
+/// | PreToolUse  | `python3 .loopdeck/hooks/loopdeck-dirty-flag.py`       | `Edit\|Write\|MultiEdit\|NotebookEdit` |
+/// | PostToolUse | `python3 .loopdeck/hooks/loopdeck-decisions-cap.py`    | `Edit\|Write\|MultiEdit` |
 ///
 /// # Deduplication
 ///
@@ -356,6 +360,16 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
     let orchestrator_path = loopdeck_hooks_dir.join("orchestrator-start.py");
     if !orchestrator_path.exists() {
         std::fs::write(&orchestrator_path, HOOK_ORCHESTRATOR_START_PY)?;
+    }
+
+    let decisions_cap_path = loopdeck_hooks_dir.join("loopdeck-decisions-cap.py");
+    if !decisions_cap_path.exists() {
+        std::fs::write(&decisions_cap_path, HOOK_DECISIONS_CAP_PY)?;
+    }
+
+    let dirty_flag_path = loopdeck_hooks_dir.join("loopdeck-dirty-flag.py");
+    if !dirty_flag_path.exists() {
+        std::fs::write(&dirty_flag_path, HOOK_DIRTY_FLAG_PY)?;
     }
 
     // ── Build / update .claude/settings.json ──
@@ -428,6 +442,64 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
                         inner.push(serde_json::json!({
                             "type": "command",
                             "command": orch_cmd
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── PreToolUse hook (matcher: "Edit|Write|MultiEdit|NotebookEdit") ──
+    // Creates .claude/.session-dirty so the Stop hook's memory nudge fires.
+    // Without this, loopdeck-stop-hook.py's DIRTY_FILE check is always
+    // false and the reminder never emits — see loopdeck-stop-hook.py's
+    // module docstring for the full gating chain.
+
+    {
+        let hooks = &mut root["hooks"];
+
+        let group_idx = find_or_create_matcher_group(
+            &mut hooks["PreToolUse"],
+            "Edit|Write|MultiEdit|NotebookEdit",
+        );
+
+        let dirty_cmd = "python3 .loopdeck/hooks/loopdeck-dirty-flag.py";
+
+        if let Some(arr) = hooks["PreToolUse"].as_array_mut() {
+            if let Some(group) = arr.get_mut(group_idx) {
+                if !hook_command_exists_in_group(group, dirty_cmd) {
+                    if let Some(inner) = group["hooks"].as_array_mut() {
+                        inner.push(serde_json::json!({
+                            "type": "command",
+                            "command": dirty_cmd
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── PostToolUse hook (matcher: "Edit|Write|MultiEdit") ──
+
+    {
+        let hooks = &mut root["hooks"];
+
+        if hooks.get("PostToolUse").is_none() {
+            hooks["PostToolUse"] = serde_json::json!([]);
+        }
+
+        let group_idx =
+            find_or_create_matcher_group(&mut hooks["PostToolUse"], "Edit|Write|MultiEdit");
+
+        let cap_cmd = "python3 .loopdeck/hooks/loopdeck-decisions-cap.py";
+
+        if let Some(arr) = hooks["PostToolUse"].as_array_mut() {
+            if let Some(group) = arr.get_mut(group_idx) {
+                if !hook_command_exists_in_group(group, cap_cmd) {
+                    if let Some(inner) = group["hooks"].as_array_mut() {
+                        inner.push(serde_json::json!({
+                            "type": "command",
+                            "command": cap_cmd
                         }));
                     }
                 }
@@ -910,9 +982,8 @@ mod tests {
             assert_eq!(h["type"].as_str().unwrap(), "command");
         }
 
-        // Check PreToolUse hook — one matcher group with matcher "Skill"
+        // Check PreToolUse hooks — two matcher groups: "Skill" and the dirty-flag one
         let ptuse_groups = root["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(ptuse_groups.len(), 1);
         assert_eq!(ptuse_groups[0]["matcher"].as_str().unwrap(), "Skill");
         let ptuse_hooks = ptuse_groups[0]["hooks"].as_array().unwrap();
         assert_eq!(ptuse_hooks.len(), 1);
@@ -921,6 +992,34 @@ mod tests {
             "python3 .loopdeck/hooks/orchestrator-start.py"
         );
         assert_eq!(ptuse_hooks[0]["type"].as_str().unwrap(), "command");
+
+        // Check the dirty-flag PreToolUse group — second matcher group
+        assert_eq!(ptuse_groups.len(), 2);
+        assert_eq!(
+            ptuse_groups[1]["matcher"].as_str().unwrap(),
+            "Edit|Write|MultiEdit|NotebookEdit"
+        );
+        let dirty_hooks = ptuse_groups[1]["hooks"].as_array().unwrap();
+        assert_eq!(dirty_hooks.len(), 1);
+        assert_eq!(
+            dirty_hooks[0]["command"].as_str().unwrap(),
+            "python3 .loopdeck/hooks/loopdeck-dirty-flag.py"
+        );
+
+        // Check PostToolUse hook — one matcher group with matcher "Edit|Write|MultiEdit"
+        let ptu_groups = root["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu_groups.len(), 1);
+        assert_eq!(
+            ptu_groups[0]["matcher"].as_str().unwrap(),
+            "Edit|Write|MultiEdit"
+        );
+        let ptu_hooks = ptu_groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(ptu_hooks.len(), 1);
+        assert_eq!(
+            ptu_hooks[0]["command"].as_str().unwrap(),
+            "python3 .loopdeck/hooks/loopdeck-decisions-cap.py"
+        );
+        assert_eq!(ptu_hooks[0]["type"].as_str().unwrap(), "command");
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -943,10 +1042,16 @@ mod tests {
         assert_eq!(stop_groups.len(), 1);
         assert_eq!(stop_groups[0]["hooks"].as_array().unwrap().len(), 2);
 
-        // Still only 1 PreToolUse matcher group with 1 hook
+        // Still only 2 PreToolUse matcher groups, 1 hook each
         let ptuse_groups = root["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(ptuse_groups.len(), 1);
+        assert_eq!(ptuse_groups.len(), 2);
         assert_eq!(ptuse_groups[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(ptuse_groups[1]["hooks"].as_array().unwrap().len(), 1);
+
+        // Still only 1 PostToolUse matcher group with 1 hook
+        let ptu_groups = root["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu_groups.len(), 1);
+        assert_eq!(ptu_groups[0]["hooks"].as_array().unwrap().len(), 1);
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1152,6 +1257,16 @@ mod tests {
         assert!(orch_py.exists());
         let orch_content = fs::read_to_string(&orch_py).unwrap();
         assert!(orch_content.contains("orchestrator-start hook"));
+
+        let cap_py = hooks_dir.join("loopdeck-decisions-cap.py");
+        assert!(cap_py.exists());
+        let cap_content = fs::read_to_string(&cap_py).unwrap();
+        assert!(cap_content.contains("decisions.md live-entry cap"));
+
+        let dirty_py = hooks_dir.join("loopdeck-dirty-flag.py");
+        assert!(dirty_py.exists());
+        let dirty_content = fs::read_to_string(&dirty_py).unwrap();
+        assert!(dirty_content.contains("marks the session as dirty"));
 
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -1,0 +1,1 @@
+../../templates/hooks/loopdeck-decisions-cap.py
