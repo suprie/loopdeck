@@ -23,6 +23,7 @@ use crate::error::AppError;
 use crate::harness::HarnessSession;
 use crate::paths;
 use crate::permission::PermissionPolicy;
+use crate::run_executor::RunHandle;
 use crate::secrets;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
