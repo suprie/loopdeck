@@ -1,5 +1,17 @@
 # Decisions Archive
 
+## 2026-07-26 — Bound Codex initialization, not active-turn silence
+
+- **Status**: accepted
+- **Context**: The Codex app-server adapter applied a 300-second timeout to every stdout read. A healthy agent can emit no JSONL while a long-running tool executes, so the adapter falsely reported “Codex produced no stdout … assuming stuck”; the generic error reconciliation then appended a misleading `process_exited` interruption marker.
+- **Consequences**: The 300-second bound now applies only while waiting for initialization, thread start/resume, and turn-acceptance responses. Once a turn is accepted, stdout reads are unbounded because protocol silence is not proof of a hang; EOF still detects an exited child, and the existing interrupt channel keeps Stop responsive. This prevents the false timeout and its derived interruption marker without allowing a broken handshake to wait forever.
+
+## 2026-07-26 — Coalesce Codex stream deltas at persistence and render boundaries
+
+- **Status**: accepted
+- **Context**: Codex app-server emits assistant text in token-sized deltas. Live state coalesced adjacent deltas, but `CodexSession` persisted every delta as a separate `ContentBlockRecord`; after reload, `BlockList` rendered each record through a block-level Markdown component, producing one word or token per line.
+- **Consequences**: The Codex adapter now merges adjacent text and adjacent thinking deltas before persistence, while tool calls and content-type changes remain ordering boundaries. The frontend also coalesces adjacent prose blocks before rendering, repairing existing fragmented transcripts in memory without rewriting historical JSONL files. New transcripts stay compact and old transcripts display correctly.
+
 ## 2026-06-22 — Use Tauri v2 for desktop shell
 - **Status**: accepted
 - **Context**: We needed a cross-platform desktop shell for LoopDeck. Electron was the default, but bundle size and the need for a performant filesystem scanner pushed us to evaluate alternatives.

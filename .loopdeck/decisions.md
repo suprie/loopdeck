@@ -3,18 +3,6 @@
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
 
-## 2026-07-26 — Bound Codex initialization, not active-turn silence
-
-- **Status**: accepted
-- **Context**: The Codex app-server adapter applied a 300-second timeout to every stdout read. A healthy agent can emit no JSONL while a long-running tool executes, so the adapter falsely reported “Codex produced no stdout … assuming stuck”; the generic error reconciliation then appended a misleading `process_exited` interruption marker.
-- **Consequences**: The 300-second bound now applies only while waiting for initialization, thread start/resume, and turn-acceptance responses. Once a turn is accepted, stdout reads are unbounded because protocol silence is not proof of a hang; EOF still detects an exited child, and the existing interrupt channel keeps Stop responsive. This prevents the false timeout and its derived interruption marker without allowing a broken handshake to wait forever.
-
-## 2026-07-26 — Coalesce Codex stream deltas at persistence and render boundaries
-
-- **Status**: accepted
-- **Context**: Codex app-server emits assistant text in token-sized deltas. Live state coalesced adjacent deltas, but `CodexSession` persisted every delta as a separate `ContentBlockRecord`; after reload, `BlockList` rendered each record through a block-level Markdown component, producing one word or token per line.
-- **Consequences**: The Codex adapter now merges adjacent text and adjacent thinking deltas before persistence, while tool calls and content-type changes remain ordering boundaries. The frontend also coalesces adjacent prose blocks before rendering, repairing existing fragmented transcripts in memory without rewriting historical JSONL files. New transcripts stay compact and old transcripts display correctly.
-
 ## 2026-07-26 — Install and discover skills per agent harness
 
 - **Status**: accepted
@@ -90,3 +78,9 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: The PRD's Design section left the executor's session-spawn mechanics and its relationship to `commands::agent`'s existing turn pipeline as an open implementation question, and left non-green-verdict handling (continue vs. stop) unspecified pending Phase 4's stall-policy runtime.
 - **Consequences**: `commands/run_queue.rs::execute_run` drives each queued phase through `commands::agent::start_fresh_and_record` (widened to `pub(crate)`) — the same spawn/retry/transcript pipeline a human "Start Loop" click uses — rather than a parallel implementation, so `retry.rs` backoff came for free. A non-green verdict (WARN/BLOCK/none) or turn error marks the phase `Failed` and stops the run entirely rather than skipping to the next phase, since without Phase 4's stall-vs-failure distinction a later phase could build on a dependency that never actually finished; `depends_on` is recorded but not yet consulted (Phase 2 runs the plan's authored vec order).
 - **Detail**: `.loopdeck/loops.md` `## Current` (2026-07-28 `prd-run-queue` Phase 2 entry) has the full file/symbol breakdown.
+
+## 2026-07-28 — Two independent sessions built the same `prd-run-queue` Phase 2; kept #29, closed #30, fixed one bug it left behind
+- **Status**: accepted
+- **Context**: A separate parallel session (this same repo, worktree `worktree-prd-run-queue-phase2`) and this session both independently implemented `prd-run-queue` Phase 2 from cold, unaware of each other — same PRD, same file list (`run_executor.rs`, `commands/run_queue.rs`). #29 merged to `main` first; this session's PR #30 (branched before #29 merged) then failed CI on genuine symbol conflicts against the now-updated `main`, surfacing the collision.
+- **Consequences**: Compared both implementations line-by-line rather than blindly rebasing. #29 was stronger — truly async `queue_run` via `tokio::spawn`/`AppHandle` (doesn't block the IPC call for the run's full duration), correctly clears `execution.yaml`'s `current` via `abandon_current` on a failed/non-PASS phase, extra pre-flight guards (no queued phases / a loop already current), and a prompt that tells the agent it's an unattended run and to respect `RunConsent.draft_pr_authorized`. #30 had a real bug (never cleared `current` on failure, permanently blocking future promotes) and a blocking `queue_run`. Closed #30 unmerged with the comparison recorded in the closing comment; no code from #30 was merged. Separately found and fixed (PR #31) that #29's `cancel_run` doc comment overclaimed a mid-turn interrupt — `fire_interrupt` fires `interrupt_slots`, but the executor's `start_fresh_and_record` → `send_message` path discards its `InterruptSlot` param, so cancellation only takes effect between phases, same as #30's version; doc-only fix, no behavior change.
+- **Detail**: Two sessions on the same repo/PRD without either aware of the other is a coordination gap worth naming for next time — worth checking `git log origin/main` / open PRs for the target PRD before starting a loop already "in progress," not just `.loopdeck/loops.md`'s own `## Current`, which can lag a concurrent session's merge.
