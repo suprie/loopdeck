@@ -13,6 +13,13 @@
 
 set -euo pipefail
 
+# Codex parses every Stop-command's stdout as one JSON hook response. Keep the
+# memory fallback silent apart from this response, including its no-op paths.
+emit_stop_response() {
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"Stop"}}'
+}
+trap emit_stop_response EXIT
+
 # Gate: only fire in LoopDeck-tracked projects
 LOOPDECK_DIR=".loopdeck"
 if [ ! -d "$LOOPDECK_DIR" ]; then
@@ -62,5 +69,3 @@ if ! grep -q "^## $TODAY" "$DECISIONS_FILE"; then
     echo ""
   } >> "$DECISIONS_FILE"
 fi
-
-echo "LoopDeck memory files checked: $TODAY"

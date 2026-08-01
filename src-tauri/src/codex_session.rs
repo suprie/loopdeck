@@ -160,14 +160,7 @@ impl CodexSession {
         self.write_message(json!({
             "method": "initialize",
             "id": initialize_id,
-            "params": {
-                "clientInfo": {
-                    "name": "loopdeck",
-                    "title": "LoopDeck",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": { "experimentalApi": true }
-            }
+            "params": initialize_params()
         }))
         .await?;
         self.write_message(json!({"method": "initialized", "params": {}}))
@@ -927,6 +920,22 @@ fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     }
 }
 
+/// Build the app-server capability contract advertised by LoopDeck.
+///
+/// Code Mode's client-hosted dynamic tools are experimental. LoopDeck does
+/// not provide their JavaScript runtime, so opting in can leave a turn waiting
+/// for a tool result that it cannot produce.
+fn initialize_params() -> Value {
+    json!({
+        "clientInfo": {
+            "name": "loopdeck",
+            "title": "LoopDeck",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "capabilities": { "experimentalApi": false }
+    })
+}
+
 /// Build the per-turn security boundary and optional model overrides.
 ///
 /// `readOnly` is intentional even for autonomous projects. It makes Codex
@@ -1105,6 +1114,14 @@ mod tests {
     fn request_ids_preserve_strings_and_numbers() {
         assert_eq!(display_request_id(&json!("req-1")), "req-1");
         assert_eq!(display_request_id(&json!(42)), "42");
+    }
+
+    #[test]
+    fn initialize_does_not_opt_into_unsupported_experimental_api() {
+        let params = initialize_params();
+
+        assert_eq!(params["clientInfo"]["name"], "loopdeck");
+        assert_eq!(params["capabilities"]["experimentalApi"], false);
     }
 
     #[test]
