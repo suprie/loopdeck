@@ -18,8 +18,10 @@ use crate::error::AppError;
 use crate::permission::{Decision, PermissionPolicy};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child as StdChild, Command as StdCommand, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -34,9 +36,17 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// A graceful Stop should complete quickly. If app-server itself is wedged,
 /// waiting forever would leave the project locked in "Agent is working".
 const INTERRUPT_GRACE_TIMEOUT: Duration = Duration::from_secs(15);
+/// The official Code Mode sidecar publishes its ephemeral localhost endpoint
+/// on stdout before accepting the app-server connection.
+const CODE_MODE_HOST_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// Tool arguments are diagnostic data and can be large (notably Code Mode
+/// JavaScript cells). Keep logs useful without allowing a single request to
+/// consume an unbounded amount of the rolling application log.
+const CODEX_TOOL_LOG_MAX_CHARS: usize = 8_192;
 
 pub struct CodexSession {
     child: Option<Child>,
+    code_mode_host: Option<StdChild>,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     stderr_drain: Option<JoinHandle<()>>,
@@ -66,9 +76,14 @@ impl CodexSession {
             "spawning Codex app-server harness"
         );
 
+        let (code_mode_host, code_mode_host_url) = spawn_code_mode_host(binary)?;
         let mut command = Command::new(binary);
         command
             .arg("app-server")
+            .arg("--enable")
+            .arg("code_mode_host")
+            .arg("--code-mode-host")
+            .arg(&code_mode_host_url)
             .arg("--listen")
             .arg("stdio://")
             .current_dir(cwd)
@@ -77,9 +92,16 @@ impl CodexSession {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| AppError::Agent(format!("failed to start Codex app-server: {e}")))?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let mut code_mode_host = code_mode_host;
+                terminate_code_mode_host(&mut code_mode_host);
+                return Err(AppError::Agent(format!(
+                    "failed to start Codex app-server: {error}"
+                )));
+            }
+        };
         let stdin = child
             .stdin
             .take()
@@ -101,6 +123,7 @@ impl CodexSession {
 
         Ok(Self {
             child: Some(child),
+            code_mode_host: Some(code_mode_host),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
@@ -406,6 +429,9 @@ impl CodexSession {
                 }
                 "item/started" => {
                     if let Some(item) = params.get("item") {
+                        if item.get("type").and_then(Value::as_str) == Some("dynamicToolCall") {
+                            log_dynamic_tool_call("started", item);
+                        }
                         if let Some((name, input)) = tool_from_item(item) {
                             if let Some(item_id) = item.get("id").and_then(Value::as_str) {
                                 item_tools
@@ -591,6 +617,35 @@ impl CodexSession {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
         match method {
+            "item/tool/call" => {
+                let tool = params.get("tool").and_then(Value::as_str).unwrap_or("Tool");
+                let arguments = params
+                    .get("arguments")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "null".into());
+                let call_id = params
+                    .get("callId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                tracing::info!(
+                    target: "loopdeck::codex",
+                    tool,
+                    call_id,
+                    arguments = %truncate_log_value(&arguments),
+                    "Codex dynamic tool call requested"
+                );
+                // Code Mode's host currently owns execution. This response is
+                // retained as a truthful fallback for client-declared dynamic
+                // tools that LoopDeck has not registered.
+                self.write_message(json!({
+                    "id": id,
+                    "error": {
+                        "code": -32601,
+                        "message": "LoopDeck does not implement client-declared dynamic tools"
+                    }
+                }))
+                .await?;
+            }
             "item/tool/requestUserInput" => {
                 let questions = codex_questions(&params);
                 let (sender, receiver) = oneshot::channel::<QuestionAnswers>();
@@ -828,6 +883,9 @@ impl CodexSession {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
         }
+        if let Some(mut host) = self.code_mode_host.take() {
+            terminate_code_mode_host(&mut host);
+        }
         self.initialized = false;
     }
 }
@@ -841,7 +899,164 @@ impl Drop for CodexSession {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
         }
+        if let Some(mut host) = self.code_mode_host.take() {
+            terminate_code_mode_host(&mut host);
+        }
     }
+}
+
+/// Launch Codex's bundled V8 host explicitly instead of relying on the
+/// app-server's implicit sibling-binary lookup. The host executes Code Mode
+/// cells and delegates nested `tools.*` calls to Codex's normal executor.
+fn spawn_code_mode_host(codex_binary: &Path) -> Result<(StdChild, String), AppError> {
+    let binary = code_mode_host_binary(codex_binary)?;
+    let mut child = StdCommand::new(&binary)
+        .arg("--listen")
+        .arg("ws://127.0.0.1:0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            AppError::Agent(format!("failed to start Codex Code Mode host: {error}"))
+        })?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate_code_mode_host(&mut child);
+        return Err(AppError::Agent(
+            "Codex Code Mode host stdout unavailable".into(),
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_code_mode_host(&mut child);
+        return Err(AppError::Agent(
+            "Codex Code Mode host stderr unavailable".into(),
+        ));
+    };
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            tracing::debug!(target: "loopdeck::codex_code_mode", "{line}");
+        }
+    });
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .map(|_| line.trim().to_owned());
+        let _ = sender.send(result);
+    });
+    let endpoint = match receiver.recv_timeout(CODE_MODE_HOST_START_TIMEOUT) {
+        Ok(Ok(endpoint)) => endpoint,
+        Ok(Err(error)) => {
+            terminate_code_mode_host(&mut child);
+            return Err(AppError::Agent(format!(
+                "failed to read Codex Code Mode endpoint: {error}"
+            )));
+        }
+        Err(_) => {
+            terminate_code_mode_host(&mut child);
+            return Err(AppError::Agent(
+                "Codex Code Mode host did not publish an endpoint within 5s".into(),
+            ));
+        }
+    };
+    if !endpoint.starts_with("ws://127.0.0.1:") {
+        terminate_code_mode_host(&mut child);
+        return Err(AppError::Agent(format!(
+            "Codex Code Mode host published an unsafe endpoint: {endpoint}"
+        )));
+    }
+    Ok((child, endpoint))
+}
+
+fn terminate_code_mode_host(child: &mut StdChild) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn code_mode_host_binary(codex_binary: &Path) -> Result<PathBuf, AppError> {
+    // `binary::codex()` deliberately returns the vetted PATH entry, which can
+    // be a symlink such as `/usr/local/bin/codex`. Follow it before searching
+    // npm's package layout for the bundled sidecar.
+    let codex_binary = std::fs::canonicalize(codex_binary).map_err(|error| {
+        AppError::Agent(format!(
+            "cannot resolve Codex binary {}: {error}",
+            codex_binary.display()
+        ))
+    })?;
+    let host_name = if cfg!(windows) {
+        "codex-code-mode-host.exe"
+    } else {
+        "codex-code-mode-host"
+    };
+    let sibling = codex_binary.parent().map(|dir| dir.join(host_name));
+    if let Some(path) = sibling.filter(|path| path.is_file()) {
+        return Ok(path);
+    }
+    // npm's public `codex` executable is a Node launcher. Its native binary
+    // and the sidecar live in its optional platform package beneath this root.
+    let Some(package_root) = codex_binary.parent().and_then(Path::parent) else {
+        return Err(AppError::Agent("cannot locate Codex package root".into()));
+    };
+    let packages = package_root.join("node_modules").join("@openai");
+    let entries = std::fs::read_dir(&packages).map_err(|error| {
+        AppError::Agent(format!(
+            "cannot locate Codex Code Mode host near {}: {error}",
+            codex_binary.display()
+        ))
+    })?;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("codex-") {
+            continue;
+        }
+        let vendor = entry.path().join("vendor");
+        let Ok(targets) = std::fs::read_dir(vendor) else {
+            continue;
+        };
+        for target in targets.flatten() {
+            let candidate = target.path().join("bin").join(host_name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(AppError::Agent(format!(
+        "Codex Code Mode host is not installed beside {}",
+        codex_binary.display()
+    )))
+}
+
+fn log_dynamic_tool_call(phase: &str, item: &Value) {
+    let tool = item.get("tool").and_then(Value::as_str).unwrap_or("Tool");
+    let arguments = item
+        .get("arguments")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "null".into());
+    let item_id = item.get("id").and_then(Value::as_str).unwrap_or("unknown");
+    tracing::info!(
+        target: "loopdeck::codex",
+        phase,
+        tool,
+        item_id,
+        arguments = %truncate_log_value(&arguments),
+        "Codex dynamic tool call"
+    );
+}
+
+fn truncate_log_value(value: &str) -> String {
+    if value.len() <= CODEX_TOOL_LOG_MAX_CHARS {
+        return value.to_owned();
+    }
+    let mut end = CODEX_TOOL_LOG_MAX_CHARS;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}… [truncated after {CODEX_TOOL_LOG_MAX_CHARS} chars]",
+        &value[..end]
+    )
 }
 
 /// Preserve semantic block ordering without persisting one block per streamed
@@ -1165,6 +1380,57 @@ mod tests {
 
         assert_eq!(params["clientInfo"]["name"], "loopdeck");
         assert_eq!(params["capabilities"]["experimentalApi"], false);
+    }
+
+    #[test]
+    fn finds_code_mode_host_beside_native_codex_binary() {
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-codex-host-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let codex = dir.join("codex");
+        let host = dir.join(if cfg!(windows) {
+            "codex-code-mode-host.exe"
+        } else {
+            "codex-code-mode-host"
+        });
+        std::fs::write(&codex, "codex").expect("create codex fixture");
+        std::fs::write(&host, "host").expect("create host fixture");
+
+        assert_eq!(
+            code_mode_host_binary(&codex).expect("find sibling host"),
+            std::fs::canonicalize(&host).expect("canonicalize sibling host")
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_code_mode_host_from_npm_launcher_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("loopdeck-codex-npm-{}", uuid::Uuid::new_v4()));
+        let package = dir.join("package");
+        let launcher = package.join("bin/codex.js");
+        let host = package
+            .join("node_modules/@openai/codex-fixture/vendor/native/bin/codex-code-mode-host");
+        let path_entry = dir.join("path/codex");
+        std::fs::create_dir_all(launcher.parent().expect("launcher parent"))
+            .expect("create launcher directory");
+        std::fs::create_dir_all(host.parent().expect("host parent"))
+            .expect("create host directory");
+        std::fs::create_dir_all(path_entry.parent().expect("path-entry parent"))
+            .expect("create path-entry directory");
+        std::fs::write(&launcher, "launcher").expect("create launcher fixture");
+        std::fs::write(&host, "host").expect("create host fixture");
+        symlink(&launcher, &path_entry).expect("link launcher into PATH");
+
+        assert_eq!(
+            code_mode_host_binary(&path_entry).expect("find npm host"),
+            std::fs::canonicalize(&host).expect("canonicalize npm host")
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove test directory");
     }
 
     #[test]

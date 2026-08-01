@@ -2,11 +2,6 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
-## 2026-07-27 — Landed `prd-safety-prereqs` Phase 1 (floor hardening) + Phase 2 (CI matrix)
-
-- **Status**: accepted
-- **Context**: `docs/epics/overnight-orchestration/prd-safety-prereqs.md` (ADR-6) gates the rest of the 0.4.0 epic — no unattended run should exist before the destructive floor's `mv`/`cp`/`rsync` gap closes and CI covers more than one OS. Investigating Phase 2 found `.github/workflows/ci.yml` already existed (Release Gate A, 2026-07-23) running fmt/clippy/test/build — just on a single `macos-latest` runner, not the macOS+Ubuntu matrix this PRD and the stale `loops.md` P3 backlog line both asked for.
-- **Consequences**: **Phase 1** — `permission.rs` gained `destructive_move_target`/`expand_destination`/`lexically_normalize`/`home_dir` and a new `mv`/`gmv`/`cp`/`gcp`/`rsync` arm in `analyze_stage`: the last argv token (destination) is expanded (`~`, `~/…`, `$HOME`, `${HOME}`) and lexically normalized (`..`/`.` collapsed, no filesystem access since the destination need not exist), then hard-denied on an **exact** match against `/`, `/etc`, `/usr`, `/var`, or the resolved home directory. Exact-match (not prefix) means subpaths — `/var/tmp/x`, `/etc/myapp.conf`, `~/Downloads` — are untouched, which resolves the PRD's `/var/tmp`/`/var/folders` open question for free (documented in the PRD in place, no code special-casing needed). A purely relative destination with no absolute/`~`/`$HOME` anchor (e.g. `../etc` against an unknown cwd) is intentionally out of scope — this floor has no cwd to resolve against and stays a syntactic deny-list, not a sandbox. 6 new tests (`permission.rs`), all injecting a fabricated home directory into the pure helper functions rather than mutating the process-global `HOME` env var (which would race other tests in the same binary). The `claude_session.rs:218-224` doc-comment item in the same PRD phase turned out to be stale — that drift was already fixed 2026-07-23 as part of the SECURITY.md work; no code change needed, just noted in the PRD. **Phase 2** — converted `ci.yml`'s single-OS job to `strategy.matrix.os: [macos-latest, ubuntu-latest]`, with an Ubuntu-only system-dependency step (`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` — mirrors `build.yml`'s existing Linux leg) ahead of the Rust toolchain, and a per-OS `rust-cache` key so the two legs don't collide. Added a CI badge to `README.md`. No separate `tsc --noEmit` job — `npm run build` already runs `tsc` first. **Not done this session (Phase 3, "Prove the gates"):** no throwaway PR was pushed to observe CI actually fail on a deliberate lint error, and no live Autonomous-mode session was run to eyeball an `mv`/`cp` floor denial in the audit log — the log-path guarantee is structural (every `Decision::Deny` flows through the same unconditional `tracing::info!` call, floor rule or not) but wasn't observed live. Both left unchecked in the PRD as the remaining manual step. Verified: `cargo fmt --check`, `cargo clippy --lib -- -D warnings`, `cargo test --lib` (451 passed, 8 ignored), `npx tsc --noEmit`, `npm run build` all green.
 
 ## 2026-07-28 — Landed `prd-safety-prereqs` Phase 3 (Prove the gates, live) — PRD now fully done
 
@@ -88,6 +83,11 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Enabling `experimentalApi` exposed Code Mode's client-hosted `functions.exec` tool, but LoopDeck does not provide its JavaScript host or nested-tool boundary, leaving the active turn waiting indefinitely.
 - **Consequences**: Codex initialization now opts out of experimental methods; normal command, edit, approval, and question flows remain on LoopDeck's supported stable protocol.
+
+## 2026-08-01 — Supervise Codex's separate Code Mode host
+- **Status**: accepted
+- **Context**: New stable-API sessions execute JavaScript `functions.exec` calls through Codex CLI's independent Code Mode sidecar.
+- **Consequences**: LoopDeck resolves and supervises Codex's bundled Code Mode host, passes its localhost endpoint to app-server, and kills plus reaps the sidecar on startup failure, shutdown, or session drop.
 
 ## 2026-08-01 — Enforce unattended budgets inside provider streams and by dropping timed-out sessions
 - **Status**: accepted
