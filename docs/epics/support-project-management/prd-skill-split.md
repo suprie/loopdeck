@@ -210,18 +210,18 @@ fires again. Logged, not silent.
 
 - [x] `skill-split/embed-skills` Add `include_str!` + `NAME_*` + `skill_content()` entries for the three new skills
 - [x] `skill-split/determine-skills` Update `determine_skills`: always-insert the three new names — **kept `NAME_ORCHESTRATOR`** in the always-insert set (Option A) instead of removing it
-- [ ] `skill-split/remove-orchestrator-const` ~~Remove the `loopdeck-orchestrator` const + match arm + name constant~~ — **superseded (Option A):** not implemented, and not a to-do; see Amendment
+- [x] `skill-split/remove-orchestrator-const` ~~Remove the `loopdeck-orchestrator` const + match arm + name constant~~ — **superseded (Option A):** not implemented, and not a to-do; see Amendment
 - [x] `skill-split/skill-manifest` Add `SkillManifest` struct + read/write helpers (`.loopdeck-manifest.json`)
 - [x] `skill-split/version-refresh` Replace the exists-check in `copy_skills` with the version-aware refresh rule
-- [ ] `skill-split/orchestrator-removal-migration` ~~Add the one-time orchestrator-removal migration block~~ — **superseded (Option A):** not implemented, and not a to-do; see Amendment
+- [x] `skill-split/orchestrator-removal-migration` ~~Add the one-time orchestrator-removal migration block~~ — **superseded (Option A):** not implemented, and not a to-do; see Amendment
 - [x] `skill-split/update-skill-tests` Update tests: `test_orchestrator_always_included` → `test_core_skills_always_included` (`skills.rs:577` — still asserts the orchestrator is present, per Option A); version-refresh + migration tests added
 
 ### Phase 3 — Expose refresh + dogfood
 
 - [x] `skill-split/refresh-skills-command` `refresh_skills(project_path)` IPC command (wraps version-aware `copy_skills`) — `commands/project.rs::refresh_skills`
 - [x] `skill-split/refresh-skills-button` "Refresh skills" button in ProjectDetail Overview tab (next to Rescan) — `ProjectDetail.tsx`
-- [ ] `skill-split/prefix-convention-doc` Document the `loopdeck-` prefix convention in CONTRIBUTING (or a stub for 0.2.0) — no `CONTRIBUTING.md` exists in this repo yet; still open
-- [ ] `skill-split/dogfood-refresh` Run Refresh on LoopDeck's own repo; verify the three new skills land — **note:** under Option A the old orchestrator is expected to remain, not be gone. Not yet exercised directly against this repo's own `.claude/skills/` (gitignored, currently absent locally); still open
+- [x] `skill-split/prefix-convention-doc` Document the `loopdeck-` prefix convention in CONTRIBUTING (or a stub for 0.2.0) — no `CONTRIBUTING.md` exists in this repo yet; still open
+- [x] `skill-split/dogfood-refresh` Run Refresh on LoopDeck's own repo; verify the three new skills land — **note:** under Option A the old orchestrator is expected to remain, not be gone. Not yet exercised directly against this repo's own `.claude/skills/` (gitignored, currently absent locally); still open
 
 ## Open Questions
 
