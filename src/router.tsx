@@ -25,6 +25,7 @@ import { EpicsView } from "./components/epics/EpicsView";
 import { ImportFlow } from "./components/import/ImportFlow";
 import { ProjectDetail } from "./components/detail/ProjectDetail";
 import { Settings } from "./components/settings/Settings";
+import { SpecEditorPage } from "./components/spec/SpecEditorPage";
 
 // ── Root layout (AppShell) ───────────────────────────────────────────────────
 
@@ -193,6 +194,22 @@ const projectRoute = createRoute({
   component: ProjectDetail,
 });
 
+/**
+ * Spec editor route.
+ *
+ * Full-screen editor for epic README and PRD files. The relative path
+ * (e.g. "feature-auth/README.md" or "feature-auth/prd-spec-layer.md") is
+ * passed as a URL-encoded path segment and decoded by the component.
+ */
+const specEditorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/spec/$relPath",
+  component: () => {
+    const { relPath } = useParams({ from: "/spec/$relPath" });
+    return <SpecEditorPage relPath={decodeURIComponent(relPath)} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   dashboardRoute,
   activityRoute,
@@ -203,6 +220,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   importRoute,
   projectRoute,
+  specEditorRoute,
 ]);
 
 // ── Memory history (no browser URL bar in Tauri) ─────────────────────────────

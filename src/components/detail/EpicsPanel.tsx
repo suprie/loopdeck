@@ -14,6 +14,7 @@ import {
   GitCommitHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useNavigate } from "@tanstack/react-router";
 import type {
   Epic,
   PrdLoop,
@@ -28,7 +29,6 @@ import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { Progress } from "../ui/progress";
-import { SpecEditor } from "./SpecEditor";
 import { PrdContent } from "./PrdContent";
 import { RunQueuePanel } from "./RunQueuePanel";
 
@@ -103,6 +103,7 @@ interface EpicsPanelProps {
 }
 
 export function EpicsPanel({ projectPath }: EpicsPanelProps) {
+  const navigate = useNavigate();
   const [epics, setEpics] = useState<Epic[]>([]);
   const [loopStatus, setLoopStatus] = useState<LoopStatus | null>(null);
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -111,8 +112,6 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [promoting, setPromoting] = useState<string | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
-  /** Relative path of the spec file being edited, or null. */
-  const [editingSpec, setEditingSpec] = useState<string | null>(null);
   /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
   /** Stable execution IDs checked in the overnight-run phase picker, in
@@ -414,7 +413,9 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                 </div>
               </div>
               <button
-                onClick={() => setEditingSpec(`${epic.slug}/README.md`)}
+                onClick={() =>
+                  navigate({ to: "/spec/$relPath", params: { relPath: encodeURIComponent(`${epic.slug}/README.md`) } })
+                }
                 title="Edit epic README"
                 className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
@@ -438,28 +439,11 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
               </div>
             )}
 
-            {/* Epic README editor */}
-            {editingSpec === `${epic.slug}/README.md` && (
-              <div className="mb-4">
-                <SpecEditor
-                  projectPath={projectPath}
-                  relPath={`${epic.slug}/README.md`}
-                  filename="README.md"
-                  onSaved={() => {
-                    setEditingSpec(null);
-                    load();
-                  }}
-                  onCancel={() => setEditingSpec(null)}
-                />
-              </div>
-            )}
-
             {/* PRDs */}
             <div className="space-y-3">
               {epic.prds.map((prd) => {
                 const prdKey = `${epic.slug}/${prd.file}`;
-                const isEditing = editingSpec === prdKey;
-                const isExpanded = !isEditing && expandedSpec === prdKey;
+                const isExpanded = expandedSpec === prdKey;
                 const loopCount = prd.phases.reduce((n, p) => n + p.loops.length, 0);
                 const prdIsActive =
                   hasActiveLoop &&
@@ -494,7 +478,9 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                     </button>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setEditingSpec(prdKey)}
+                        onClick={() =>
+                          navigate({ to: "/spec/$relPath", params: { relPath: encodeURIComponent(prdKey) } })
+                        }
                         title={`Edit ${prd.file}`}
                         className="flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                       >
@@ -506,20 +492,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                     </div>
                   </div>
 
-                  {isEditing ? (
-                    <div className="mt-2">
-                      <SpecEditor
-                        projectPath={projectPath}
-                        relPath={prdKey}
-                        filename={prd.file}
-                        onSaved={() => {
-                          setEditingSpec(null);
-                          load();
-                        }}
-                        onCancel={() => setEditingSpec(null)}
-                      />
-                    </div>
-                  ) : isExpanded ? (
+                  {isExpanded ? (
                     <Tabs defaultValue="content" className="mt-2">
                       <TabsList className="h-7">
                         <TabsTrigger value="content" className="px-2.5 py-0.5 text-[11px]">
