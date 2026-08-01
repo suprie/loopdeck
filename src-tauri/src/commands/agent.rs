@@ -6,7 +6,7 @@ use super::state::{
     fire_interrupt, interrupt_slot, permission_slot, plan_slot, project_busy, question_slot,
     resolve_agent_config, resolve_permission_policy, resolve_root, with_session, AppState,
 };
-use crate::agents::{AgentResponse, ClaudeEvent};
+use crate::agents::{AgentResponse, ClaudeEvent, TokenBudget};
 use crate::claude_session::{ParkSlots, QuestionAnswers};
 use crate::conversation::{self, Attachment, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
@@ -1137,6 +1137,7 @@ async fn send_streaming_with_retry(
     slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
     plan_mode: bool,
+    token_budget: Option<&TokenBudget>,
 ) -> Result<AgentResponse, AppError> {
     let mut attempt: u32 = 0;
     let mut elapsed_ms: u64 = 0;
@@ -1149,6 +1150,7 @@ async fn send_streaming_with_retry(
                 slots,
                 interrupt_slot,
                 plan_mode,
+                token_budget,
             )
             .await?;
 
@@ -1223,7 +1225,7 @@ async fn send_streaming_with_retry(
 /// the failed send still holds the per-project lock — no concurrent send can
 /// be appending, so the trailing user turn is a genuine orphan, not an
 /// in-flight turn mid-window.
-fn mark_turn_terminal(path: &Path, _err: &AppError) {
+pub(crate) fn mark_turn_terminal(path: &Path, _err: &AppError) {
     // Transport failure, child exit, spawn failure — the historical
     // process-exited marker. Startup reconciliation uses the same kind via
     // `reconcile_interrupted`.
@@ -1529,6 +1531,7 @@ async fn send_and_record_streaming(
         &slots,
         &islot,
         plan_mode,
+        None,
     )
     .await
     {
@@ -1746,7 +1749,7 @@ pub(crate) async fn start_fresh_and_record_streaming(
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
 ) -> Result<AgentResponse, AppError> {
-    start_fresh_and_record_streaming_in_root(state, path, path, prompt, channel).await
+    start_fresh_and_record_streaming_in_root(state, path, path, prompt, channel, None).await
 }
 
 /// Streaming fresh turn whose process/transcript live in `path`, but whose
@@ -1760,6 +1763,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
     policy_root: &Path,
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
+    token_budget: Option<&TokenBudget>,
 ) -> Result<AgentResponse, AppError> {
     let session_arc = spawn_fresh(state, path, policy_root).await?;
     let mut session = session_arc.lock().await;
@@ -1793,16 +1797,24 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
     // not a human follow-up with the composer's Plan-mode toggle.
     // No attachments — the loop prompt is text by construction (see the
     // non-streaming fresh-start path).
-    let response =
-        match send_streaming_with_retry(&mut session, prompt, &[], channel, &slots, &islot, false)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                mark_turn_terminal(path, &e);
-                return Err(e);
-            }
-        };
+    let response = match send_streaming_with_retry(
+        &mut session,
+        prompt,
+        &[],
+        channel,
+        &slots,
+        &islot,
+        false,
+        token_budget,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            mark_turn_terminal(path, &e);
+            return Err(e);
+        }
+    };
 
     // 3. Record the assistant turn (best-effort, includes thinking + tool calls).
     let assistant_turn = ConversationTurn::assistant(

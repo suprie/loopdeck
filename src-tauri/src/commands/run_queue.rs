@@ -9,9 +9,11 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::{start_fresh_and_record_streaming, start_fresh_and_record_streaming_in_root};
+use super::agent::{
+    mark_turn_terminal, start_fresh_and_record_streaming, start_fresh_and_record_streaming_in_root,
+};
 use super::state::{fire_interrupt, resolve_root, AppState};
-use crate::agents::ClaudeEvent;
+use crate::agents::{ClaudeEvent, TokenBudget};
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, LoopOrigin};
@@ -32,6 +34,13 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BootstrapStop {
+    Completed,
+    Cancelled,
+    TimedOut,
+}
 
 fn run_worktree_path(root: &Path, run_id: &str) -> PathBuf {
     root.parent()
@@ -75,23 +84,68 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
 /// Fresh worktrees intentionally contain no ignored build artifacts. Bootstrap
 /// Node dependencies before the first phase so verification fails early and in
 /// the isolated tree, never against the user's main checkout.
-fn bootstrap_worktree(path: &Path) -> Result<(), AppError> {
+async fn bootstrap_worktree(
+    path: &Path,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<BootstrapStop, AppError> {
     if !path.join("package.json").is_file() || path.join("node_modules").is_dir() {
-        return Ok(());
+        return Ok(BootstrapStop::Completed);
     }
-    let status = Command::new("npm")
-        .arg("ci")
-        .current_dir(path)
-        .status()
+    let mut command = tokio::process::Command::new("npm");
+    command.arg("ci").current_dir(path).kill_on_drop(true);
+    let mut child = command
+        .spawn()
         .map_err(|e| AppError::RunPlan(format!("failed to bootstrap npm dependencies: {e}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::RunPlan(format!(
-            "npm ci failed in isolated worktree {}",
-            path.display()
-        )))
+
+    let outcome = wait_for_bootstrap_child(&mut child, timeout, cancel).await?;
+    if outcome != BootstrapStop::Completed {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
+    Ok(outcome)
+}
+
+async fn wait_for_bootstrap_child(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<BootstrapStop, AppError> {
+    let cancellation = async {
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    tokio::pin!(cancellation);
+
+    let outcome = tokio::select! {
+        status = child.wait() => {
+            let status = status.map_err(|e| {
+                AppError::RunPlan(format!("failed while waiting for npm ci: {e}"))
+            })?;
+            if !status.success() {
+                return Err(AppError::RunPlan("npm ci failed in isolated worktree".into()));
+            }
+            BootstrapStop::Completed
+        }
+        _ = &mut cancellation => BootstrapStop::Cancelled,
+        _ = tokio::time::sleep(timeout) => BootstrapStop::TimedOut,
+    };
+
+    Ok(outcome)
+}
+
+fn terminate_session(state: &AppState, path: &Path) -> Result<(), AppError> {
+    let session = state
+        .claude_sessions
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(path);
+    drop(session);
+    Ok(())
 }
 
 /// Holds macOS awake while a run is active. Other platforms retain the same
@@ -103,13 +157,13 @@ impl KeepAwake {
     fn acquire() -> Self {
         #[cfg(target_os = "macos")]
         {
-            return Self(
+            Self(
                 Command::new("/usr/bin/caffeinate")
                     .args(["-dimsu", "-w"])
                     .arg(std::process::id().to_string())
                     .spawn()
                     .ok(),
-            );
+            )
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -152,11 +206,19 @@ fn resolved_run_timeout(plan: &RunPlan) -> Duration {
 fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
     for (name, value) in [
         ("per-phase token cap", budgets.per_phase_token_cap),
-        ("per-phase wall-clock cap", budgets.per_phase_wall_clock_secs),
-        ("total-run wall-clock cap", budgets.total_run_wall_clock_secs),
+        (
+            "per-phase wall-clock cap",
+            budgets.per_phase_wall_clock_secs,
+        ),
+        (
+            "total-run wall-clock cap",
+            budgets.total_run_wall_clock_secs,
+        ),
     ] {
         if value == Some(0) {
-            return Err(AppError::RunPlan(format!("{name} must be greater than zero")));
+            return Err(AppError::RunPlan(format!(
+                "{name} must be greater than zero"
+            )));
         }
     }
     Ok(())
@@ -545,15 +607,46 @@ async fn execute_run(
     let Some(mut plan) = runplan::load(root)? else {
         return Ok(());
     };
-    let worktree = ensure_worktree(root, &mut plan)?;
-    runplan::save(root, &plan)?;
-    if let Err(error) = bootstrap_worktree(&worktree) {
-        plan.environment.worktree_kept = true;
-        runplan::save(root, &plan)?;
-        return Err(error);
-    }
     let _keep_awake = KeepAwake::acquire();
     let run_started = Instant::now();
+    let worktree = ensure_worktree(root, &mut plan)?;
+    runplan::save(root, &plan)?;
+    let bootstrap_timeout = resolved_run_timeout(&plan).saturating_sub(run_started.elapsed());
+    match bootstrap_worktree(&worktree, bootstrap_timeout, cancel).await {
+        Ok(BootstrapStop::Completed) => {}
+        Ok(BootstrapStop::Cancelled) | Ok(BootstrapStop::TimedOut) => {
+            let reason = if cancel.load(Ordering::SeqCst) {
+                "run cancelled during worktree bootstrap"
+            } else {
+                "total run wall-clock budget exceeded during worktree bootstrap"
+            };
+            if let Some(phase) = plan
+                .phases
+                .iter_mut()
+                .find(|phase| phase.status == RunPhaseStatus::Queued)
+            {
+                phase.status = RunPhaseStatus::Killed;
+                phase.park_payload = Some(reason.into());
+            }
+            plan.wall_clock_secs = run_started.elapsed().as_secs();
+            plan.environment.worktree_kept = true;
+            runplan::save(root, &plan)?;
+            return Ok(());
+        }
+        Err(error) => {
+            if let Some(phase) = plan
+                .phases
+                .iter_mut()
+                .find(|phase| phase.status == RunPhaseStatus::Queued)
+            {
+                phase.status = RunPhaseStatus::Failed;
+                phase.park_payload = Some(error.to_string());
+            }
+            plan.environment.worktree_kept = true;
+            runplan::save(root, &plan)?;
+            return Err(error);
+        }
+    }
 
     for idx in 0..plan.phases.len() {
         if plan.phases[idx].status != RunPhaseStatus::Queued {
@@ -620,6 +713,7 @@ async fn execute_run(
         // streaming pipeline is what makes AskUserQuestion/permission/plan
         // cards park instead of auto-deny — see this function's doc comment.
         let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
+        let token_budget = TokenBudget::new(resolved_phase_token_cap(&plan));
         let phase_started = Instant::now();
         let phase_timeout = resolved_phase_timeout(&plan);
         let run_remaining = resolved_run_timeout(&plan).saturating_sub(run_started.elapsed());
@@ -628,21 +722,32 @@ async fn execute_run(
         } else {
             (phase_timeout, "phase wall-clock budget exceeded")
         };
-        let turn =
-            start_fresh_and_record_streaming_in_root(state, &worktree, root, &prompt, &channel);
-        tokio::pin!(turn);
-        let outcome = tokio::select! {
-            result = &mut turn => result,
-            _ = tokio::time::sleep(watchdog_timeout) => {
-                let _ = fire_interrupt(state, &worktree);
-                let _ = (&mut turn).await;
-                Err(AppError::RunPlan(format!(
-                    "{watchdog_reason} after {} seconds", watchdog_timeout.as_secs()
-                )))
+        let turn = start_fresh_and_record_streaming_in_root(
+            state,
+            &worktree,
+            root,
+            &prompt,
+            &channel,
+            Some(&token_budget),
+        );
+        let outcome = match tokio::time::timeout(watchdog_timeout, turn).await {
+            Ok(result) => result,
+            Err(_) => {
+                // `timeout` drops the turn future first, releasing its session
+                // lock. Removing the last cached Arc then invokes the harness
+                // Drop path: graceful EOF, bounded wait, and SIGKILL fallback.
+                terminate_session(state, &worktree)?;
+                let error = AppError::RunPlan(format!(
+                    "{watchdog_reason} after {} seconds",
+                    watchdog_timeout.as_secs()
+                ));
+                mark_turn_terminal(&worktree, &error);
+                Err(error)
             }
         };
         plan.phases[idx].wall_clock_secs = phase_started.elapsed().as_secs();
         plan.wall_clock_secs = run_started.elapsed().as_secs();
+        plan.phases[idx].token_usage = token_budget.used();
 
         match outcome {
             Ok(response) => {
@@ -651,13 +756,11 @@ async fn execute_run(
                     .as_ref()
                     .map(|usage| usage.input_tokens.saturating_add(usage.output_tokens))
                     .unwrap_or_default();
-                plan.phases[idx].token_usage = tokens;
-                if tokens > resolved_phase_token_cap(&plan) {
+                let exceeded = token_budget.observe_total(tokens);
+                plan.phases[idx].token_usage = token_budget.used();
+                if exceeded {
                     plan.phases[idx].status = RunPhaseStatus::Killed;
-                    plan.phases[idx].park_payload = Some(format!(
-                        "phase token budget exceeded: {tokens} > {}",
-                        resolved_phase_token_cap(&plan)
-                    ));
+                    plan.phases[idx].park_payload = Some(token_budget.exceeded_message());
                     plan.environment.worktree_kept = true;
                     runplan::save(root, &plan)?;
                     let loaded = execution::load(root)?;
@@ -678,11 +781,10 @@ async fn execute_run(
                         plan.environment.worktree_kept = true;
                         runplan::save(root, &plan)?;
                         let loaded = execution::load(root)?;
-                        let abandoned = loaded.state.abandon_current(
-                            reason,
-                            chrono::Utc::now(),
-                            false,
-                        )?;
+                        let abandoned =
+                            loaded
+                                .state
+                                .abandon_current(reason, chrono::Utc::now(), false)?;
                         execution::save(root, &abandoned, loaded.state.revision)?;
                         return Ok(());
                     };
@@ -752,7 +854,8 @@ async fn execute_run(
                 // them and the run ends here regardless.
             }
             Err(e) => {
-                let killed_by_budget = e.to_string().contains("wall-clock budget exceeded");
+                let killed_by_budget = e.to_string().contains("wall-clock budget exceeded")
+                    || e.to_string().contains("token budget exceeded");
                 plan.phases[idx].status = if killed_by_budget {
                     RunPhaseStatus::Killed
                 } else {
@@ -762,13 +865,17 @@ async fn execute_run(
                 plan.environment.worktree_kept = true;
                 runplan::save(root, &plan)?;
 
+                if e.to_string().contains("token budget exceeded") {
+                    terminate_session(state, &worktree)?;
+                }
+
                 let loaded = execution::load(root)?;
                 let abandoned =
                     loaded
                         .state
                         .abandon_current(e.to_string(), chrono::Utc::now(), false)?;
                 execution::save(root, &abandoned, loaded.state.revision)?;
-                return Err(e);
+                return if killed_by_budget { Ok(()) } else { Err(e) };
             }
         }
     }
@@ -847,5 +954,21 @@ mod unattended_tests {
     #[test]
     fn run_branch_name_is_safe_and_scoped() {
         assert_eq!(run_branch_name("run a/b"), "run/run-a-b");
+    }
+
+    #[tokio::test]
+    async fn stuck_bootstrap_child_is_killed_by_timeout() {
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn stuck fixture");
+        let cancel = AtomicBool::new(false);
+        let outcome = wait_for_bootstrap_child(&mut child, Duration::from_millis(20), &cancel)
+            .await
+            .expect("watchdog should return a stop reason");
+        assert_eq!(outcome, BootstrapStop::TimedOut);
+        child.kill().await.expect("kill stuck fixture");
+        child.wait().await.expect("reap stuck fixture");
     }
 }

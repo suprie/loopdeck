@@ -1,5 +1,57 @@
 use crate::config::AgentConfig;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// Shared per-phase token budget for a streaming unattended turn.
+///
+/// Claude reports per-model-call usage, so that adapter adds deltas. Codex
+/// reports a cumulative total, so that adapter raises the observed floor.
+/// Keeping the counter outside either session also makes retries consume the
+/// same phase budget instead of resetting the cap for every attempt.
+#[derive(Clone, Debug)]
+pub(crate) struct TokenBudget {
+    cap: u64,
+    used: Arc<AtomicU64>,
+}
+
+impl TokenBudget {
+    pub(crate) fn new(cap: u64) -> Self {
+        Self {
+            cap,
+            used: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub(crate) fn used(&self) -> u64 {
+        self.used.load(Ordering::SeqCst)
+    }
+
+    /// Record usage that is incremental to everything observed so far.
+    pub(crate) fn add(&self, tokens: u64) -> bool {
+        let previous = self
+            .used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                Some(used.saturating_add(tokens))
+            })
+            .unwrap_or_else(|used| used);
+        previous.saturating_add(tokens) > self.cap
+    }
+
+    /// Record a provider-reported cumulative total without double-counting it.
+    pub(crate) fn observe_total(&self, tokens: u64) -> bool {
+        self.used.fetch_max(tokens, Ordering::SeqCst);
+        self.used() > self.cap
+    }
+
+    pub(crate) fn exceeded_message(&self) -> String {
+        format!(
+            "phase token budget exceeded: {} > {}",
+            self.used(),
+            self.cap
+        )
+    }
+}
 
 pub(crate) trait CommandEnv {
     fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
@@ -519,6 +571,11 @@ impl ControlResponsePayload {
 #[derive(Debug, Deserialize)]
 pub(crate) struct AssistantMessage {
     pub(crate) content: Vec<ContentBlock>,
+    /// Claude's stream-json assistant messages carry usage for that model
+    /// invocation. Unlike the terminal result total, this arrives early enough
+    /// to stop an agentic turn between tool calls.
+    #[serde(default)]
+    pub(crate) usage: Option<RawUsage>,
 }
 
 /// The `tool_use_result` body of a `type: "user"` tool-result event.
@@ -732,8 +789,8 @@ pub(crate) enum ContentBlock {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawUsage {
-    input_tokens: u64,
-    output_tokens: u64,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 // ── Parsing ────────────────────────────────────────────────────────────────
@@ -1651,6 +1708,7 @@ mod tests {
             let _ = acc.ingest_event(StreamEvent::Assistant {
                 message: AssistantMessage {
                     content: vec![ContentBlock::Text { text: "x".into() }],
+                    usage: None,
                 },
                 session_id: "s".into(),
             });
@@ -1684,6 +1742,7 @@ mod tests {
             let _ = acc.ingest_event(StreamEvent::Assistant {
                 message: AssistantMessage {
                     content: vec![ContentBlock::Text { text: "y".into() }],
+                    usage: None,
                 },
                 session_id: "s".into(),
             });
@@ -1811,5 +1870,36 @@ mod tests {
         let env_keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!env_keys.contains(&"ANTHROPIC_AUTH_TOKEN"));
         assert!(!env_keys.contains(&"CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn token_budget_accumulates_claude_deltas_across_calls() {
+        let budget = TokenBudget::new(100);
+        assert!(!budget.add(40));
+        assert!(!budget.add(60));
+        assert!(budget.add(1));
+        assert_eq!(budget.used(), 101);
+    }
+
+    #[test]
+    fn token_budget_observes_codex_totals_without_double_counting() {
+        let budget = TokenBudget::new(100);
+        assert!(!budget.observe_total(80));
+        assert!(!budget.observe_total(60));
+        assert!(budget.observe_total(101));
+        assert_eq!(budget.used(), 101);
+    }
+
+    #[test]
+    fn assistant_stream_event_exposes_usage_before_terminal_result() {
+        let event = parse_stream_line(
+            r#"{"type":"assistant","session_id":"s","message":{"content":[],"usage":{"input_tokens":80,"output_tokens":21}}}"#,
+        )
+        .expect("assistant event should parse");
+        let StreamEvent::Assistant { message, .. } = event else {
+            panic!("expected assistant event");
+        };
+        let usage = message.usage.expect("assistant usage should be retained");
+        assert_eq!(usage.input_tokens + usage.output_tokens, 101);
     }
 }

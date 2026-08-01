@@ -61,8 +61,13 @@ pub fn worktree_add(repo_path: &Path, path: &Path, branch: &str) -> Result<Workt
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    // Git canonicalizes linked-worktree paths in `worktree list` (notably
+    // `/var` → `/private/var` on macOS). Persist that same canonical form so a
+    // restarted unattended run can match its saved path to Git's inventory.
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|e| format!("failed to canonicalize worktree {}: {e}", path.display()))?;
     Ok(Worktree {
-        path: path.to_path_buf(),
+        path: canonical_path,
         branch: branch.to_string(),
     })
 }
@@ -524,9 +529,9 @@ mod tests {
             .unwrap();
 
         let added = worktree_add(&dir, &linked, "run/worktree-test").unwrap();
-        assert_eq!(added.path, linked);
-        assert!(worktree_list(&dir).unwrap().contains(&linked));
-        worktree_remove(&dir, &linked).unwrap();
+        assert_eq!(added.path, fs::canonicalize(&linked).unwrap());
+        assert!(worktree_list(&dir).unwrap().contains(&added.path));
+        worktree_remove(&dir, &added.path).unwrap();
         assert!(!linked.exists());
 
         fs::remove_dir_all(&dir).unwrap();
