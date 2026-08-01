@@ -9,7 +9,7 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::{start_fresh_and_record, start_fresh_and_record_streaming};
+use super::agent::start_fresh_and_record_streaming;
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::ClaudeEvent;
 use crate::epic;
@@ -239,13 +239,23 @@ pub async fn get_run_status(
 }
 
 /// Run one queued phase's pre-flight interview turn (Phase 3) — a bounded
-/// session, driven through the same `start_fresh_and_record` pipeline as a
-/// phase run itself, whose `AskUserQuestion` calls surface as the same
-/// question cards the chat already shows. Awaits the whole turn, including
-/// any parked question, so it only returns once the user has answered (or
-/// the agent decided nothing was ambiguous) — that's what "while the user is
-/// present" means here: the caller is expected to be an active UI session,
-/// not a background poll.
+/// session driven through the *streaming* pipeline
+/// (`start_fresh_and_record_streaming`, no-op sink `Channel`, same trick
+/// Phase 4's executor uses). This is load-bearing, not cosmetic: per
+/// `claude_session.rs::answer_ask_user_question`'s own doc comment, an
+/// `AskUserQuestion` on the *non*-streaming path (`channel: None`) has no UI
+/// surface to answer from and is auto-denied immediately instead of parking —
+/// exactly the tool call `build_interview_prompt` tells the agent to make. A
+/// channel merely being present (its callback can be a no-op) is what lets
+/// `answer_control_request` park on the shared `question_slot` instead of
+/// taking that deny branch; the pending card then surfaces through the
+/// existing tab-agnostic `StuckQuestionCallout` (`ProjectDetail.tsx`), which
+/// reads the same cross-project `AskUserQuestion` store every other pending
+/// question does — no bespoke card needed in the run-queue UI. Awaits the
+/// whole turn, including any parked question, so it only returns once the
+/// user has answered (or the agent decided nothing was ambiguous) — that's
+/// what "while the user is present" means here: the caller is expected to be
+/// an active UI session, not a background poll.
 ///
 /// Pins the parsed answers into `plan.phases[execution_id].interview`, marks
 /// its `interview_status` `Answered` (even when zero questions were asked —
@@ -276,7 +286,11 @@ pub async fn run_phase_interview(
     })?;
 
     let prompt = build_interview_prompt(&execution_id, &loc);
-    let response = start_fresh_and_record(&state, &root, &prompt).await?;
+    // No-op sink: nothing here needs to narrate turn events to a UI channel —
+    // only the channel's *presence* matters, so a parked AskUserQuestion is
+    // answerable instead of auto-denied (see this fn's doc comment).
+    let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
+    let response = start_fresh_and_record_streaming(&state, &root, &prompt, &channel).await?;
     let answers = extract_interview_answers(&response.result);
 
     // Reload rather than reuse the plan loaded before the (possibly long)
