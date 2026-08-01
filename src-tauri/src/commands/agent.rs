@@ -1594,6 +1594,7 @@ async fn send_and_record_streaming(
 async fn spawn_fresh(
     state: &AppState,
     path: &Path,
+    policy_root: &Path,
 ) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
     // ── Phase 1: try_lock the existing arc to prove it's idle. ──
     // Scoped so the map's std Mutex guard is dropped before we await anything.
@@ -1635,7 +1636,7 @@ async fn spawn_fresh(
 
     // ── Phase 4: spawn fresh (no --resume) and insert. ──
     let agent_config = resolve_agent_config(state)?;
-    let policy = resolve_permission_policy(state, path);
+    let policy = resolve_permission_policy(state, policy_root);
 
     let session = HarnessSession::spawn(path, &agent_config, None, policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
@@ -1662,7 +1663,7 @@ pub(crate) async fn start_fresh_and_record(
     path: &Path,
     prompt: &str,
 ) -> Result<AgentResponse, AppError> {
-    let session_arc = spawn_fresh(state, path).await?;
+    let session_arc = spawn_fresh(state, path, path).await?;
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
@@ -1745,12 +1746,27 @@ pub(crate) async fn start_fresh_and_record_streaming(
     prompt: &str,
     channel: &Channel<ClaudeEvent>,
 ) -> Result<AgentResponse, AppError> {
-    let session_arc = spawn_fresh(state, path).await?;
+    start_fresh_and_record_streaming_in_root(state, path, path, prompt, channel).await
+}
+
+/// Streaming fresh turn whose process/transcript live in `path`, but whose
+/// project-facing state (permission tier, pending-card slots, and interrupts)
+/// belongs to the registered project `policy_root`. Unattended runs use this
+/// to execute inside an isolated worktree without silently falling back from
+/// the configured policy or hiding parked cards under an unregistered path.
+pub(crate) async fn start_fresh_and_record_streaming_in_root(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    prompt: &str,
+    channel: &Channel<ClaudeEvent>,
+) -> Result<AgentResponse, AppError> {
+    let session_arc = spawn_fresh(state, path, policy_root).await?;
     let mut session = session_arc.lock().await;
-    let qslot = question_slot(state, path)?;
-    let pslot = permission_slot(state, path)?;
-    let plnslot = plan_slot(state, path)?;
-    let islot = interrupt_slot(state, path)?;
+    let qslot = question_slot(state, policy_root)?;
+    let pslot = permission_slot(state, policy_root)?;
+    let plnslot = plan_slot(state, policy_root)?;
+    let islot = interrupt_slot(state, policy_root)?;
     let slots = ParkSlots {
         question: &qslot,
         permission: &pslot,

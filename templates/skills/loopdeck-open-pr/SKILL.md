@@ -358,6 +358,17 @@ Report the URL `gh` returned to the user.
 If Phase 4a found explicit pre-authorization, open the PR as a **draft**,
 headlessly, instead:
 
+Before pushing, scan the staged diff. A match is a hard stop: do not push or
+create the PR; report the matching line(s) and leave the unattended phase
+parked for human review. v1 deliberately uses a small, visible pattern set:
+
+```bash
+git diff --cached -- . | rg -n '(AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|(?i:api[_-]?key|secret|token)\s*[:=]\s*["'"''][^"'"'']{12,})'
+```
+
+If the command exits `0`, abort the ship step. Exit `1` means no match and it
+is safe to continue. This is a guardrail, not a substitute for review.
+
 ```bash
 tmpfile="$(mktemp)"
 cat > "$tmpfile" <<'BODY'

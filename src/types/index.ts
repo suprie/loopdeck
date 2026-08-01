@@ -389,6 +389,14 @@ export interface RunBudgets {
   total_run_wall_clock_secs?: number;
 }
 
+/** Worktree lifecycle state retained so a failed unattended run can be
+ * inspected and a completed draft-PR run can prove it was cleaned up. */
+export interface RunEnvironment {
+  worktree_path?: string;
+  worktree_branch?: string;
+  worktree_kept: boolean;
+}
+
 /** One queued phase, joined to the spec/execution layer by its stable
  * execution ID (never a free-text phase name). */
 export interface RunPhase {
@@ -403,6 +411,8 @@ export interface RunPhase {
    * non-green verdict or turn error) — the reason shown in the morning
    * report. */
   park_payload?: string;
+  token_usage: number;
+  wall_clock_secs: number;
 }
 
 /** The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`. */
@@ -412,6 +422,8 @@ export interface RunPlan {
   created: string;
   consent: RunConsent;
   budgets: RunBudgets;
+  environment: RunEnvironment;
+  wall_clock_secs: number;
   stall_policy: StallPolicy;
   phases: RunPhase[];
 }

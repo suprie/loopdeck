@@ -9,25 +9,158 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::start_fresh_and_record_streaming;
+use super::agent::{start_fresh_and_record_streaming, start_fresh_and_record_streaming_in_root};
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::ClaudeEvent;
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, LoopOrigin};
+use crate::git;
+use crate::limits;
 use crate::run_executor::{
-    self, build_interview_prompt, build_phase_prompt, extract_interview_answers, extract_verdict,
-    RunHandle, RunVerdict,
+    self, build_interview_prompt, build_phase_prompt, extract_draft_pr_url,
+    extract_interview_answers, extract_verdict, RunHandle, RunVerdict,
 };
-use crate::runplan::{self, InterviewStatus, RunPhaseStatus, RunPlan, StallPolicy};
+use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
 use chrono::Utc;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+fn run_worktree_path(root: &Path, run_id: &str) -> PathBuf {
+    root.parent()
+        .unwrap_or(root)
+        .join(".loopdeck-runs")
+        .join(run_id)
+}
+
+fn run_branch_name(run_id: &str) -> String {
+    format!(
+        "run/{}",
+        run_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+    )
+}
+
+/// Create the one isolated worktree used by every phase in a run. The path and
+/// branch are persisted before a turn begins, so a failed/terminated run stays
+/// inspectable and a restart does not create a second branch.
+fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError> {
+    if let Some(path) = &plan.environment.worktree_path {
+        if git::worktree_list(root)
+            .map_err(AppError::RunPlan)?
+            .iter()
+            .any(|known| known == path)
+        {
+            return Ok(path.clone());
+        }
+        return Err(AppError::RunPlan(format!(
+            "run worktree {} is missing; preserving the run for inspection",
+            path.display()
+        )));
+    }
+    let path = run_worktree_path(root, &plan.id);
+    let branch = run_branch_name(&plan.id);
+    let worktree = git::worktree_add(root, &path, &branch).map_err(AppError::RunPlan)?;
+    plan.environment.worktree_path = Some(worktree.path.clone());
+    plan.environment.worktree_branch = Some(worktree.branch);
+    Ok(worktree.path)
+}
+
+/// Fresh worktrees intentionally contain no ignored build artifacts. Bootstrap
+/// Node dependencies before the first phase so verification fails early and in
+/// the isolated tree, never against the user's main checkout.
+fn bootstrap_worktree(path: &Path) -> Result<(), AppError> {
+    if !path.join("package.json").is_file() || path.join("node_modules").is_dir() {
+        return Ok(());
+    }
+    let status = Command::new("npm")
+        .arg("ci")
+        .current_dir(path)
+        .status()
+        .map_err(|e| AppError::RunPlan(format!("failed to bootstrap npm dependencies: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::RunPlan(format!(
+            "npm ci failed in isolated worktree {}",
+            path.display()
+        )))
+    }
+}
+
+/// Holds macOS awake while a run is active. Other platforms retain the same
+/// safe execution semantics and the UI documents the plugged-in/lid-open
+/// fallback from the PRD.
+struct KeepAwake(Option<Child>);
+
+impl KeepAwake {
+    fn acquire() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            return Self(
+                Command::new("/usr/bin/caffeinate")
+                    .args(["-dimsu", "-w"])
+                    .arg(std::process::id().to_string())
+                    .spawn()
+                    .ok(),
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self(None)
+        }
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn resolved_phase_token_cap(plan: &RunPlan) -> u64 {
+    plan.budgets
+        .per_phase_token_cap
+        .unwrap_or(limits::DEFAULT_RUN_PHASE_TOKEN_CAP)
+}
+
+fn resolved_phase_timeout(plan: &RunPlan) -> Duration {
+    Duration::from_secs(
+        plan.budgets
+            .per_phase_wall_clock_secs
+            .unwrap_or(limits::DEFAULT_RUN_PHASE_WALL_CLOCK_SECS),
+    )
+}
+
+fn resolved_run_timeout(plan: &RunPlan) -> Duration {
+    Duration::from_secs(
+        plan.budgets
+            .total_run_wall_clock_secs
+            .unwrap_or(limits::DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS),
+    )
+}
+
+fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
+    for (name, value) in [
+        ("per-phase token cap", budgets.per_phase_token_cap),
+        ("per-phase wall-clock cap", budgets.per_phase_wall_clock_secs),
+        ("total-run wall-clock cap", budgets.total_run_wall_clock_secs),
+    ] {
+        if value == Some(0) {
+            return Err(AppError::RunPlan(format!("{name} must be greater than zero")));
+        }
+    }
+    Ok(())
+}
 
 /// Build and persist a new `.loopdeck/run-plan.yaml` from a picker selection
 /// (Phase 5): the phases the user checked, in the order they were selected,
@@ -51,9 +184,11 @@ pub async fn create_run_plan(
     execution_ids: Vec<String>,
     stall_policy: StallPolicy,
     draft_pr_authorized: bool,
+    budgets: RunBudgets,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
+    validate_budgets(&budgets)?;
 
     if execution_ids.is_empty() {
         return Err(AppError::RunPlan(
@@ -78,7 +213,7 @@ pub async fn create_run_plan(
         })?;
     }
 
-    let plan = run_executor::build_run_plan(
+    let mut plan = run_executor::build_run_plan(
         format!("run-{}", Uuid::new_v4()),
         root.clone(),
         Utc::now(),
@@ -86,6 +221,7 @@ pub async fn create_run_plan(
         stall_policy,
         draft_pr_authorized,
     );
+    plan.budgets = budgets;
 
     runplan::save(&root, &plan)?;
     info!(
@@ -212,7 +348,13 @@ pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), 
         ));
     }
 
-    fire_interrupt(&state, &root)?;
+    // Phase sessions run in the isolated worktree, while legacy/manual
+    // sessions are keyed by the registered root. Signal both safely so Stop
+    // remains immediate during the migration to worktree-backed runs.
+    let _ = fire_interrupt(&state, &root)?;
+    if let Some(worktree) = runplan::load(&root)?.and_then(|plan| plan.environment.worktree_path) {
+        let _ = fire_interrupt(&state, &worktree)?;
+    }
     info!("cancel_run fired for {}", root.display());
     Ok(())
 }
@@ -403,13 +545,32 @@ async fn execute_run(
     let Some(mut plan) = runplan::load(root)? else {
         return Ok(());
     };
+    let worktree = ensure_worktree(root, &mut plan)?;
+    runplan::save(root, &plan)?;
+    if let Err(error) = bootstrap_worktree(&worktree) {
+        plan.environment.worktree_kept = true;
+        runplan::save(root, &plan)?;
+        return Err(error);
+    }
+    let _keep_awake = KeepAwake::acquire();
+    let run_started = Instant::now();
 
     for idx in 0..plan.phases.len() {
         if plan.phases[idx].status != RunPhaseStatus::Queued {
             continue;
         }
+        plan.wall_clock_secs = run_started.elapsed().as_secs();
+        if run_started.elapsed() >= resolved_run_timeout(&plan) {
+            plan.phases[idx].status = RunPhaseStatus::Killed;
+            plan.phases[idx].park_payload = Some("total run wall-clock budget exceeded".into());
+            plan.environment.worktree_kept = true;
+            runplan::save(root, &plan)?;
+            return Ok(());
+        }
         if cancel.load(Ordering::SeqCst) {
             plan.phases[idx].status = RunPhaseStatus::Killed;
+            plan.phases[idx].park_payload = Some("run cancelled".into());
+            plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
             return Ok(());
         }
@@ -421,6 +582,7 @@ async fn execute_run(
             Some(loc) => loc,
             None => {
                 plan.phases[idx].status = RunPhaseStatus::Failed;
+                plan.environment.worktree_kept = true;
                 runplan::save(root, &plan)?;
                 return Err(AppError::RunPlan(format!(
                     "queued phase \"{execution_id}\" no longer exists in docs/epics/"
@@ -458,13 +620,74 @@ async fn execute_run(
         // streaming pipeline is what makes AskUserQuestion/permission/plan
         // cards park instead of auto-deny — see this function's doc comment.
         let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-        let outcome = start_fresh_and_record_streaming(state, root, &prompt, &channel).await;
+        let phase_started = Instant::now();
+        let phase_timeout = resolved_phase_timeout(&plan);
+        let run_remaining = resolved_run_timeout(&plan).saturating_sub(run_started.elapsed());
+        let (watchdog_timeout, watchdog_reason) = if run_remaining <= phase_timeout {
+            (run_remaining, "total run wall-clock budget exceeded")
+        } else {
+            (phase_timeout, "phase wall-clock budget exceeded")
+        };
+        let turn =
+            start_fresh_and_record_streaming_in_root(state, &worktree, root, &prompt, &channel);
+        tokio::pin!(turn);
+        let outcome = tokio::select! {
+            result = &mut turn => result,
+            _ = tokio::time::sleep(watchdog_timeout) => {
+                let _ = fire_interrupt(state, &worktree);
+                let _ = (&mut turn).await;
+                Err(AppError::RunPlan(format!(
+                    "{watchdog_reason} after {} seconds", watchdog_timeout.as_secs()
+                )))
+            }
+        };
+        plan.phases[idx].wall_clock_secs = phase_started.elapsed().as_secs();
+        plan.wall_clock_secs = run_started.elapsed().as_secs();
 
         match outcome {
             Ok(response) => {
+                let tokens = response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.input_tokens.saturating_add(usage.output_tokens))
+                    .unwrap_or_default();
+                plan.phases[idx].token_usage = tokens;
+                if tokens > resolved_phase_token_cap(&plan) {
+                    plan.phases[idx].status = RunPhaseStatus::Killed;
+                    plan.phases[idx].park_payload = Some(format!(
+                        "phase token budget exceeded: {tokens} > {}",
+                        resolved_phase_token_cap(&plan)
+                    ));
+                    plan.environment.worktree_kept = true;
+                    runplan::save(root, &plan)?;
+                    let loaded = execution::load(root)?;
+                    let abandoned = loaded.state.abandon_current(
+                        "phase token budget exceeded",
+                        chrono::Utc::now(),
+                        false,
+                    )?;
+                    execution::save(root, &abandoned, loaded.state.revision)?;
+                    return Ok(());
+                }
                 let verdict = extract_verdict(&response.result);
-                if verdict == Some(RunVerdict::Pass) {
+                if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
+                    let Some(url) = extract_draft_pr_url(&response.result) else {
+                        let reason = "green verification passed, but no unattended draft PR URL was recorded";
+                        plan.phases[idx].status = RunPhaseStatus::Parked;
+                        plan.phases[idx].park_payload = Some(reason.into());
+                        plan.environment.worktree_kept = true;
+                        runplan::save(root, &plan)?;
+                        let loaded = execution::load(root)?;
+                        let abandoned = loaded.state.abandon_current(
+                            reason,
+                            chrono::Utc::now(),
+                            false,
+                        )?;
+                        execution::save(root, &abandoned, loaded.state.revision)?;
+                        return Ok(());
+                    };
                     plan.phases[idx].status = RunPhaseStatus::Completed;
+                    plan.phases[idx].park_payload = Some(format!("draft PR: {url}"));
                     runplan::save(root, &plan)?;
 
                     let loaded = execution::load(root)?;
@@ -475,12 +698,14 @@ async fn execute_run(
                     execution::save(root, &completed, loaded.state.revision)?;
                 } else {
                     let reason = match verdict {
+                        Some(RunVerdict::Pass) => "green verification passed, but queue-time consent for an unattended draft PR is required".to_string(),
                         Some(RunVerdict::Warn) => "verify verdict: WARN".to_string(),
                         Some(RunVerdict::Block) => "verify verdict: BLOCK".to_string(),
                         _ => "no verify verdict found in the turn's final response".to_string(),
                     };
-                    plan.phases[idx].status = RunPhaseStatus::Failed;
+                    plan.phases[idx].status = RunPhaseStatus::Parked;
                     plan.phases[idx].park_payload = Some(reason.clone());
+                    plan.environment.worktree_kept = true;
                     runplan::save(root, &plan)?;
 
                     let loaded = execution::load(root)?;
@@ -495,6 +720,7 @@ async fn execute_run(
             Err(AppError::TurnParked(detail)) => {
                 plan.phases[idx].status = RunPhaseStatus::Parked;
                 plan.phases[idx].park_payload = Some(detail.clone());
+                plan.environment.worktree_kept = true;
 
                 for blocked_id in
                     run_executor::phases_blocked_by_park(&plan, &execution_id, plan.stall_policy)
@@ -526,8 +752,14 @@ async fn execute_run(
                 // them and the run ends here regardless.
             }
             Err(e) => {
-                plan.phases[idx].status = RunPhaseStatus::Failed;
+                let killed_by_budget = e.to_string().contains("wall-clock budget exceeded");
+                plan.phases[idx].status = if killed_by_budget {
+                    RunPhaseStatus::Killed
+                } else {
+                    RunPhaseStatus::Failed
+                };
                 plan.phases[idx].park_payload = Some(e.to_string());
+                plan.environment.worktree_kept = true;
                 runplan::save(root, &plan)?;
 
                 let loaded = execution::load(root)?;
@@ -541,5 +773,79 @@ async fn execute_run(
         }
     }
 
+    plan.wall_clock_secs = run_started.elapsed().as_secs();
+    if plan
+        .phases
+        .iter()
+        .all(|phase| phase.status == RunPhaseStatus::Completed)
+    {
+        if let Err(error) = git::worktree_remove(root, &worktree) {
+            plan.environment.worktree_kept = true;
+            if let Some(phase) = plan.phases.last_mut() {
+                phase.park_payload = Some(format!(
+                    "draft PR succeeded, but worktree cleanup failed: {error}"
+                ));
+            }
+        } else {
+            plan.environment.worktree_path = None;
+            plan.environment.worktree_branch = None;
+        }
+    } else {
+        plan.environment.worktree_kept = true;
+    }
+    runplan::save(root, &plan)?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod unattended_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn plan() -> RunPlan {
+        run_executor::build_run_plan(
+            "run-budget-test".into(),
+            PathBuf::from("/repo"),
+            Utc::now(),
+            &["phase-1".into()],
+            StallPolicy::ContinueIndependent,
+            false,
+        )
+    }
+
+    #[test]
+    fn budget_defaults_are_hard_and_named() {
+        let plan = plan();
+        assert_eq!(
+            resolved_phase_token_cap(&plan),
+            limits::DEFAULT_RUN_PHASE_TOKEN_CAP
+        );
+        assert_eq!(
+            resolved_phase_timeout(&plan),
+            Duration::from_secs(limits::DEFAULT_RUN_PHASE_WALL_CLOCK_SECS)
+        );
+        assert_eq!(
+            resolved_run_timeout(&plan),
+            Duration::from_secs(limits::DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS)
+        );
+    }
+
+    #[test]
+    fn plan_overrides_replace_every_default_budget() {
+        let mut plan = plan();
+        plan.budgets = RunBudgets {
+            per_phase_token_cap: Some(123),
+            per_phase_wall_clock_secs: Some(45),
+            total_run_wall_clock_secs: Some(67),
+        };
+        assert_eq!(resolved_phase_token_cap(&plan), 123);
+        assert_eq!(resolved_phase_timeout(&plan), Duration::from_secs(45));
+        assert_eq!(resolved_run_timeout(&plan), Duration::from_secs(67));
+    }
+
+    #[test]
+    fn run_branch_name_is_safe_and_scoped() {
+        assert_eq!(run_branch_name("run a/b"), "run/run-a-b");
+    }
 }

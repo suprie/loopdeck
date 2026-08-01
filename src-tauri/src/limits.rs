@@ -93,6 +93,20 @@ pub const EXECUTION_MAX_BYTES: u64 = 1024 * 1024;
 /// matches `EXECUTION_MAX_BYTES` and is far beyond any real overnight run.
 pub const RUN_PLAN_MAX_BYTES: u64 = 1024 * 1024;
 
+// ── Unattended-run budgets (`prd-unattended-ship`) ─────────────────────────
+
+/// Default hard cap for all tokens reported by a single phase turn.
+///
+/// This is deliberately well below the 14M-token runaway observed in the
+/// postmortem while leaving room for a real implementation/verification turn.
+pub const DEFAULT_RUN_PHASE_TOKEN_CAP: u64 = 500_000;
+
+/// Default maximum duration of one unattended phase.
+pub const DEFAULT_RUN_PHASE_WALL_CLOCK_SECS: u64 = 90 * 60;
+
+/// Default maximum duration of a whole overnight run.
+pub const DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS: u64 = 8 * 60 * 60;
+
 /// Max bytes of a spec / PRD / epic Markdown file read wholesale.
 ///
 /// These live under `docs/epics/` (human-authored) and `.loopdeck/` (agent-

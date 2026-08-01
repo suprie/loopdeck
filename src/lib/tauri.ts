@@ -14,6 +14,7 @@ import type {
   LoadedExecution,
   MigrationPreview,
   ProgressSnapshot,
+  RunBudgets,
   RunPlan,
   StallPolicy,
   AgentResponse,
@@ -222,19 +223,21 @@ export async function exportExecutionSummary(path: string): Promise<string> {
  * `queued` / interview `pending`. Replaces any existing plan for the project
  * outright; rejects if a run is already in progress or an ID doesn't
  * resolve to a real PRD checklist loop.
- * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized) -> Result<RunPlan, AppError>
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets) -> Result<RunPlan, AppError>
  */
 export async function createRunPlan(
   path: string,
   executionIds: string[],
   stallPolicy: StallPolicy,
   draftPrAuthorized: boolean,
+  budgets: RunBudgets,
 ): Promise<RunPlan> {
   return invoke<RunPlan>("create_run_plan", {
     path,
     executionIds,
     stallPolicy,
     draftPrAuthorized,
+    budgets,
   });
 }
 

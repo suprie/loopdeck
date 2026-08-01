@@ -99,6 +99,19 @@ pub struct RunBudgets {
     pub total_run_wall_clock_secs: Option<u64>,
 }
 
+/// Isolation and cleanup state for one unattended run. This lives in the
+/// plan so a restart can retain a failed worktree for inspection instead of
+/// accidentally creating a second branch for the same run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunEnvironment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub worktree_kept: bool,
+}
+
 /// One queued phase, joined to the spec/execution layer by its stable
 /// execution ID ([`crate::epic::PrdLoop::id`], the same ID `execution.rs`
 /// tracks) — never a free-text phase name, so a PRD rename after queuing
@@ -128,6 +141,12 @@ pub struct RunPhase {
     /// always a hard failure, never a park).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park_payload: Option<String>,
+    /// Terminal usage retained for the morning report and budget audit.
+    #[serde(default)]
+    pub token_usage: u64,
+    /// Wall-clock time spent in the phase turn, rounded down to seconds.
+    #[serde(default)]
+    pub wall_clock_secs: u64,
 }
 
 /// The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`.
@@ -140,6 +159,11 @@ pub struct RunPlan {
     pub consent: RunConsent,
     #[serde(default)]
     pub budgets: RunBudgets,
+    #[serde(default)]
+    pub environment: RunEnvironment,
+    /// Wall-clock time accumulated by the executor for the run report.
+    #[serde(default)]
+    pub wall_clock_secs: u64,
     #[serde(default)]
     pub stall_policy: StallPolicy,
     #[serde(default)]
@@ -201,6 +225,8 @@ mod tests {
                 per_phase_wall_clock_secs: Some(3600),
                 total_run_wall_clock_secs: None,
             },
+            environment: RunEnvironment::default(),
+            wall_clock_secs: 0,
             stall_policy: StallPolicy::Halt,
             phases: vec![RunPhase {
                 execution_id: "prd-run-queue/phase-1".to_string(),
@@ -212,6 +238,8 @@ mod tests {
                 interview_status: InterviewStatus::Answered,
                 depends_on: vec![],
                 park_payload: None,
+                token_usage: 0,
+                wall_clock_secs: 0,
             }],
         }
     }
