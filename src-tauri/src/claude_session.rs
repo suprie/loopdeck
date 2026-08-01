@@ -1,7 +1,7 @@
 use crate::agents::{
     apply_agent_config, parse_ask_user_questions, parse_exit_plan, parse_stream_line,
     AgentResponse, AskUserQuestionSpec, ClaudeEvent, ContentBlock, ControlRequestBody,
-    ControlResponsePayload, ResponseAccumulator, StreamEvent,
+    ControlResponsePayload, ResponseAccumulator, StreamEvent, TokenBudget,
 };
 use crate::config::AgentConfig;
 use crate::conversation::Attachment;
@@ -1684,6 +1684,7 @@ impl ClaudeSession {
     /// Channel sends are best-effort — if the frontend closes the channel
     /// (e.g. navigates away mid-turn), the send is silently dropped and the
     /// turn continues to completion (the transcript is still recorded).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
@@ -1692,6 +1693,7 @@ impl ClaudeSession {
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
         plan_mode: bool,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         // Active reading is bounded per-`read_line` by READ_LINE_TIMEOUT (in
         // the select below); the parked phase — which that select excludes —
@@ -1833,6 +1835,28 @@ impl ClaudeSession {
                     Some(ev) => ev,
                     None => continue, // unrecognized line — skip
                 };
+
+                // Claude includes usage on each assistant message, before the
+                // terminal result event. Count those model-call deltas against
+                // the shared phase budget so an agentic turn is interrupted
+                // between tool calls instead of only being labelled after it
+                // has already finished overspending.
+                if let (
+                    Some(budget),
+                    StreamEvent::Assistant {
+                        message,
+                        session_id: _,
+                    },
+                ) = (token_budget, &stream_event)
+                {
+                    if let Some(usage) = &message.usage {
+                        let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+                        if budget.add(tokens) {
+                            self.write_interrupt_control_request().await;
+                            return Err(AppError::Limit(budget.exceeded_message()));
+                        }
+                    }
+                }
 
                 // Intercept permission requests and answer them inline (with UI
                 // narration) before any other handling — Claude blocks until it

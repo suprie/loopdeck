@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Loader2, Play, Square as StopIcon, Zap } from "lucide-react";
 import { toast } from "sonner";
-import type { AppError, RunPhase, RunPhaseStatus, RunPlan, StallPolicy } from "../../types";
+import type { AppError, RunBudgets, RunPhase, RunPhaseStatus, RunPlan, StallPolicy } from "../../types";
 import * as api from "../../lib/tauri";
 import {
   Select,
@@ -57,6 +57,9 @@ export function RunQueuePanel({
   const [plan, setPlan] = useState<RunPlan | null>(null);
   const [stallPolicy, setStallPolicy] = useState<StallPolicy>("continue_independent");
   const [draftPrAuthorized, setDraftPrAuthorized] = useState(false);
+  const [phaseTokenCap, setPhaseTokenCap] = useState("500000");
+  const [phaseMinutes, setPhaseMinutes] = useState("90");
+  const [runHours, setRunHours] = useState("8");
   const [queuing, setQueuing] = useState(false);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -81,11 +84,20 @@ export function RunQueuePanel({
   const handleQueue = async () => {
     setQueuing(true);
     try {
+      const budgets: RunBudgets = {
+        per_phase_token_cap: Number(phaseTokenCap),
+        per_phase_wall_clock_secs: Number(phaseMinutes) * 60,
+        total_run_wall_clock_secs: Number(runHours) * 60 * 60,
+      };
+      if (Object.values(budgets).some((value) => !Number.isSafeInteger(value) || value! <= 0)) {
+        throw new Error("Budget values must be positive whole numbers");
+      }
       const created = await api.createRunPlan(
         projectPath,
         selectedIds,
         stallPolicy,
         draftPrAuthorized,
+        budgets,
       );
       setPlan(created);
       onQueued();
@@ -192,6 +204,36 @@ export function RunQueuePanel({
             />
             Authorize draft PR
           </label>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            Tokens/phase
+            <input
+              type="number"
+              min="1"
+              value={phaseTokenCap}
+              onChange={(event) => setPhaseTokenCap(event.target.value)}
+              className="h-7 w-24 rounded border border-border bg-background px-1.5 text-xs text-foreground"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            Minutes/phase
+            <input
+              type="number"
+              min="1"
+              value={phaseMinutes}
+              onChange={(event) => setPhaseMinutes(event.target.value)}
+              className="h-7 w-14 rounded border border-border bg-background px-1.5 text-xs text-foreground"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            Hours/run
+            <input
+              type="number"
+              min="1"
+              value={runHours}
+              onChange={(event) => setRunHours(event.target.value)}
+              className="h-7 w-12 rounded border border-border bg-background px-1.5 text-xs text-foreground"
+            />
+          </label>
           <button
             onClick={handleQueue}
             disabled={queuing}
@@ -211,6 +253,7 @@ export function RunQueuePanel({
               <span className="text-[10px] text-muted-foreground">
                 {plan.phases.length} phase{plan.phases.length !== 1 ? "s" : ""} ·{" "}
                 {plan.stall_policy === "halt" ? "halt on stall" : "continue independent"}
+                {plan.environment.worktree_kept ? " · worktree kept for review" : ""}
               </span>
             </div>
             {isRunning ? (
@@ -294,6 +337,11 @@ function RunPhaseRow({
       {phase.park_payload && (
         <span title={phase.park_payload} className="shrink-0">
           <AlertTriangle size={11} style={{ color: "var(--warning)" }} />
+        </span>
+      )}
+      {phase.token_usage > 0 && (
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          {phase.token_usage.toLocaleString()} tok · {phase.wall_clock_secs}s
         </span>
       )}
       {needsInterview ? (

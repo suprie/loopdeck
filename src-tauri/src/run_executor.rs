@@ -11,8 +11,8 @@
 use crate::epic::LoopLocation;
 use crate::error::AppError;
 use crate::runplan::{
-    self, InterviewStatus, PinnedAnswer, RunBudgets, RunConsent, RunPhase, RunPhaseStatus, RunPlan,
-    StallPolicy,
+    self, InterviewStatus, PinnedAnswer, RunBudgets, RunConsent, RunEnvironment, RunPhase,
+    RunPhaseStatus, RunPlan, StallPolicy,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
@@ -77,6 +77,18 @@ pub(crate) fn extract_verdict(text: &str) -> Option<RunVerdict> {
     }
 }
 
+/// Extract the explicit artifact marker required for an unattended draft PR.
+/// Only a marker line counts, so an URL quoted in reasoning is never mistaken
+/// for proof that a draft was created.
+pub(crate) fn extract_draft_pr_url(text: &str) -> Option<String> {
+    text.lines().rev().find_map(|line| {
+        let value = line.trim().strip_prefix("**Draft PR:**")?.trim();
+        let url = value.split_whitespace().next()?;
+        (url.starts_with("https://github.com/") && url.contains("/pull/"))
+            .then(|| url.trim_end_matches(['.', ',', ')', ']']).to_string())
+    })
+}
+
 /// Build the prompt for one queued phase's orchestrated turn.
 ///
 /// Mirrors `commands::agent::build_next_loop_prompt`'s shape (same
@@ -132,7 +144,12 @@ pub(crate) fn build_phase_prompt(
              confirmation and run Phase 6 as `gh pr create --draft` (no `--web`). \
              The PR must be opened as a draft only — never mark it ready for \
              review or merge it. If Phase 6's `**Verdict:**` is not PASS, stop \
-             before invoking `loopdeck-open-pr` at all.",
+             before invoking `loopdeck-open-pr` at all. Before any push, run the \
+             unattended open-pr skill's required staged-diff secret scan; a hit \
+             must abort the draft PR and report a parked phase, never be ignored. \
+             After a successful draft creation, end your final response with an \
+             exact `**Draft PR:** https://github.com/<owner>/<repo>/pull/<number>` \
+             line so the executor can retain the review artifact.",
         );
     } else {
         prompt.push_str(
@@ -304,6 +321,8 @@ pub(crate) fn build_run_plan(
                 vec![execution_ids[i - 1].clone()]
             },
             park_payload: None,
+            token_usage: 0,
+            wall_clock_secs: 0,
         })
         .collect();
 
@@ -315,6 +334,8 @@ pub(crate) fn build_run_plan(
             draft_pr_authorized,
         },
         budgets: RunBudgets::default(),
+        environment: RunEnvironment::default(),
+        wall_clock_secs: 0,
         stall_policy,
         phases,
     }
@@ -529,6 +550,8 @@ mod tests {
             created: Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap(),
             consent: Default::default(),
             budgets: Default::default(),
+            environment: Default::default(),
+            wall_clock_secs: 0,
             stall_policy: Default::default(),
             phases: vec![
                 RunPhase {
@@ -538,6 +561,8 @@ mod tests {
                     interview_status: Default::default(),
                     depends_on: vec![],
                     park_payload: None,
+                    token_usage: 0,
+                    wall_clock_secs: 0,
                 },
                 RunPhase {
                     execution_id: "p/2".into(),
@@ -546,6 +571,8 @@ mod tests {
                     interview_status: Default::default(),
                     depends_on: vec![],
                     park_payload: None,
+                    token_usage: 0,
+                    wall_clock_secs: 0,
                 },
             ],
         };
@@ -582,6 +609,8 @@ mod tests {
             interview_status: Default::default(),
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             park_payload: None,
+            token_usage: 0,
+            wall_clock_secs: 0,
         }
     }
 
@@ -594,6 +623,8 @@ mod tests {
             created: Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap(),
             consent: Default::default(),
             budgets: Default::default(),
+            environment: Default::default(),
+            wall_clock_secs: 0,
             stall_policy: StallPolicy::ContinueIndependent,
             phases,
         }
@@ -703,6 +734,8 @@ mod tests {
                 interview_status: InterviewStatus::Answered,
                 depends_on: deps.iter().map(|d| d.to_string()).collect(),
                 park_payload: None,
+                token_usage: 0,
+                wall_clock_secs: 0,
             })
             .collect();
 
@@ -714,6 +747,8 @@ mod tests {
                 draft_pr_authorized: false,
             },
             budgets: RunBudgets::default(),
+            environment: RunEnvironment::default(),
+            wall_clock_secs: 0,
             stall_policy: StallPolicy::ContinueIndependent,
             phases,
         }

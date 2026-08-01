@@ -6,7 +6,7 @@
 
 use crate::agents::{
     AgentResponse, AskUserQuestionOption, AskUserQuestionSpec, ClaudeEvent, ContentBlockRecord,
-    UsageInfo,
+    TokenBudget, UsageInfo,
 };
 use crate::claude_session::{
     InterruptSlot, ParkSlots, PendingPermission, PendingQuestion, PermissionSlot, QuestionAnswers,
@@ -127,8 +127,15 @@ impl CodexSession {
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
-        self.send_turn(text, None, slots.question, slots.permission, interrupt_slot)
-            .await
+        self.send_turn(
+            text,
+            None,
+            slots.question,
+            slots.permission,
+            interrupt_slot,
+            None,
+        )
+        .await
     }
 
     /// See `send_message` for why `slots.plan` goes unused. No `plan_mode`
@@ -140,6 +147,7 @@ impl CodexSession {
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
             text,
@@ -147,6 +155,7 @@ impl CodexSession {
             slots.question,
             slots.permission,
             interrupt_slot,
+            token_budget,
         )
         .await
     }
@@ -213,6 +222,7 @@ impl CodexSession {
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         let result = self
             .send_turn_inner(
@@ -221,6 +231,7 @@ impl CodexSession {
                 question_slot,
                 permission_slot,
                 interrupt_slot,
+                token_budget,
             )
             .await;
         let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
@@ -236,6 +247,7 @@ impl CodexSession {
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         self.ensure_initialized().await?;
         let started = Instant::now();
@@ -274,6 +286,7 @@ impl CodexSession {
         let mut interrupt_requested = false;
         let mut interrupt_sent = false;
         let mut interrupt_deadline: Option<tokio::time::Instant> = None;
+        let mut budget_exceeded: Option<String> = None;
 
         loop {
             let stop_deadline = interrupt_deadline;
@@ -286,10 +299,13 @@ impl CodexSession {
                     }
                 } => {
                     self.abort_child();
-                    return Err(AppError::Agent(format!(
-                        "Codex did not complete the interrupted turn within {}s; the wedged app-server was terminated",
-                        INTERRUPT_GRACE_TIMEOUT.as_secs()
-                    )));
+                    return Err(match budget_exceeded {
+                        Some(reason) => AppError::Limit(reason),
+                        None => AppError::Agent(format!(
+                            "Codex did not complete the interrupted turn within {}s; the wedged app-server was terminated",
+                            INTERRUPT_GRACE_TIMEOUT.as_secs()
+                        )),
+                    });
                 }
                 interrupt = &mut interrupt_rx, if !interrupt_requested => {
                     if interrupt.is_ok() {
@@ -449,6 +465,30 @@ impl CodexSession {
                             total_cost_usd: 0.0,
                         });
                     }
+                    if budget_exceeded.is_none() {
+                        if let (Some(budget), Some(total)) =
+                            (token_budget, params.pointer("/tokenUsage/total"))
+                        {
+                            let tokens = nonnegative_u64(total.get("inputTokens"))
+                                .saturating_add(nonnegative_u64(total.get("outputTokens")));
+                            if budget.observe_total(tokens) {
+                                budget_exceeded = Some(budget.exceeded_message());
+                                interrupt_requested = true;
+                                interrupt_deadline =
+                                    Some(tokio::time::Instant::now() + INTERRUPT_GRACE_TIMEOUT);
+                                if let Some(turn_id) = active_turn_id.as_deref() {
+                                    let id = self.next_id();
+                                    self.write_message(json!({
+                                        "method": "turn/interrupt",
+                                        "id": id,
+                                        "params": { "threadId": thread_id, "turnId": turn_id }
+                                    }))
+                                    .await?;
+                                    interrupt_sent = true;
+                                }
+                            }
+                        }
+                    }
                 }
                 "error" => {
                     let error = params.get("error").unwrap_or(&params);
@@ -496,6 +536,9 @@ impl CodexSession {
                             duration_ms: response.duration_ms,
                             session_id: response.session_id.clone(),
                         });
+                    }
+                    if let Some(reason) = budget_exceeded {
+                        return Err(AppError::Limit(reason));
                     }
                     if interrupt_requested || status == "interrupted" {
                         return Err(AppError::Agent("turn interrupted by user".into()));

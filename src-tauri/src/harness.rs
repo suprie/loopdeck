@@ -6,7 +6,7 @@
 //! delegation surface so commands, transcript persistence, retry handling, and
 //! approval UI behave identically for both harnesses.
 
-use crate::agents::{AgentResponse, ClaudeEvent};
+use crate::agents::{AgentResponse, ClaudeEvent, TokenBudget};
 use crate::claude_session::{ClaudeSession, InterruptSlot, ParkSlots};
 use crate::codex_session::CodexSession;
 use crate::config::{AgentConfig, AgentHarness};
@@ -114,6 +114,7 @@ impl HarnessSession {
     /// point for that guarantee — any caller (not just the current frontend
     /// toggle, which separately fails closed while the harness is unknown)
     /// gets the same rejection.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
@@ -122,6 +123,7 @@ impl HarnessSession {
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
         plan_mode: bool,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         match self {
             Self::Claude(session) => {
@@ -133,6 +135,7 @@ impl HarnessSession {
                         slots,
                         interrupt_slot,
                         plan_mode,
+                        token_budget,
                     )
                     .await
             }
@@ -144,7 +147,7 @@ impl HarnessSession {
                     ));
                 }
                 session
-                    .send_message_streaming(text, channel, slots, interrupt_slot)
+                    .send_message_streaming(text, channel, slots, interrupt_slot, token_budget)
                     .await
             }
         }
