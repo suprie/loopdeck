@@ -2,7 +2,7 @@
 prd: prd-safety-prereqs
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: accepted
+status: completed
 
 description: >
   Harden the destructive floor's mv/cp gap and stand up a CI workflow before

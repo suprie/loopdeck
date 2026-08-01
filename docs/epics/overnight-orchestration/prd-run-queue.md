@@ -2,7 +2,7 @@
 prd: prd-run-queue
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: accepted
+status: completed
 description: >
   A persisted RunPlan model and a sequential queue executor: the user selects
   phases in the Epics view, answers a pre-flight interview while present, and
