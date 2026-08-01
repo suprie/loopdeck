@@ -2,7 +2,7 @@
 title: Support Project Management
 slug: support-project-management
 milestone: "0.2.0"
-status: in_progress
+status: completed
 started: 2026-07-08
 owner: Suprie
 description: >
