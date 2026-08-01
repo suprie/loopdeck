@@ -85,39 +85,35 @@ export function SpecEditor({
   }
 
   return (
-    <div className="rounded-lg border border-border bg-surface">
-      {/* Header: filename + tabs */}
+    <Tabs defaultValue="write" className="flex h-full flex-col rounded-lg border border-border bg-surface">
+      {/* Header: filename + tab switcher */}
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <span className="font-mono text-[11px] text-muted-foreground">{filename}</span>
-        <Tabs defaultValue="write">
-          <TabsList className="h-7">
-            <TabsTrigger value="write" className="px-2.5 py-0.5 text-[11px]">
-              Write
-            </TabsTrigger>
-            <TabsTrigger value="preview" className="px-2.5 py-0.5 text-[11px]">
-              Preview
-            </TabsTrigger>
-          </TabsList>
-
-          {/* Write */}
-          <TabsContent value="write">
-            <textarea
-              className="w-full min-h-[400px] resize-y bg-transparent px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground outline-none"
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              autoFocus
-              spellCheck={false}
-            />
-          </TabsContent>
-
-          {/* Preview */}
-          <TabsContent value="preview">
-            <div className="max-h-[500px] overflow-y-auto px-4 py-3">
-              <Markdown>{stripFrontmatter(content)}</Markdown>
-            </div>
-          </TabsContent>
-        </Tabs>
+        <TabsList className="h-7">
+          <TabsTrigger value="write" className="px-2.5 py-0.5 text-[11px]">
+            Write
+          </TabsTrigger>
+          <TabsTrigger value="preview" className="px-2.5 py-0.5 text-[11px]">
+            Preview
+          </TabsTrigger>
+        </TabsList>
       </div>
+
+      {/* Write */}
+      <TabsContent value="write" className="flex-1 m-0">
+        <textarea
+          className="w-full h-full resize-none bg-transparent px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground outline-none"
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          autoFocus
+          spellCheck={false}
+        />
+      </TabsContent>
+
+      {/* Preview */}
+      <TabsContent value="preview" className="flex-1 overflow-y-auto m-0 px-4 py-3">
+        <Markdown>{stripFrontmatter(content)}</Markdown>
+      </TabsContent>
 
       {/* Footer: save / cancel */}
       <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-2">
@@ -137,6 +133,6 @@ export function SpecEditor({
           Save
         </button>
       </div>
-    </div>
+    </Tabs>
   );
 }
