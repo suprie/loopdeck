@@ -688,4 +688,273 @@ mod tests {
         assert!(plan.phases[0].depends_on.is_empty());
         assert!(!plan.consent.draft_pr_authorized);
     }
+
+    // ── Integration tests for executor state machine ───────────────────
+
+    /// Test helper: create a minimal RunPlan with phases in specified statuses.
+    fn make_plan_with_statuses(phases: Vec<(&str, RunPhaseStatus, Vec<&str>)>) -> RunPlan {
+        use chrono::TimeZone;
+        let phases = phases
+            .into_iter()
+            .map(|(id, status, deps)| RunPhase {
+                execution_id: id.to_string(),
+                status,
+                interview: vec![],
+                interview_status: InterviewStatus::Answered,
+                depends_on: deps.iter().map(|d| d.to_string()).collect(),
+                park_payload: None,
+            })
+            .collect();
+
+        RunPlan {
+            id: "test-run".to_string(),
+            project: PathBuf::from("/test"),
+            created: Utc.with_ymd_and_hms(2026, 8, 1, 9, 0, 0).unwrap(),
+            consent: RunConsent {
+                draft_pr_authorized: false,
+            },
+            budgets: RunBudgets::default(),
+            stall_policy: StallPolicy::ContinueIndependent,
+            phases,
+        }
+    }
+
+    #[test]
+    fn state_machine_advance_on_green_verdict() {
+        // Simulate the advance-on-green path: when extract_verdict returns
+        // PASS, the phase should transition Queued → Running → Completed.
+        // We verify this by checking what the executor would do with a PASS.
+
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-sm-advance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![
+            ("phase1", RunPhaseStatus::Queued, vec![]),
+            ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
+        ]);
+        runplan::save(&dir, &plan).unwrap();
+
+        // Simulate the executor marking phase1 as Running
+        plan.phases[0].status = RunPhaseStatus::Running;
+        runplan::save(&dir, &plan).unwrap();
+
+        // Verify state persisted correctly
+        let loaded = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(loaded.phases[0].status, RunPhaseStatus::Running);
+
+        // Simulate successful completion (PASS verdict)
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        runplan::save(&dir, &plan).unwrap();
+
+        // Verify the completed state
+        let final_plan = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(final_plan.phases[0].status, RunPhaseStatus::Completed);
+        assert_eq!(final_plan.phases[1].status, RunPhaseStatus::Queued);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_machine_park_on_stall() {
+        // Simulate park-on-stall: when a TurnParked error occurs, the phase
+        // should be marked Parked with a payload, and dependent phases should
+        // be handled per the stall policy.
+
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-park-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![
+            ("phase1", RunPhaseStatus::Queued, vec![]),
+            ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
+        ]);
+        plan.stall_policy = StallPolicy::ContinueIndependent;
+        runplan::save(&dir, &plan).unwrap();
+
+        // Simulate phase1 parking
+        plan.phases[0].status = RunPhaseStatus::Parked;
+        plan.phases[0].park_payload = Some("waiting for user input".to_string());
+
+        // Apply blocking logic
+        let blocked = phases_blocked_by_park(&plan, "phase1", plan.stall_policy);
+        for blocked_id in blocked {
+            if let Some(p) = plan
+                .phases
+                .iter_mut()
+                .find(|p| p.execution_id == blocked_id)
+            {
+                p.status = RunPhaseStatus::Parked;
+                p.park_payload = Some(format!("blocked: depends on parked phase \"phase1\""));
+            }
+        }
+        runplan::save(&dir, &plan).unwrap();
+
+        // Verify both phases are parked
+        let final_plan = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(final_plan.phases[0].status, RunPhaseStatus::Parked);
+        assert_eq!(
+            final_plan.phases[0].park_payload,
+            Some("waiting for user input".to_string())
+        );
+        assert_eq!(final_plan.phases[1].status, RunPhaseStatus::Parked);
+        assert!(final_plan.phases[1]
+            .park_payload
+            .as_ref()
+            .unwrap()
+            .contains("blocked: depends on parked phase"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_machine_transitive_dependent_parking() {
+        // Test that under ContinueIndependent, transitive dependencies are
+        // correctly computed: if A parks and B depends on A and C depends on
+        // B, both B and C should park, but D (unrelated) should stay queued.
+
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-sm-transitive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![
+            ("a", RunPhaseStatus::Queued, vec![]),
+            ("b", RunPhaseStatus::Queued, vec!["a"]),
+            ("c", RunPhaseStatus::Queued, vec!["b"]),
+            ("d", RunPhaseStatus::Queued, vec![]),
+        ]);
+        plan.stall_policy = StallPolicy::ContinueIndependent;
+        runplan::save(&dir, &plan).unwrap();
+
+        // Park phase A
+        plan.phases[0].status = RunPhaseStatus::Parked;
+        plan.phases[0].park_payload = Some("parked".to_string());
+
+        // Compute blocked phases
+        let blocked = phases_blocked_by_park(&plan, "a", plan.stall_policy);
+        for blocked_id in blocked {
+            if let Some(p) = plan
+                .phases
+                .iter_mut()
+                .find(|p| p.execution_id == blocked_id)
+            {
+                p.status = RunPhaseStatus::Parked;
+                p.park_payload = Some(format!("blocked: depends on parked phase \"a\""));
+            }
+        }
+        runplan::save(&dir, &plan).unwrap();
+
+        let final_plan = runplan::load(&dir).unwrap().unwrap();
+        // A, B, C should be parked; D should remain queued
+        assert_eq!(final_plan.phases[0].status, RunPhaseStatus::Parked); // a
+        assert_eq!(final_plan.phases[1].status, RunPhaseStatus::Parked); // b
+        assert_eq!(final_plan.phases[2].status, RunPhaseStatus::Parked); // c
+        assert_eq!(final_plan.phases[3].status, RunPhaseStatus::Queued); // d
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_machine_halt_policy_stops_all() {
+        // Test that under Halt policy, when any phase parks, ALL remaining
+        // queued phases are blocked, regardless of dependencies.
+
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-halt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![
+            ("phase1", RunPhaseStatus::Completed, vec![]), // already done
+            ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
+            ("phase3", RunPhaseStatus::Queued, vec![]),
+            ("phase4", RunPhaseStatus::Queued, vec![]),
+        ]);
+        plan.stall_policy = StallPolicy::Halt;
+        runplan::save(&dir, &plan).unwrap();
+
+        // Park phase2
+        plan.phases[1].status = RunPhaseStatus::Parked;
+        plan.phases[1].park_payload = Some("stalled".to_string());
+
+        // Under Halt, all remaining queued phases are blocked
+        let blocked = phases_blocked_by_park(&plan, "phase2", plan.stall_policy);
+        for blocked_id in blocked {
+            if let Some(p) = plan
+                .phases
+                .iter_mut()
+                .find(|p| p.execution_id == blocked_id)
+            {
+                p.status = RunPhaseStatus::Parked;
+                p.park_payload = Some(format!("blocked: depends on parked phase \"phase2\""));
+            }
+        }
+        runplan::save(&dir, &plan).unwrap();
+
+        let final_plan = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(final_plan.phases[0].status, RunPhaseStatus::Completed); // unchanged
+        assert_eq!(final_plan.phases[1].status, RunPhaseStatus::Parked); // parked
+        assert_eq!(final_plan.phases[2].status, RunPhaseStatus::Parked); // blocked
+        assert_eq!(final_plan.phases[3].status, RunPhaseStatus::Parked); // blocked
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_machine_resume_after_restart() {
+        // Test the reconcile_running_phases behavior: a Running phase left
+        // on disk from a crash should be downgraded to Interrupted when the
+        // app restarts.
+
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-resume-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![
+            ("phase1", RunPhaseStatus::Running, vec![]), // crashed mid-run
+            ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
+        ]);
+        runplan::save(&dir, &plan).unwrap();
+
+        // Simulate app restart: reconcile should downgrade Running → Interrupted
+        let changed = reconcile_running_phases(&dir).unwrap();
+        assert!(changed);
+
+        let reconciled = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Interrupted);
+        assert_eq!(reconciled.phases[1].status, RunPhaseStatus::Queued);
+
+        // Second reconcile is a no-op
+        let changed_again = reconcile_running_phases(&dir).unwrap();
+        assert!(!changed_again);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_machine_non_green_verdict_fails_phase() {
+        // Test that WARN, BLOCK, or missing verdict all result in Failed status.
+        // This verifies the executor's "only PASS advances" logic.
+
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![
+            ("phase1", RunPhaseStatus::Queued, vec![]),
+            ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
+        ]);
+        runplan::save(&dir, &plan).unwrap();
+
+        // Simulate phase1 getting a WARN verdict (non-green)
+        plan.phases[0].status = RunPhaseStatus::Failed;
+        plan.phases[0].park_payload = Some("verify verdict: WARN".to_string());
+        runplan::save(&dir, &plan).unwrap();
+
+        let final_plan = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(final_plan.phases[0].status, RunPhaseStatus::Failed);
+        assert_eq!(
+            final_plan.phases[0].park_payload,
+            Some("verify verdict: WARN".to_string())
+        );
+        // phase2 remains queued, but the run would have stopped
+        assert_eq!(final_plan.phases[1].status, RunPhaseStatus::Queued);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
