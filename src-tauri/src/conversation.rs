@@ -99,6 +99,24 @@ pub struct TaskRecord {
     pub status: String,
 }
 
+/// An image the human attached to a user turn.
+///
+/// Stored inline as base64 (not as a path to a file on disk) so a transcript
+/// line is self-contained: no sidecar directory to keep in sync, nothing to
+/// garbage-collect when a conversation is archived, and no broken thumbnails
+/// if the project moves. The cost is transcript size, which the frontend
+/// bounds by downscaling before it ever reaches this struct — see
+/// `MAX_ATTACHMENT_BYTES` for the backstop that rejects anything larger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Attachment {
+    /// IANA media type, e.g. `image/png`. Passed straight through to the
+    /// Anthropic content block, so it must be one the API accepts.
+    pub media_type: String,
+    /// Standard-alphabet base64 of the raw image bytes, **without** a
+    /// `data:` URI prefix — the wire format the content block expects.
+    pub data: String,
+}
+
 /// A single turn in the persisted conversation transcript.
 ///
 /// Serialized as one JSON object per line in `active.jsonl`. The shape is
@@ -181,9 +199,24 @@ pub struct ConversationTurn {
     /// turns with no task activity; `#[serde(default)]` keeps old lines loadable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<TaskRecord>,
+    /// Images the human attached to this user turn, in composer order. Always
+    /// empty on assistant turns and on auto-generated loop prompts. Old
+    /// transcripts load as an empty vec via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 impl ConversationTurn {
+    /// Attach images to a user turn.
+    ///
+    /// A builder step rather than a parameter on [`user`](Self::user) because
+    /// the overwhelming majority of turns have none, and threading an empty
+    /// `Vec` through every call site would be noise.
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
     /// Build a user turn at the current time (typed by the human).
     pub fn user(text: impl Into<String>) -> Self {
         Self {
@@ -201,6 +234,7 @@ impl ConversationTurn {
             tool_calls: Vec::new(),
             blocks: Vec::new(),
             tasks: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -223,6 +257,8 @@ impl ConversationTurn {
             tool_calls: Vec::new(),
             blocks: Vec::new(),
             tasks: Vec::new(),
+            // Auto-generated loop prompts are text-only by construction.
+            attachments: Vec::new(),
         }
     }
 
@@ -268,6 +304,9 @@ impl ConversationTurn {
             tool_calls,
             blocks,
             tasks,
+            // Attachments are a human-composer concept; the assistant never
+            // produces them.
+            attachments: Vec::new(),
         }
     }
 
@@ -304,6 +343,7 @@ impl ConversationTurn {
             tool_calls: Vec::new(),
             blocks: Vec::new(),
             tasks: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }

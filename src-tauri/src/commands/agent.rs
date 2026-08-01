@@ -8,7 +8,7 @@ use super::state::{
 };
 use crate::agents::{AgentResponse, ClaudeEvent};
 use crate::claude_session::{ParkSlots, QuestionAnswers};
-use crate::conversation::{self, ConversationSummary, ConversationTurn};
+use crate::conversation::{self, Attachment, ConversationSummary, ConversationTurn};
 use crate::error::AppError;
 use crate::harness::HarnessSession;
 use crate::limits;
@@ -67,12 +67,16 @@ pub async fn agent_start_loop(
 pub async fn agent_send_message(
     path: String,
     prompt: String,
+    attachments: Option<Vec<Attachment>>,
     state: State<'_, AppState>,
 ) -> Result<AgentResponse, AppError> {
     debug!("agent_send_message called for path: {path}");
     let root = resolve_root(&state, &path)?;
+    // `Option` so existing callers that omit the argument keep working —
+    // Tauri deserializes a missing field to `None` rather than erroring.
+    let attachments = validate_attachments(attachments.unwrap_or_default())?;
 
-    let response = send_and_record(&state, &root, &prompt).await?;
+    let response = send_and_record(&state, &root, &prompt, &attachments).await?;
     info!("agent_send_message complete for: {path}");
     Ok(response)
 }
@@ -124,14 +128,16 @@ pub async fn agent_start_loop_streaming(
 pub async fn agent_send_message_streaming(
     path: String,
     prompt: String,
+    attachments: Option<Vec<Attachment>>,
     on_event: Channel<ClaudeEvent>,
     plan_mode: bool,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     debug!("agent_send_message_streaming called for path: {path}, plan_mode: {plan_mode}");
     let root = resolve_root(&state, &path)?;
+    let attachments = validate_attachments(attachments.unwrap_or_default())?;
 
-    send_and_record_streaming(&state, &root, &prompt, &on_event, plan_mode).await?;
+    send_and_record_streaming(&state, &root, &prompt, &attachments, &on_event, plan_mode).await?;
     info!("agent_send_message_streaming complete for: {path}");
     Ok(())
 }
@@ -1064,6 +1070,7 @@ fn next_unchecked_loop_step(path: &Path) -> Option<String> {
 async fn send_with_retry(
     session: &mut HarnessSession,
     prompt: &str,
+    attachments: &[Attachment],
     slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
 ) -> Result<AgentResponse, AppError> {
@@ -1074,7 +1081,9 @@ async fn send_with_retry(
     let mut attempt: u32 = 0;
     let mut elapsed_ms: u64 = 0;
     loop {
-        let response = session.send_message(prompt, slots, interrupt_slot).await?;
+        let response = session
+            .send_message(prompt, attachments, slots, interrupt_slot)
+            .await?;
 
         // Done unless this is a retryable transient overload.
         if !(response.is_error && retry::is_overloaded(&response.result)) {
@@ -1119,9 +1128,11 @@ async fn send_with_retry(
 /// "Retrying 2/4 in 4s…" — otherwise the frontend would see a terminal
 /// `Result{is_error:true}` followed, silently, by a second `Result`. The final
 /// `Result` event (success or terminal failure) remains authoritative.
+#[allow(clippy::too_many_arguments)]
 async fn send_streaming_with_retry(
     session: &mut HarnessSession,
     prompt: &str,
+    attachments: &[Attachment],
     channel: &Channel<ClaudeEvent>,
     slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
@@ -1131,7 +1142,14 @@ async fn send_streaming_with_retry(
     let mut elapsed_ms: u64 = 0;
     loop {
         let response = session
-            .send_message_streaming(prompt, channel, slots, interrupt_slot, plan_mode)
+            .send_message_streaming(
+                prompt,
+                attachments,
+                channel,
+                slots,
+                interrupt_slot,
+                plan_mode,
+            )
             .await?;
 
         if !(response.is_error && retry::is_overloaded(&response.result)) {
@@ -1231,10 +1249,169 @@ fn mark_turn_terminal(path: &Path, _err: &AppError) {
 /// returns the structured response. The transcript append is best-effort: a
 /// write failure is logged but doesn't fail the turn — the live result still
 /// reaches the UI.
+/// Read an image file from disk into an inline-base64 [`Attachment`].
+///
+/// Exists for the composer's drag-and-drop path only. A drop is delivered by
+/// Tauri as a *filesystem path*, not as bytes — unlike paste and the file
+/// picker, which hand the webview a `File` directly — so something has to read
+/// it. (Tauri's native drag-drop is what delivers folder drops to the import
+/// screen; switching the window to webview-level HTML5 drops in order to get
+/// bytes in the browser would break that, hence this command.)
+///
+/// Returns the raw file bytes base64-encoded at original size. The caller
+/// re-runs the result through the same downscale pipeline that paste uses, so
+/// the transcript-size guarantees hold no matter which affordance was used.
+#[tauri::command]
+pub async fn agent_read_image_attachment(path: String) -> Result<Attachment, AppError> {
+    let path = PathBuf::from(&path);
+
+    // Media type is derived from the extension rather than sniffed: the value
+    // is echoed to the model as the content block's `media_type`, and the
+    // frontend re-encodes anyway, so a mislabelled extension degrades to a
+    // decode failure in the browser rather than anything dangerous.
+    let media_type = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => {
+            return Err(AppError::Agent(String::from(
+                "not an image file — drop a PNG, JPEG, GIF, or WebP",
+            )))
+        }
+    };
+
+    // Check the size before reading so a multi-gigabyte file is refused rather
+    // than pulled into memory first. The budget is on base64 length, which
+    // inflates the raw bytes by 4/3.
+    let raw_budget = limits::ATTACHMENT_MAX_BYTES / 4 * 3;
+    let len = std::fs::metadata(&path)
+        .map_err(|e| AppError::Agent(format!("could not read {}: {e}", path.display())))?
+        .len();
+    if len as usize > raw_budget {
+        return Err(AppError::Limit(format!(
+            "image is too large: {len} bytes (max {raw_budget})"
+        )));
+    }
+
+    let bytes = std::fs::read(&path)
+        .map_err(|e| AppError::Agent(format!("could not read {}: {e}", path.display())))?;
+
+    Ok(Attachment {
+        media_type: String::from(media_type),
+        data: base64_encode(&bytes),
+    })
+}
+
+/// Standard-alphabet base64 with padding.
+///
+/// Hand-rolled to avoid pulling in a dependency for ~15 lines used on exactly
+/// one path; the `data` field's contract (unwrapped, standard alphabet, no
+/// line breaks) is narrow enough that the generality of a crate buys nothing.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Bound and sanity-check composer attachments at the IPC boundary.
+///
+/// The frontend already downscales and re-encodes before invoking, so in
+/// normal operation nothing here ever trips. It exists because the IPC surface
+/// is reachable by anything running in the webview, and everything downstream
+/// treats these bytes as trusted: they go inline into the NDJSON line written
+/// to the agent's stdin *and* into the on-disk transcript. An unbounded or
+/// malformed value would corrupt one or both.
+///
+/// Only structural properties are checked — size, count, media type, and that
+/// the payload is really standard base64 with no embedded newline (which would
+/// split the single-line NDJSON turn into two malformed ones). Whether the
+/// decoded bytes are a valid image is the model's problem, not ours.
+fn validate_attachments(attachments: Vec<Attachment>) -> Result<Vec<Attachment>, AppError> {
+    /// Media types the Anthropic content block accepts. A value outside this
+    /// set would be rejected by the API mid-turn with a far less obvious
+    /// error, so it fails here instead.
+    const ALLOWED_MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+    if attachments.len() > limits::ATTACHMENTS_MAX_COUNT {
+        return Err(AppError::Limit(format!(
+            "too many attachments: {} (max {})",
+            attachments.len(),
+            limits::ATTACHMENTS_MAX_COUNT
+        )));
+    }
+
+    let mut total = 0usize;
+    for attachment in &attachments {
+        if !ALLOWED_MEDIA_TYPES.contains(&attachment.media_type.as_str()) {
+            return Err(AppError::Limit(format!(
+                "unsupported attachment media type: {} (expected one of {})",
+                attachment.media_type,
+                ALLOWED_MEDIA_TYPES.join(", ")
+            )));
+        }
+        if attachment.data.len() > limits::ATTACHMENT_MAX_BYTES {
+            return Err(AppError::Limit(format!(
+                "attachment is too large: {} bytes of base64 (max {})",
+                attachment.data.len(),
+                limits::ATTACHMENT_MAX_BYTES
+            )));
+        }
+        // Rejects whitespace-wrapped base64 (some encoders line-wrap at 76
+        // chars) as well as a `data:` URI prefix that was never stripped.
+        if !attachment
+            .data
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+        {
+            return Err(AppError::Limit(String::from(
+                "attachment data is not unwrapped standard base64 (strip any data: URI prefix and line breaks)",
+            )));
+        }
+        total = total.saturating_add(attachment.data.len());
+    }
+
+    if total > limits::ATTACHMENTS_MAX_TOTAL_BYTES {
+        return Err(AppError::Limit(format!(
+            "attachments total {} bytes of base64 (max {})",
+            total,
+            limits::ATTACHMENTS_MAX_TOTAL_BYTES
+        )));
+    }
+
+    Ok(attachments)
+}
+
 async fn send_and_record(
     state: &AppState,
     path: &Path,
     prompt: &str,
+    attachments: &[Attachment],
 ) -> Result<AgentResponse, AppError> {
     let session_arc = with_session(state, path).await?;
     let mut session = session_arc.lock().await;
@@ -1249,7 +1426,10 @@ async fn send_and_record(
     };
 
     // 1. Record the user turn first (crash-safety: intent survives).
-    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
+    if let Err(e) = conversation::append_turn(
+        path,
+        &ConversationTurn::user(prompt).with_attachments(attachments.to_vec()),
+    ) {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
@@ -1260,7 +1440,7 @@ async fn send_and_record(
     //    an orphan. The `Err` path skips that recording, leaving the user turn
     //    from step 1 dangling; reconcile it to a truthful `interrupted` state
     //    before re-propagating so the transcript never hangs unanswered.
-    let response = match send_with_retry(&mut session, prompt, &slots, &islot).await {
+    let response = match send_with_retry(&mut session, prompt, attachments, &slots, &islot).await {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
@@ -1313,6 +1493,7 @@ async fn send_and_record_streaming(
     state: &AppState,
     path: &Path,
     prompt: &str,
+    attachments: &[Attachment],
     channel: &Channel<ClaudeEvent>,
     plan_mode: bool,
 ) -> Result<(), AppError> {
@@ -1329,7 +1510,10 @@ async fn send_and_record_streaming(
     };
 
     // 1. Record the user turn first (crash-safety: intent survives).
-    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user(prompt)) {
+    if let Err(e) = conversation::append_turn(
+        path,
+        &ConversationTurn::user(prompt).with_attachments(attachments.to_vec()),
+    ) {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
@@ -1337,16 +1521,23 @@ async fn send_and_record_streaming(
     //    non-streaming pipelines for the interruption-recovery rationale: a
     //    transport/child failure (`Err`) orphans the user turn from step 1, so
     //    we reconcile it to `interrupted` before re-propagating the error.
-    let response =
-        match send_streaming_with_retry(&mut session, prompt, channel, &slots, &islot, plan_mode)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                mark_turn_terminal(path, &e);
-                return Err(e);
-            }
-        };
+    let response = match send_streaming_with_retry(
+        &mut session,
+        prompt,
+        attachments,
+        channel,
+        &slots,
+        &islot,
+        plan_mode,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            mark_turn_terminal(path, &e);
+            return Err(e);
+        }
+    };
 
     // 3. Record the assistant turn (best-effort). Includes thinking + tool
     //    calls so the persisted transcript captures the full reasoning trail,
@@ -1505,7 +1696,10 @@ pub(crate) async fn start_fresh_and_record(
     //    an orphan. The `Err` path skips that recording, leaving the user turn
     //    from step 1 dangling; reconcile it to a truthful `interrupted` state
     //    before re-propagating so the transcript never hangs unanswered.
-    let response = match send_with_retry(&mut session, prompt, &slots, &islot).await {
+    //
+    //    No attachments: this is the auto-built loop prompt, which is text by
+    //    construction (there is no composer in the loop path to attach from).
+    let response = match send_with_retry(&mut session, prompt, &[], &slots, &islot).await {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(path, &e);
@@ -1581,8 +1775,11 @@ pub(crate) async fn start_fresh_and_record_streaming(
     //    we reconcile it to `interrupted` before re-propagating the error.
     // Start never runs under plan mode — it's the auto-built next-loop prompt,
     // not a human follow-up with the composer's Plan-mode toggle.
+    // No attachments — the loop prompt is text by construction (see the
+    // non-streaming fresh-start path).
     let response =
-        match send_streaming_with_retry(&mut session, prompt, channel, &slots, &islot, false).await
+        match send_streaming_with_retry(&mut session, prompt, &[], channel, &slots, &islot, false)
+            .await
         {
             Ok(r) => r,
             Err(e) => {
@@ -1613,6 +1810,135 @@ pub(crate) async fn start_fresh_and_record_streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attachment(data: &str) -> Attachment {
+        Attachment {
+            media_type: String::from("image/png"),
+            data: String::from(data),
+        }
+    }
+
+    /// Vectors from RFC 4648 §10, which exercise all three padding cases.
+    #[test]
+    fn base64_encode_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// Exercises the `+` and `/` end of the alphabet, which the ASCII-only
+    /// vectors above never reach.
+    #[test]
+    fn base64_encode_covers_the_high_alphabet() {
+        assert_eq!(base64_encode(&[0xfb, 0xff, 0xfe]), "+//+");
+        assert_eq!(base64_encode(&[0x00, 0x00, 0x00]), "AAAA");
+    }
+
+    /// The drag-and-drop path end to end on the backend side: a real file on
+    /// disk in, a validated attachment out.
+    #[tokio::test]
+    async fn read_image_attachment_encodes_a_file_from_disk() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-attach-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shot.png");
+        std::fs::write(&file, b"foobar").unwrap();
+
+        let attachment = agent_read_image_attachment(file.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(attachment.media_type, "image/png");
+        assert_eq!(attachment.data, "Zm9vYmFy");
+        // The result must survive the same boundary a pasted image crosses.
+        validate_attachments(vec![attachment]).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_image_attachment_rejects_a_non_image_extension() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-attach-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, b"hello").unwrap();
+
+        let err = agent_read_image_attachment(file.to_string_lossy().into_owned())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Agent(_)), "got {err:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Extension casing comes from the OS, not from us.
+    #[tokio::test]
+    async fn read_image_attachment_accepts_uppercase_extensions() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-attach-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("PHOTO.JPG");
+        std::fs::write(&file, b"foo").unwrap();
+
+        let attachment = agent_read_image_attachment(file.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(attachment.media_type, "image/jpeg");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_accepts_ordinary_attachments() {
+        let ok = validate_attachments(vec![attachment("Zm9vYmFy")]).unwrap();
+        assert_eq!(ok.len(), 1);
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_media_type() {
+        let err = validate_attachments(vec![Attachment {
+            media_type: String::from("image/svg+xml"),
+            data: String::from("Zm9v"),
+        }])
+        .unwrap_err();
+        assert!(matches!(err, AppError::Limit(_)), "got {err:?}");
+    }
+
+    /// A `data:` prefix or line-wrapped base64 would corrupt the single-line
+    /// NDJSON turn, so it must not reach the session layer.
+    #[test]
+    fn validate_rejects_non_bare_base64() {
+        let wrapped = validate_attachments(vec![attachment("Zm9v\nYmFy")]).unwrap_err();
+        assert!(matches!(wrapped, AppError::Limit(_)), "got {wrapped:?}");
+
+        let prefixed =
+            validate_attachments(vec![attachment("data:image/png;base64,Zm9v")]).unwrap_err();
+        assert!(matches!(prefixed, AppError::Limit(_)), "got {prefixed:?}");
+    }
+
+    #[test]
+    fn validate_rejects_too_many_attachments() {
+        let many = vec![attachment("Zm9v"); limits::ATTACHMENTS_MAX_COUNT + 1];
+        let err = validate_attachments(many).unwrap_err();
+        assert!(matches!(err, AppError::Limit(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn validate_rejects_an_oversized_single_attachment() {
+        let huge = attachment(&"A".repeat(limits::ATTACHMENT_MAX_BYTES + 1));
+        let err = validate_attachments(vec![huge]).unwrap_err();
+        assert!(matches!(err, AppError::Limit(_)), "got {err:?}");
+    }
+
+    /// Each image can be under the per-image cap while the turn as a whole
+    /// still writes an unreasonable NDJSON line.
+    #[test]
+    fn validate_rejects_an_oversized_total_across_attachments() {
+        let each = attachment(&"A".repeat(limits::ATTACHMENT_MAX_BYTES));
+        let err = validate_attachments(vec![each; 4]).unwrap_err();
+        assert!(matches!(err, AppError::Limit(_)), "got {err:?}");
+    }
 
     #[test]
     fn next_unchecked_step_finds_first_unchecked() {

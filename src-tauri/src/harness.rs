@@ -10,6 +10,7 @@ use crate::agents::{AgentResponse, ClaudeEvent};
 use crate::claude_session::{ClaudeSession, InterruptSlot, ParkSlots};
 use crate::codex_session::CodexSession;
 use crate::config::{AgentConfig, AgentHarness};
+use crate::conversation::Attachment;
 use crate::error::AppError;
 use crate::permission::PermissionPolicy;
 use std::path::Path;
@@ -64,13 +65,41 @@ impl HarnessSession {
     pub async fn send_message(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
         match self {
-            Self::Claude(session) => session.send_message(text, slots, interrupt_slot).await,
-            Self::Codex(session) => session.send_message(text, slots, interrupt_slot).await,
+            Self::Claude(session) => {
+                session
+                    .send_message(text, attachments, slots, interrupt_slot)
+                    .await
+            }
+            Self::Codex(session) => {
+                Self::reject_attachments(attachments)?;
+                session.send_message(text, slots, interrupt_slot).await
+            }
         }
+    }
+
+    /// Image attachments are Claude-only for now — the Codex app-server's
+    /// `turn/start` takes its own input-item shape, which this adapter has not
+    /// been taught yet.
+    ///
+    /// Rejected loudly rather than dropped silently, for the same reason
+    /// `plan_mode` is (see `send_message_streaming`): a user who pastes a
+    /// screenshot and asks "what's wrong here?" would otherwise get a
+    /// confident answer about an image the model never received. A hard error
+    /// makes the gap visible at the boundary instead of turning it into a
+    /// baffling reply. The frontend disables the attach affordances while the
+    /// project's harness is Codex; this is the backstop for every other caller.
+    fn reject_attachments(attachments: &[Attachment]) -> Result<(), AppError> {
+        if attachments.is_empty() {
+            return Ok(());
+        }
+        Err(AppError::Agent(
+            "image attachments are not supported by the Codex harness — switch the project to the Claude harness to send images".into(),
+        ))
     }
 
     /// `plan_mode` only has meaning for Claude — it toggles the CLI's `plan`
@@ -88,6 +117,7 @@ impl HarnessSession {
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
@@ -96,10 +126,18 @@ impl HarnessSession {
         match self {
             Self::Claude(session) => {
                 session
-                    .send_message_streaming(text, channel, slots, interrupt_slot, plan_mode)
+                    .send_message_streaming(
+                        text,
+                        attachments,
+                        channel,
+                        slots,
+                        interrupt_slot,
+                        plan_mode,
+                    )
                     .await
             }
             Self::Codex(session) => {
+                Self::reject_attachments(attachments)?;
                 if plan_mode {
                     return Err(AppError::Agent(
                         "plan mode is a Claude-only feature and is not supported by the Codex harness".into(),
