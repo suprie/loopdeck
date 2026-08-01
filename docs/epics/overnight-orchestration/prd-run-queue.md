@@ -83,9 +83,9 @@ Directional; refine during implementation.
   pass is a bounded session per phase whose `AskUserQuestion` payloads render
   as the same cards the chat already shows, answered while the user is
   present.
-- **IPC**: `queue_run`, `cancel_run`, `get_run_status` commands + TS wrappers
-  in `lib/tauri.ts` and types in `types/index.ts`, matching the existing
-  typed-wrapper convention (never raw `invoke()`).
+- **IPC**: `create_run_plan`, `queue_run`, `cancel_run`, `get_run_status`
+  commands + TS wrappers in `lib/tauri.ts` and types in `types/index.ts`,
+  matching the existing typed-wrapper convention (never raw `invoke()`).
 
 ## Phases
 
@@ -121,9 +121,9 @@ Directional; refine during implementation.
 
 ### Phase 5 — Phase picker UI
 
-- [ ] Add phase multi-select and a "Queue overnight run" action to `EpicsPanel.tsx`
-- [ ] Add a run-queue view showing live per-phase status (queued/running/parked/completed/failed/killed) via the existing streaming state
-- [ ] Interview UI: present pre-flight questions as the existing question cards, gating the "Start run" action
+- [x] Add phase multi-select and a "Queue overnight run" action to `EpicsPanel.tsx` (2026-08-01) — a `Square`/`CheckSquare` toggle button next to each not-done, stable-ID loop (`EpicsPanel.tsx`) feeds a selection array into the new `RunQueuePanel`; its picker bar (stall-policy `Select`, draft-PR-authorized checkbox, "Queue overnight run" button) calls the new `create_run_plan` command
+- [x] Add a run-queue view showing live per-phase status (queued/running/parked/completed/failed/killed) via the existing streaming state (2026-08-01) — `RunQueuePanel.tsx` polls `get_run_status` every 5s and renders a status-colored badge + `park_payload` tooltip per phase, with "Start run"/"Cancel run" actions
+- [x] Interview UI: present pre-flight questions as the existing question cards, gating the "Start run" action (2026-08-01) — needed no new question-card plumbing: `run_phase_interview` drives its turn through the same `start_fresh_and_record` pipeline as any other turn, so a parked `AskUserQuestion` lands in the same shared `AppState` slot `ProjectDetail.tsx`'s tab-agnostic `StuckQuestionCallout` already renders from, regardless of which tab is active. `RunQueuePanel` only needed "Answer" (awaits `run_phase_interview`) / "Skip" (`skip_phase_interview`) buttons per pending phase and a `canStart` gate requiring every `queued` phase's `interview_status !== "pending"`
 
 ### Phase 6 — Tests
 

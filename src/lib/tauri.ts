@@ -14,6 +14,7 @@ import type {
   MigrationPreview,
   ProgressSnapshot,
   RunPlan,
+  StallPolicy,
   AgentResponse,
   ClaudeEvent,
   ConversationTurn,
@@ -211,6 +212,29 @@ export async function getProgressSnapshot(path: string): Promise<ProgressSnapsho
  */
 export async function exportExecutionSummary(path: string): Promise<string> {
   return invoke<string>("export_execution_summary", { path });
+}
+
+/**
+ * Build and persist a new run plan from a phase-picker selection
+ * (prd-run-queue Phase 5): the given execution IDs, in selection order,
+ * under one queue-time stall policy and draft-PR consent. Every phase starts
+ * `queued` / interview `pending`. Replaces any existing plan for the project
+ * outright; rejects if a run is already in progress or an ID doesn't
+ * resolve to a real PRD checklist loop.
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized) -> Result<RunPlan, AppError>
+ */
+export async function createRunPlan(
+  path: string,
+  executionIds: string[],
+  stallPolicy: StallPolicy,
+  draftPrAuthorized: boolean,
+): Promise<RunPlan> {
+  return invoke<RunPlan>("create_run_plan", {
+    path,
+    executionIds,
+    stallPolicy,
+    draftPrAuthorized,
+  });
 }
 
 /**
