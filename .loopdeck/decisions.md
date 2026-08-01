@@ -100,3 +100,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Enabling `experimentalApi` exposed Code Mode's client-hosted `functions.exec` tool, but LoopDeck does not provide its JavaScript host or nested-tool boundary, leaving the active turn waiting indefinitely.
 - **Consequences**: Codex initialization now opts out of experimental methods; normal command, edit, approval, and question flows remain on LoopDeck's supported stable protocol.
+
+## 2026-08-01 — Supervise Codex's separate Code Mode host
+- **Status**: accepted
+- **Context**: New stable-API sessions execute JavaScript `functions.exec` calls through Codex CLI's independent Code Mode sidecar.
+- **Consequences**: LoopDeck resolves, starts, and terminates Codex's bundled Code Mode host and passes its localhost endpoint to app-server.
