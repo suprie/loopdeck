@@ -13,7 +13,7 @@ use crate::claude_session::{
     QuestionSlot,
 };
 use crate::config::AgentConfig;
-use crate::conversation::ToolCallRecord;
+use crate::conversation::{Attachment, ToolCallRecord};
 use crate::error::AppError;
 use crate::permission::{Decision, PermissionPolicy};
 use serde_json::{json, Value};
@@ -147,11 +147,13 @@ impl CodexSession {
     pub async fn send_message(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
             text,
+            attachments,
             None,
             slots.question,
             slots.permission,
@@ -167,6 +169,7 @@ impl CodexSession {
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
@@ -174,6 +177,7 @@ impl CodexSession {
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
             text,
+            attachments,
             Some(channel),
             slots.question,
             slots.permission,
@@ -238,9 +242,11 @@ impl CodexSession {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_turn(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         channel: Option<&Channel<ClaudeEvent>>,
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
@@ -250,6 +256,7 @@ impl CodexSession {
         let result = self
             .send_turn_inner(
                 text,
+                attachments,
                 channel,
                 question_slot,
                 permission_slot,
@@ -263,9 +270,11 @@ impl CodexSession {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_turn_inner(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         channel: Option<&Channel<ClaudeEvent>>,
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
@@ -282,6 +291,7 @@ impl CodexSession {
         let params = turn_start_params(
             &thread_id,
             text,
+            attachments,
             &self.cwd,
             self.model.as_deref(),
             self.effort.as_deref(),
@@ -1203,13 +1213,21 @@ fn initialize_params() -> Value {
 fn turn_start_params(
     thread_id: &str,
     text: &str,
+    attachments: &[Attachment],
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Value {
+    let mut input: Vec<Value> = vec![json!({ "type": "text", "text": text })];
+    input.extend(attachments.iter().map(|a| {
+        json!({
+            "type": "image",
+            "url": format!("data:{};base64,{}", a.media_type, a.data),
+        })
+    }));
     let mut params = json!({
         "threadId": thread_id,
-        "input": [{ "type": "text", "text": text }],
+        "input": input,
         "cwd": cwd,
         "approvalPolicy": "on-request",
         "sandboxPolicy": {
@@ -1438,6 +1456,7 @@ mod tests {
         let params = turn_start_params(
             "thread-1",
             "Make the change",
+            &[],
             Path::new("/repo"),
             Some("gpt-test"),
             Some("high"),
@@ -1454,6 +1473,7 @@ mod tests {
         let params = turn_start_params(
             "thread-1",
             "Inspect",
+            &[],
             Path::new("/repo"),
             Some(""),
             Some(""),
@@ -1461,6 +1481,40 @@ mod tests {
 
         assert!(params.get("model").is_none());
         assert!(params.get("effort").is_none());
+    }
+
+    #[test]
+    fn turn_start_input_is_text_only_without_attachments() {
+        let params = turn_start_params("thread-1", "Inspect", &[], Path::new("/repo"), None, None);
+
+        assert_eq!(
+            params["input"],
+            json!([{ "type": "text", "text": "Inspect" }])
+        );
+    }
+
+    #[test]
+    fn turn_start_appends_image_input_items_as_data_urls() {
+        let attachments = [Attachment {
+            media_type: "image/png".to_owned(),
+            data: "Zm9v".to_owned(),
+        }];
+        let params = turn_start_params(
+            "thread-1",
+            "What is this?",
+            &attachments,
+            Path::new("/repo"),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            params["input"],
+            json!([
+                { "type": "text", "text": "What is this?" },
+                { "type": "image", "url": "data:image/png;base64,Zm9v" }
+            ])
+        );
     }
 
     #[test]
