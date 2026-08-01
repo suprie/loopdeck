@@ -14,6 +14,7 @@ import type {
   MigrationPreview,
   ProgressSnapshot,
   RunPlan,
+  StallPolicy,
   AgentResponse,
   ClaudeEvent,
   ConversationTurn,

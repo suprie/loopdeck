@@ -10,9 +10,13 @@
 
 use crate::epic::LoopLocation;
 use crate::error::AppError;
-use crate::runplan::{self, PinnedAnswer, RunPhaseStatus, RunPlan, StallPolicy};
+use crate::runplan::{
+    self, InterviewStatus, PinnedAnswer, RunBudgets, RunConsent, RunPhase, RunPhaseStatus, RunPlan,
+    StallPolicy,
+};
+use chrono::{DateTime, Utc};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -262,6 +266,57 @@ pub(crate) fn phases_blocked_by_park(
                 .map(|p| p.execution_id.clone())
                 .collect()
         }
+    }
+}
+
+/// Build a fresh [`RunPlan`] from a picker selection (Phase 5): the phases
+/// the user checked, in the order they were selected, under one queue-time
+/// `stall_policy` and draft-PR consent. Every phase starts `Queued` /
+/// `Pending` (interview unanswered).
+///
+/// `depends_on` defaults to the authored selection order — each phase
+/// depends only on its immediate predecessor — per the PRD's "linear chain,
+/// no editor" v1 lean; there is no edge editor in this phase.
+///
+/// Pure and side-effect-free: does not validate the IDs against
+/// `docs/epics/` or touch disk — the caller (`commands::run_queue::
+/// create_run_plan`) does both, since ID validation needs the repo root and
+/// persistence needs `AppState`'s run-lock guard.
+pub(crate) fn build_run_plan(
+    id: String,
+    project: PathBuf,
+    created: DateTime<Utc>,
+    execution_ids: &[String],
+    stall_policy: StallPolicy,
+    draft_pr_authorized: bool,
+) -> RunPlan {
+    let phases = execution_ids
+        .iter()
+        .enumerate()
+        .map(|(i, exec_id)| RunPhase {
+            execution_id: exec_id.clone(),
+            status: RunPhaseStatus::Queued,
+            interview: Vec::new(),
+            interview_status: InterviewStatus::Pending,
+            depends_on: if i == 0 {
+                Vec::new()
+            } else {
+                vec![execution_ids[i - 1].clone()]
+            },
+            park_payload: None,
+        })
+        .collect();
+
+    RunPlan {
+        id,
+        project,
+        created,
+        consent: RunConsent {
+            draft_pr_authorized,
+        },
+        budgets: RunBudgets::default(),
+        stall_policy,
+        phases,
     }
 }
 
@@ -585,5 +640,52 @@ mod tests {
         let mut blocked = phases_blocked_by_park(&plan, "p4-not-in-plan", StallPolicy::Halt);
         blocked.sort();
         assert_eq!(blocked, vec!["p2".to_string(), "p3".to_string()]);
+    }
+
+    // ── build_run_plan ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_run_plan_chains_depends_on_in_selection_order() {
+        use chrono::TimeZone;
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let plan = build_run_plan(
+            "run-1".to_string(),
+            PathBuf::from("/repo"),
+            Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap(),
+            &ids,
+            StallPolicy::Halt,
+            true,
+        );
+        assert_eq!(plan.phases.len(), 3);
+        assert_eq!(plan.phases[0].depends_on, Vec::<String>::new());
+        assert_eq!(plan.phases[1].depends_on, vec!["a".to_string()]);
+        assert_eq!(plan.phases[2].depends_on, vec!["b".to_string()]);
+        assert!(plan
+            .phases
+            .iter()
+            .all(|p| p.status == RunPhaseStatus::Queued));
+        assert!(plan
+            .phases
+            .iter()
+            .all(|p| p.interview_status == InterviewStatus::Pending));
+        assert_eq!(plan.stall_policy, StallPolicy::Halt);
+        assert!(plan.consent.draft_pr_authorized);
+    }
+
+    #[test]
+    fn build_run_plan_single_phase_has_no_dependency() {
+        use chrono::TimeZone;
+        let ids = vec!["only".to_string()];
+        let plan = build_run_plan(
+            "run-2".to_string(),
+            PathBuf::from("/repo"),
+            Utc.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap(),
+            &ids,
+            StallPolicy::ContinueIndependent,
+            false,
+        );
+        assert_eq!(plan.phases.len(), 1);
+        assert!(plan.phases[0].depends_on.is_empty());
+        assert!(!plan.consent.draft_pr_authorized);
     }
 }

@@ -83,9 +83,9 @@ Directional; refine during implementation.
   pass is a bounded session per phase whose `AskUserQuestion` payloads render
   as the same cards the chat already shows, answered while the user is
   present.
-- **IPC**: `queue_run`, `cancel_run`, `get_run_status` commands + TS wrappers
-  in `lib/tauri.ts` and types in `types/index.ts`, matching the existing
-  typed-wrapper convention (never raw `invoke()`).
+- **IPC**: `create_run_plan`, `queue_run`, `cancel_run`, `get_run_status`
+  commands + TS wrappers in `lib/tauri.ts` and types in `types/index.ts`,
+  matching the existing typed-wrapper convention (never raw `invoke()`).
 
 ## Phases
 
@@ -121,9 +121,9 @@ Directional; refine during implementation.
 
 ### Phase 5 — Phase picker UI
 
-- [x] Add phase multi-select and a "Queue overnight run" action to `EpicsPanel.tsx` (2026-08-01) — a "Select phases for run" header toggle reveals a checkbox per not-done, stable-ID `PrdLoop` row (legacy ID-less items stay unselectable, same rule `promote` already enforces); "Queue overnight run" calls a new `create_run_plan(path, execution_ids)` command
-- [x] Add a run-queue view showing live per-phase status (queued/running/parked/completed/failed/killed) via the existing streaming state (2026-08-01) — new `RunQueuePanel.tsx`, polling `getRunStatus` every 3s while a plan exists
-- [x] Interview UI: present pre-flight questions as the existing question cards, gating the "Start run" action (2026-08-01) — `RunQueuePanel`'s Answer/Skip buttons per pending-interview phase; "Start run" stays disabled until every queued phase's interview is answered or skipped (mirrors `queue_run`'s own guard). Fixed a Phase 3 gap found while wiring this: `run_phase_interview` called the *non-streaming* `start_fresh_and_record`, and `claude_session.rs::answer_ask_user_question`'s own doc comment says a non-streaming (`channel: None`) `AskUserQuestion` has no UI surface and is auto-denied instead of parked — so the interview's clarifying questions could never actually reach a human. Switched it to `start_fresh_and_record_streaming` with a no-op sink `Channel` (Phase 4's own trick — the channel's mere *presence* is what lets it park, not what it narrates); the parked card now surfaces through the existing tab-agnostic `StuckQuestionCallout` in `ProjectDetail.tsx`, so no bespoke question card was needed in the run-queue UI
+- [x] Add phase multi-select and a "Queue overnight run" action to `EpicsPanel.tsx` (2026-08-01) — a `Square`/`CheckSquare` toggle button next to each not-done, stable-ID loop (`EpicsPanel.tsx`) feeds a selection array into the new `RunQueuePanel`; its picker bar (stall-policy `Select`, draft-PR-authorized checkbox, "Queue overnight run" button) calls the new `create_run_plan` command
+- [x] Add a run-queue view showing live per-phase status (queued/running/parked/completed/failed/killed) via the existing streaming state (2026-08-01) — `RunQueuePanel.tsx` polls `get_run_status` every 5s and renders a status-colored badge + `park_payload` tooltip per phase, with "Start run"/"Cancel run" actions
+- [x] Interview UI: present pre-flight questions as the existing question cards, gating the "Start run" action (2026-08-01) — needed no new question-card plumbing: `run_phase_interview` drives its turn through the same `start_fresh_and_record` pipeline as any other turn, so a parked `AskUserQuestion` lands in the same shared `AppState` slot `ProjectDetail.tsx`'s tab-agnostic `StuckQuestionCallout` already renders from, regardless of which tab is active. `RunQueuePanel` only needed "Answer" (awaits `run_phase_interview`) / "Skip" (`skip_phase_interview`) buttons per pending phase and a `canStart` gate requiring every `queued` phase's `interview_status !== "pending"`
 
 ### Phase 6 — Tests
 
