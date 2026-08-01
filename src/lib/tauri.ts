@@ -214,6 +214,22 @@ export async function exportExecutionSummary(path: string): Promise<string> {
 }
 
 /**
+ * Build a fresh .loopdeck/run-plan.yaml from a picker selection
+ * (prd-run-queue Phase 5). `executionIds` must be non-empty and each resolve
+ * to a real loop under docs/epics/; `depends_on` defaults to the selection
+ * order (linear chain). Every phase starts `queued`/interview `pending`.
+ * Replaces whatever plan (finished or never-started) was previously on disk;
+ * rejects while a run is actively in progress for this project.
+ * Rust: create_run_plan(path, execution_ids) -> Result<RunPlan, AppError>
+ */
+export async function createRunPlan(
+  path: string,
+  executionIds: string[],
+): Promise<RunPlan> {
+  return invoke<RunPlan>("create_run_plan", { path, executionIds });
+}
+
+/**
  * Start executing a project's queued .loopdeck/run-plan.yaml in the
  * background (prd-run-queue Phase 2). Returns immediately — a run is
  * typically hours long; poll `getRunStatus` rather than awaiting completion.

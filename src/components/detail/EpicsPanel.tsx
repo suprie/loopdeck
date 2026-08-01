@@ -10,6 +10,11 @@ import {
   AlertTriangle,
   FileDown,
   GitCommitHorizontal,
+  Moon,
+  ListChecks,
+  Square,
+  CheckSquare,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import type {
@@ -21,6 +26,7 @@ import type {
   ProgressCount,
   ExecutionStatus,
   DeliveryStatus,
+  RunPlan,
 } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
@@ -28,6 +34,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { Progress } from "../ui/progress";
 import { SpecEditor } from "./SpecEditor";
 import { PrdContent } from "./PrdContent";
+import { RunQueuePanel } from "./RunQueuePanel";
 
 // ── Derived progress helpers ─────────────────────────────────────────────────
 
@@ -113,6 +120,20 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
 
+  // ── Overnight run queue (prd-run-queue Phase 5) ──────────────────────────
+  const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [queuing, setQueuing] = useState(false);
+
+  const loadRunPlan = useCallback(async () => {
+    try {
+      setRunPlan(await api.getRunStatus(projectPath));
+    } catch {
+      setRunPlan(null);
+    }
+  }, [projectPath]);
+
   // Derived progress is a best-effort enrichment: a project still in legacy
   // mode (no execution.yaml) has no snapshot, and the panel falls back to
   // checkbox-derived counts. A fetch failure here must not break the epics view.
@@ -140,7 +161,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
       setLoading(false);
     }
     loadProgress();
-  }, [projectPath, loadProgress]);
+    loadRunPlan();
+  }, [projectPath, loadProgress, loadRunPlan]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,10 +186,11 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
     }
     run();
     loadProgress();
+    loadRunPlan();
     return () => {
       cancelled = true;
     };
-  }, [projectPath, loadProgress]);
+  }, [projectPath, loadProgress, loadRunPlan]);
 
   const handleExportSummary = async () => {
     setExporting(true);
@@ -266,6 +289,38 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
     }
   };
 
+  const handleToggleSelect = (loopId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(loopId)) {
+        next.delete(loopId);
+      } else {
+        next.add(loopId);
+      }
+      return next;
+    });
+  };
+
+  const handleQueueRun = async () => {
+    setQueuing(true);
+    try {
+      const plan = await api.createRunPlan(projectPath, Array.from(selectedIds));
+      setRunPlan(plan);
+      setSelecting(false);
+      setSelectedIds(new Set());
+      toast.success("Run plan queued", {
+        description: `${plan.phases.length} phase${plan.phases.length !== 1 ? "s" : ""} — answer or skip each pre-flight interview to start`,
+      });
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to queue run", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setQueuing(false);
+    }
+  };
+
   if (loading) {
     return <LoadingSpinner label="Loading epics..." />;
   }
@@ -311,25 +366,76 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
         </div>
       )}
 
+      {/* Overnight run: live status + interview gate for a queued plan. */}
+      {runPlan && (
+        <RunQueuePanel
+          projectPath={projectPath}
+          plan={runPlan}
+          onPlanChange={setRunPlan}
+        />
+      )}
+
       <div className="mb-4 flex items-center justify-between">
         <span className="text-xs text-muted-foreground">
           {epics.length} epic{epics.length !== 1 ? "s" : ""}
         </span>
-        {progress && (
-          <button
-            onClick={handleExportSummary}
-            disabled={exporting}
-            title="Write a non-authoritative Markdown snapshot of derived execution progress to .loopdeck/execution-summary.md"
-            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-          >
-            {exporting ? (
-              <Loader2 size={11} className="animate-spin" />
-            ) : (
-              <FileDown size={11} />
-            )}
-            Export summary
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {selecting && (
+            <>
+              <span className="text-[11px] text-muted-foreground">
+                {selectedIds.size} selected
+              </span>
+              <button
+                onClick={handleQueueRun}
+                disabled={selectedIds.size === 0 || queuing}
+                title="Build a run plan from the selected phases"
+                className="flex items-center gap-1.5 rounded-md bg-[var(--primary)] px-2.5 py-1 text-[11px] font-medium text-[var(--primary-foreground)] transition-colors hover:opacity-90 disabled:opacity-40"
+              >
+                {queuing ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <Moon size={11} />
+                )}
+                Queue overnight run
+              </button>
+              <button
+                onClick={() => {
+                  setSelecting(false);
+                  setSelectedIds(new Set());
+                }}
+                title="Cancel selection"
+                className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </button>
+            </>
+          )}
+          {!selecting && (
+            <button
+              onClick={() => setSelecting(true)}
+              title="Select phases across PRDs to queue an unattended overnight run"
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <ListChecks size={11} />
+              Select phases for run
+            </button>
+          )}
+          {progress && (
+            <button
+              onClick={handleExportSummary}
+              disabled={exporting}
+              title="Write a non-authoritative Markdown snapshot of derived execution progress to .loopdeck/execution-summary.md"
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            >
+              {exporting ? (
+                <Loader2 size={11} className="animate-spin" />
+              ) : (
+                <FileDown size={11} />
+              )}
+              Export summary
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Unmatched execution records: an execution.yaml ID with no current
@@ -531,6 +637,33 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                           : ""
                                       }`}
                                     >
+                                      {selecting && (
+                                        <button
+                                          onClick={() =>
+                                            loop.id && handleToggleSelect(loop.id)
+                                          }
+                                          disabled={!loop.id || done}
+                                          title={
+                                            !loop.id
+                                              ? "Add a stable ID before this loop can be queued"
+                                              : done
+                                                ? "Already done"
+                                                : selectedIds.has(loop.id)
+                                                  ? "Remove from run selection"
+                                                  : "Add to run selection"
+                                          }
+                                          className="mt-0.5 shrink-0 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-30"
+                                        >
+                                          {loop.id && selectedIds.has(loop.id) ? (
+                                            <CheckSquare
+                                              size={12}
+                                              className="text-[var(--primary)]"
+                                            />
+                                          ) : (
+                                            <Square size={12} />
+                                          )}
+                                        </button>
+                                      )}
                                       <button
                                         onClick={() => handleToggle(epic.slug, prd.file, loop)}
                                         disabled={isToggling}

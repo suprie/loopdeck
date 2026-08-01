@@ -9,7 +9,7 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::{start_fresh_and_record, start_fresh_and_record_streaming};
+use super::agent::start_fresh_and_record_streaming;
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::ClaudeEvent;
 use crate::epic;
@@ -19,13 +19,107 @@ use crate::run_executor::{
     self, build_interview_prompt, build_phase_prompt, extract_interview_answers, extract_verdict,
     RunHandle, RunVerdict,
 };
-use crate::runplan::{self, InterviewStatus, RunPhaseStatus, RunPlan};
+use crate::runplan::{
+    self, InterviewStatus, RunBudgets, RunConsent, RunPhase, RunPhaseStatus, RunPlan, StallPolicy,
+};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tracing::{info, warn};
+
+/// Build a fresh `.loopdeck/run-plan.yaml` from a picker selection (PRD Phase
+/// 5: "phase multi-select + Queue overnight run action").
+///
+/// `execution_ids` must be non-empty, duplicate-free, and each resolve to a
+/// real loop under `docs/epics/` via [`epic::find_loop_by_id`] — the same
+/// stable-ID join the executor itself relies on, so a typo or a stale ID from
+/// a since-edited PRD is caught at queue-time, not hours into an unattended
+/// run. `depends_on` defaults to the authored (selection) order, one phase
+/// depending on its immediate predecessor — the PRD's Open Questions default
+/// ("linear chain, no editor") for v1.
+///
+/// Every field starts fresh: `consent`/`budgets` at their defaults (no
+/// unattended-ship authorization yet — that's a separate, explicit step) and
+/// every phase `Queued`/interview `Pending`. Refuses to overwrite a plan
+/// while a run is actively in progress for this project; otherwise a new
+/// selection freely replaces whatever plan (finished or never-started) was on
+/// disk, since a run plan has exactly one writer and no history worth
+/// preserving once superseded.
+#[tauri::command]
+pub async fn create_run_plan(
+    path: String,
+    execution_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+
+    if execution_ids.is_empty() {
+        return Err(AppError::RunPlan(
+            "select at least one phase to queue".into(),
+        ));
+    }
+
+    {
+        let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+        if handles.contains_key(&root) {
+            return Err(AppError::RunPlan(
+                "a run is already in progress for this project".into(),
+            ));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for id in &execution_ids {
+        if !seen.insert(id.as_str()) {
+            return Err(AppError::RunPlan(format!(
+                "phase \"{id}\" was selected more than once"
+            )));
+        }
+        if epic::find_loop_by_id(&root, id).is_none() {
+            return Err(AppError::RunPlan(format!(
+                "phase \"{id}\" was not found in docs/epics/"
+            )));
+        }
+    }
+
+    let phases = execution_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| RunPhase {
+            execution_id: id.clone(),
+            status: RunPhaseStatus::Queued,
+            interview: Vec::new(),
+            interview_status: InterviewStatus::Pending,
+            depends_on: if i == 0 {
+                Vec::new()
+            } else {
+                vec![execution_ids[i - 1].clone()]
+            },
+            park_payload: None,
+        })
+        .collect::<Vec<_>>();
+
+    let plan = RunPlan {
+        id: uuid::Uuid::new_v4().to_string(),
+        project: root.clone(),
+        created: chrono::Utc::now(),
+        consent: RunConsent::default(),
+        budgets: RunBudgets::default(),
+        stall_policy: StallPolicy::default(),
+        phases,
+    };
+
+    runplan::save(&root, &plan)?;
+    info!(
+        "run plan created for {} with {} phase(s)",
+        root.display(),
+        plan.phases.len()
+    );
+    Ok(plan)
+}
 
 /// Start executing a project's queued run plan in the background.
 ///
@@ -170,13 +264,23 @@ pub async fn get_run_status(
 }
 
 /// Run one queued phase's pre-flight interview turn (Phase 3) — a bounded
-/// session, driven through the same `start_fresh_and_record` pipeline as a
-/// phase run itself, whose `AskUserQuestion` calls surface as the same
-/// question cards the chat already shows. Awaits the whole turn, including
-/// any parked question, so it only returns once the user has answered (or
-/// the agent decided nothing was ambiguous) — that's what "while the user is
-/// present" means here: the caller is expected to be an active UI session,
-/// not a background poll.
+/// session driven through the *streaming* pipeline
+/// (`start_fresh_and_record_streaming`, no-op sink `Channel`, same trick
+/// Phase 4's executor uses). This is load-bearing, not cosmetic: per
+/// `claude_session.rs::answer_ask_user_question`'s own doc comment, an
+/// `AskUserQuestion` on the *non*-streaming path (`channel: None`) has no UI
+/// surface to answer from and is auto-denied immediately instead of parking —
+/// exactly the tool call `build_interview_prompt` tells the agent to make.
+/// A channel merely being present (its callback can be a no-op) is what lets
+/// `answer_control_request` park on the shared `question_slot` instead of
+/// taking that deny branch; the pending card then surfaces through the
+/// existing tab-agnostic `StuckQuestionCallout` (`ProjectDetail.tsx`), which
+/// reads the same cross-project `AskUserQuestion` store every other pending
+/// question does — no bespoke card needed in the run-queue UI (Phase 5).
+/// Awaits the whole turn, including any parked question, so it only returns
+/// once the user has answered (or the agent decided nothing was ambiguous) —
+/// that's what "while the user is present" means here: the caller is expected
+/// to be an active UI session, not a background poll.
 ///
 /// Pins the parsed answers into `plan.phases[execution_id].interview`, marks
 /// its `interview_status` `Answered` (even when zero questions were asked —
@@ -207,7 +311,11 @@ pub async fn run_phase_interview(
     })?;
 
     let prompt = build_interview_prompt(&execution_id, &loc);
-    let response = start_fresh_and_record(&state, &root, &prompt).await?;
+    // No-op sink: nothing here needs to narrate turn events to a UI channel —
+    // only the channel's *presence* matters, so a parked AskUserQuestion is
+    // answerable instead of auto-denied (see this fn's doc comment).
+    let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
+    let response = start_fresh_and_record_streaming(&state, &root, &prompt, &channel).await?;
     let answers = extract_interview_answers(&response.result);
 
     // Reload rather than reuse the plan loaded before the (possibly long)

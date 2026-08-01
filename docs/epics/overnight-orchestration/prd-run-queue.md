@@ -121,9 +121,9 @@ Directional; refine during implementation.
 
 ### Phase 5 — Phase picker UI
 
-- [ ] Add phase multi-select and a "Queue overnight run" action to `EpicsPanel.tsx`
-- [ ] Add a run-queue view showing live per-phase status (queued/running/parked/completed/failed/killed) via the existing streaming state
-- [ ] Interview UI: present pre-flight questions as the existing question cards, gating the "Start run" action
+- [x] Add phase multi-select and a "Queue overnight run" action to `EpicsPanel.tsx` (2026-08-01) — a "Select phases for run" header toggle reveals a checkbox per not-done, stable-ID `PrdLoop` row (legacy ID-less items stay unselectable, same rule `promote` already enforces); "Queue overnight run" calls a new `create_run_plan(path, execution_ids)` command
+- [x] Add a run-queue view showing live per-phase status (queued/running/parked/completed/failed/killed) via the existing streaming state (2026-08-01) — new `RunQueuePanel.tsx`, polling `getRunStatus` every 3s while a plan exists
+- [x] Interview UI: present pre-flight questions as the existing question cards, gating the "Start run" action (2026-08-01) — `RunQueuePanel`'s Answer/Skip buttons per pending-interview phase; "Start run" stays disabled until every queued phase's interview is answered or skipped (mirrors `queue_run`'s own guard). Fixed a Phase 3 gap found while wiring this: `run_phase_interview` called the *non-streaming* `start_fresh_and_record`, and `claude_session.rs::answer_ask_user_question`'s own doc comment says a non-streaming (`channel: None`) `AskUserQuestion` has no UI surface and is auto-denied instead of parked — so the interview's clarifying questions could never actually reach a human. Switched it to `start_fresh_and_record_streaming` with a no-op sink `Channel` (Phase 4's own trick — the channel's mere *presence* is what lets it park, not what it narrates); the parked card now surfaces through the existing tab-agnostic `StuckQuestionCallout` in `ProjectDetail.tsx`, so no bespoke question card was needed in the run-queue UI
 
 ### Phase 6 — Tests
 
