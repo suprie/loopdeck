@@ -6,7 +6,7 @@
 
 use crate::agents::{
     AgentResponse, AskUserQuestionOption, AskUserQuestionSpec, ClaudeEvent, ContentBlockRecord,
-    UsageInfo,
+    TokenBudget, UsageInfo,
 };
 use crate::claude_session::{
     InterruptSlot, ParkSlots, PendingPermission, PendingQuestion, PermissionSlot, QuestionAnswers,
@@ -96,7 +96,7 @@ impl CodexSession {
             Ok(child) => child,
             Err(error) => {
                 let mut code_mode_host = code_mode_host;
-                let _ = code_mode_host.kill();
+                terminate_code_mode_host(&mut code_mode_host);
                 return Err(AppError::Agent(format!(
                     "failed to start Codex app-server: {error}"
                 )));
@@ -150,8 +150,15 @@ impl CodexSession {
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
-        self.send_turn(text, None, slots.question, slots.permission, interrupt_slot)
-            .await
+        self.send_turn(
+            text,
+            None,
+            slots.question,
+            slots.permission,
+            interrupt_slot,
+            None,
+        )
+        .await
     }
 
     /// See `send_message` for why `slots.plan` goes unused. No `plan_mode`
@@ -163,6 +170,7 @@ impl CodexSession {
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
             text,
@@ -170,6 +178,7 @@ impl CodexSession {
             slots.question,
             slots.permission,
             interrupt_slot,
+            token_budget,
         )
         .await
     }
@@ -236,6 +245,7 @@ impl CodexSession {
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         let result = self
             .send_turn_inner(
@@ -244,6 +254,7 @@ impl CodexSession {
                 question_slot,
                 permission_slot,
                 interrupt_slot,
+                token_budget,
             )
             .await;
         let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
@@ -259,6 +270,7 @@ impl CodexSession {
         question_slot: &QuestionSlot,
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
+        token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         self.ensure_initialized().await?;
         let started = Instant::now();
@@ -297,6 +309,7 @@ impl CodexSession {
         let mut interrupt_requested = false;
         let mut interrupt_sent = false;
         let mut interrupt_deadline: Option<tokio::time::Instant> = None;
+        let mut budget_exceeded: Option<String> = None;
 
         loop {
             let stop_deadline = interrupt_deadline;
@@ -309,10 +322,13 @@ impl CodexSession {
                     }
                 } => {
                     self.abort_child();
-                    return Err(AppError::Agent(format!(
-                        "Codex did not complete the interrupted turn within {}s; the wedged app-server was terminated",
-                        INTERRUPT_GRACE_TIMEOUT.as_secs()
-                    )));
+                    return Err(match budget_exceeded {
+                        Some(reason) => AppError::Limit(reason),
+                        None => AppError::Agent(format!(
+                            "Codex did not complete the interrupted turn within {}s; the wedged app-server was terminated",
+                            INTERRUPT_GRACE_TIMEOUT.as_secs()
+                        )),
+                    });
                 }
                 interrupt = &mut interrupt_rx, if !interrupt_requested => {
                     if interrupt.is_ok() {
@@ -475,6 +491,30 @@ impl CodexSession {
                             total_cost_usd: 0.0,
                         });
                     }
+                    if budget_exceeded.is_none() {
+                        if let (Some(budget), Some(total)) =
+                            (token_budget, params.pointer("/tokenUsage/total"))
+                        {
+                            let tokens = nonnegative_u64(total.get("inputTokens"))
+                                .saturating_add(nonnegative_u64(total.get("outputTokens")));
+                            if budget.observe_total(tokens) {
+                                budget_exceeded = Some(budget.exceeded_message());
+                                interrupt_requested = true;
+                                interrupt_deadline =
+                                    Some(tokio::time::Instant::now() + INTERRUPT_GRACE_TIMEOUT);
+                                if let Some(turn_id) = active_turn_id.as_deref() {
+                                    let id = self.next_id();
+                                    self.write_message(json!({
+                                        "method": "turn/interrupt",
+                                        "id": id,
+                                        "params": { "threadId": thread_id, "turnId": turn_id }
+                                    }))
+                                    .await?;
+                                    interrupt_sent = true;
+                                }
+                            }
+                        }
+                    }
                 }
                 "error" => {
                     let error = params.get("error").unwrap_or(&params);
@@ -522,6 +562,9 @@ impl CodexSession {
                             duration_ms: response.duration_ms,
                             session_id: response.session_id.clone(),
                         });
+                    }
+                    if let Some(reason) = budget_exceeded {
+                        return Err(AppError::Limit(reason));
                     }
                     if interrupt_requested || status == "interrupted" {
                         return Err(AppError::Agent("turn interrupted by user".into()));
@@ -841,7 +884,7 @@ impl CodexSession {
             let _ = child.start_kill();
         }
         if let Some(mut host) = self.code_mode_host.take() {
-            let _ = host.kill();
+            terminate_code_mode_host(&mut host);
         }
         self.initialized = false;
     }
@@ -857,7 +900,7 @@ impl Drop for CodexSession {
             let _ = child.start_kill();
         }
         if let Some(mut host) = self.code_mode_host.take() {
-            let _ = host.kill();
+            terminate_code_mode_host(&mut host);
         }
     }
 }
@@ -876,14 +919,18 @@ fn spawn_code_mode_host(codex_binary: &Path) -> Result<(StdChild, String), AppEr
         .map_err(|error| {
             AppError::Agent(format!("failed to start Codex Code Mode host: {error}"))
         })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::Agent("Codex Code Mode host stdout unavailable".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| AppError::Agent("Codex Code Mode host stderr unavailable".into()))?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate_code_mode_host(&mut child);
+        return Err(AppError::Agent(
+            "Codex Code Mode host stdout unavailable".into(),
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_code_mode_host(&mut child);
+        return Err(AppError::Agent(
+            "Codex Code Mode host stderr unavailable".into(),
+        ));
+    };
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(stderr)
             .lines()
@@ -900,21 +947,33 @@ fn spawn_code_mode_host(codex_binary: &Path) -> Result<(StdChild, String), AppEr
             .map(|_| line.trim().to_owned());
         let _ = sender.send(result);
     });
-    let endpoint = receiver
-        .recv_timeout(CODE_MODE_HOST_START_TIMEOUT)
-        .map_err(|_| {
-            AppError::Agent("Codex Code Mode host did not publish an endpoint within 5s".into())
-        })?
-        .map_err(|error| {
-            AppError::Agent(format!("failed to read Codex Code Mode endpoint: {error}"))
-        })?;
+    let endpoint = match receiver.recv_timeout(CODE_MODE_HOST_START_TIMEOUT) {
+        Ok(Ok(endpoint)) => endpoint,
+        Ok(Err(error)) => {
+            terminate_code_mode_host(&mut child);
+            return Err(AppError::Agent(format!(
+                "failed to read Codex Code Mode endpoint: {error}"
+            )));
+        }
+        Err(_) => {
+            terminate_code_mode_host(&mut child);
+            return Err(AppError::Agent(
+                "Codex Code Mode host did not publish an endpoint within 5s".into(),
+            ));
+        }
+    };
     if !endpoint.starts_with("ws://127.0.0.1:") {
-        let _ = child.kill();
+        terminate_code_mode_host(&mut child);
         return Err(AppError::Agent(format!(
             "Codex Code Mode host published an unsafe endpoint: {endpoint}"
         )));
     }
     Ok((child, endpoint))
+}
+
+fn terminate_code_mode_host(child: &mut StdChild) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn code_mode_host_binary(codex_binary: &Path) -> Result<PathBuf, AppError> {
@@ -1339,7 +1398,7 @@ mod tests {
 
         assert_eq!(
             code_mode_host_binary(&codex).expect("find sibling host"),
-            host
+            std::fs::canonicalize(&host).expect("canonicalize sibling host")
         );
 
         std::fs::remove_dir_all(dir).expect("remove test directory");
@@ -1368,7 +1427,7 @@ mod tests {
 
         assert_eq!(
             code_mode_host_binary(&path_entry).expect("find npm host"),
-            host
+            std::fs::canonicalize(&host).expect("canonicalize npm host")
         );
 
         std::fs::remove_dir_all(dir).expect("remove test directory");

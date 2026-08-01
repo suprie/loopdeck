@@ -3,6 +3,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
+/// A linked worktree created for an unattended run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: std::path::PathBuf,
+    pub branch: String,
+}
+
 /// Whether optional local commit evidence can be proved from the current
 /// repository without network access.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +34,81 @@ fn git_command(repo_path: &Path) -> Option<Command> {
     let mut cmd = Command::new(git);
     cmd.args(["-C"]).arg(repo_path);
     Some(cmd)
+}
+
+/// Create a new branch-backed linked worktree from `repo_path`.
+///
+/// The caller chooses a path outside the main worktree and a run-scoped branch
+/// name. Git refuses an already checked-out branch, which is the desired
+/// protection against two runs sharing one mutable tree.
+pub fn worktree_add(repo_path: &Path, path: &Path, branch: &str) -> Result<Worktree, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("worktree path {} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create worktree parent {}: {e}", parent.display()))?;
+    let mut command = git_command(repo_path)
+        .ok_or_else(|| "git is unavailable; cannot create isolated run worktree".to_string())?;
+    let output = command
+        .args(["worktree", "add", "-b", branch])
+        .arg(path)
+        .arg("HEAD")
+        .output()
+        .map_err(|e| format!("failed to spawn git worktree add: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    // Git canonicalizes linked-worktree paths in `worktree list` (notably
+    // `/var` → `/private/var` on macOS). Persist that same canonical form so a
+    // restarted unattended run can match its saved path to Git's inventory.
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|e| format!("failed to canonicalize worktree {}: {e}", path.display()))?;
+    Ok(Worktree {
+        path: canonical_path,
+        branch: branch.to_string(),
+    })
+}
+
+/// Remove a linked worktree after a successful unattended draft-PR run.
+pub fn worktree_remove(repo_path: &Path, path: &Path) -> Result<(), String> {
+    let mut command = git_command(repo_path)
+        .ok_or_else(|| "git is unavailable; cannot prune isolated run worktree".to_string())?;
+    let output = command
+        .args(["worktree", "remove"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("failed to spawn git worktree remove: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree remove failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Return the paths of all worktrees Git currently knows about for a repo.
+pub fn worktree_list(repo_path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut command = git_command(repo_path)
+        .ok_or_else(|| "git is unavailable; cannot list worktrees".to_string())?;
+    let output = command
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|e| format!("failed to spawn git worktree list: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(std::path::PathBuf::from)
+        .collect())
 }
 
 /// Classify recorded commit evidence. A commit is reachable only when it
@@ -406,6 +488,51 @@ mod tests {
         let info = check_git_info(&dir);
         assert!(info.last_commit_date.is_some());
         assert!(!info.is_dirty); // clean working tree
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn worktree_lifecycle_add_list_remove() {
+        let dir = create_temp_dir();
+        let linked = dir.with_extension("linked-worktree");
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .arg("init")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["config", "user.email", "test@loopdeck.dev"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["config", "user.name", "LoopDeck Test"])
+            .output()
+            .unwrap();
+        fs::write(dir.join("README.md"), "# test\n").unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["commit", "-m", "initial"])
+            .output()
+            .unwrap();
+
+        let added = worktree_add(&dir, &linked, "run/worktree-test").unwrap();
+        assert_eq!(added.path, fs::canonicalize(&linked).unwrap());
+        assert!(worktree_list(&dir).unwrap().contains(&added.path));
+        worktree_remove(&dir, &added.path).unwrap();
+        assert!(!linked.exists());
 
         fs::remove_dir_all(&dir).unwrap();
     }
