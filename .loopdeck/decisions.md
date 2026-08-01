@@ -2,17 +2,6 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
-## 2026-08-01 — Composer image attachments: inline base64, Claude-only, native-drop
-
-- **Status**: accepted
-- **Context**: The Agent composer was text-only. Two shapes were possible: write pasted images to `.loopdeck/attachments/` and inject the path so the agent `Read`s them back, or send real Anthropic `image` content blocks. The second was chosen as the intended form. The enabling unknown was verified empirically before any plumbing: `claude 2.1.220` with `--input-format stream-json` accepts the Messages API block shape **verbatim** on stdin (`{"type":"image","source":{"type":"base64",…}}`) — no CLI-specific wrapper — confirmed by a live one-turn run that correctly described the image.
-- **Consequences**:
-  - **Storage is inline base64** on `ConversationTurn.attachments` (user's explicit choice over a path-plus-sidecar-file layout): transcript lines stay self-contained, nothing to garbage-collect on archive, no broken thumbnails if the project moves. The cost is transcript size, mitigated by downscaling in the browser to a 1568px long edge (the largest dimension the vision model actually uses) before encoding — a typical screenshot lands ~200–400KB instead of 2–3MB. **Watch item**: `limits::TRANSCRIPT_MAX_BYTES` is 16MiB, which image-heavy conversations will now reach far sooner than text-only ones.
-  - **Budgets are enforced at the IPC boundary**, not trusted from the frontend (`validate_attachments`): per-image and per-turn base64 caps, a count cap, an allow-list of the four media types the API accepts, and a bare-base64 check — an embedded newline would split the single-line NDJSON turn the CLI reads.
-  - **Claude-only for now.** `harness.rs` rejects non-empty attachments for Codex rather than dropping them silently, mirroring the existing `plan_mode` precedent: a user who pastes a screenshot and asks "what's wrong here?" must not get a confident answer about an image the model never received. Codex's `turn/start` takes its own input-item shape; teaching it is deferred behind the separate open bug where a Codex session shuts down after a turn.
-  - **Drag-and-drop uses Tauri's native drop events, not HTML5 drops.** Getting bytes in the webview would require `dragDropEnabled: false`, which would break `ImportFlow.tsx`'s folder-drop import (a folder has no `File` equivalent to fall back on). Instead the drop delivers a path and the new `agent_read_image_attachment` command reads it, after which the frontend re-runs the bytes through the same downscale pipeline paste uses. The two listeners never coexist — ImportFlow is its own route.
-  - A turn with images and no text omits the text block entirely rather than sending an empty one (the API rejects a blank block), so "look at this" with no words is a valid message.
-
 ## 2026-07-27 — Amended `prd-skill-split.md` in place to document Option A (no code change)
 
 - **Status**: accepted
