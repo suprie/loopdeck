@@ -2,7 +2,7 @@
 prd: prd-unattended-ship
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: proposed
+status: accepted
 description: >
   The run's environment and exits: a git worktree per run so the main tree
   stays clean, draft-PR creation with consent given at queue time instead of
@@ -19,6 +19,26 @@ description: >
 it end in reviewable artifacts. Four concerns: isolation (worktree-per-run,
 ADR-2), shipping (draft PRs under queue-time consent, ADR-1), bounding
 (hard budgets, ADR-4), and staying awake (power assertion).
+
+## Current State
+
+Implementation landed on 2026-08-01 in [PR #48](https://github.com/suprie/loopdeck/pull/48)
+(`8352538`, followed by the budget enforcement fix in `83a0ec9` and the
+macOS import fix in `f976593`). The shipped path now creates a run-scoped
+worktree, bootstraps Node dependencies there, executes phases with token and
+wall-clock caps, parks non-green results, requires queue-time consent for a
+headless draft PR, and holds a macOS `caffeinate` assertion for the run.
+
+The PRD remains accepted rather than completed because the unattended ship
+tail still has two correctness gaps:
+
+1. The staged-diff secret scan is specified in the open-pr skill, but it is
+   currently placed after the skill's push phase. It must run before staging
+   content is pushed, with an automated abort test.
+2. The generated PR body includes the PRD, decisions, and test plan, but not
+   yet the required verify-verdict table or run metadata/budgets used. The
+   end-to-end budget-kill and executor cleanup/keep-on-failure cases also need
+   dedicated fixture coverage.
 
 ## Problem Statement
 
@@ -82,28 +102,28 @@ Directional; refine during implementation.
 
 ### Phase 1 — Worktree lifecycle
 
-- [ ] Add `worktree_add` / `worktree_remove` / `worktree_list` to `git.rs` with run-scoped branch naming
-- [ ] Executor creates the worktree at run start and runs every phase session inside it
-- [ ] Cleanup policy: prune the worktree after PR creation succeeds; keep it (flagged in the report) on failure or kill
-- [ ] Bootstrap untracked build deps in fresh worktrees (per-stack, e.g. `npm ci` when `package.json` present)
+- [x] Add `worktree_add` / `worktree_remove` / `worktree_list` to `git.rs` with run-scoped branch naming
+- [x] Executor creates the worktree at run start and runs every phase session inside it
+- [x] Cleanup policy: prune the worktree after PR creation succeeds; keep it (flagged in the report) on failure or kill
+- [x] Bootstrap untracked build deps in fresh worktrees (per-stack, e.g. `npm ci` when `package.json` present)
 
 ### Phase 2 — Draft-PR autonomy
 
-- [ ] Add an unattended mode to the open-pr flow: `gh pr create --draft`, no `--web`, no interactive confirmation, gated on queue-time consent in the `RunPlan`
+- [x] Add an unattended mode to the open-pr flow: `gh pr create --draft`, no `--web`, no interactive confirmation, gated on queue-time consent in the `RunPlan`
 - [ ] PR body: PRD link, verify verdict table, `.loopdeck/` memory summary, run metadata (phase id, budgets used)
-- [ ] Never open a PR on a WARN or BLOCK verify verdict — record the verdict and park instead
+- [x] Never open a PR on a WARN or BLOCK verify verdict — record the verdict and park instead
 - [ ] Pre-push secret scan of the staged diff for common credential patterns; a hit aborts the PR, parks the phase, and flags the report
 
 ### Phase 3 — Hard budgets
 
-- [ ] Track per-phase token usage from streaming usage events and enforce a per-phase cap
-- [ ] Per-phase wall-clock watchdog; breach kills the session via the existing graceful EOF-then-SIGKILL reap path
-- [ ] Total-run backstop; any breach preserves branch and worktree and records the kill reason
-- [ ] Budget defaults as named constants beside `limits.rs`, overridable per run from the plan
+- [x] Track per-phase token usage from streaming usage events and enforce a per-phase cap
+- [x] Per-phase wall-clock watchdog; breach kills the session via the existing graceful EOF-then-SIGKILL reap path
+- [x] Total-run backstop; any breach preserves branch and worktree and records the kill reason
+- [x] Budget defaults as named constants beside `limits.rs`, overridable per run from the plan
 
 ### Phase 4 — Keep-awake
 
-- [ ] Hold a macOS power assertion while a run is active and release it on completion — or document the "plugged in, lid open" requirement in the queue UI if the assertion proves unreliable
+- [x] Hold a macOS power assertion while a run is active and release it on completion — or document the "plugged in, lid open" requirement in the queue UI if the assertion proves unreliable
 
 ### Phase 5 — Tests
 
@@ -112,16 +132,13 @@ Directional; refine during implementation.
 
 ## Open Questions
 
-- Budget default values: what are sane per-phase token and wall-clock caps?
-  (Derive from the postmortem's numbers and typical phase runtimes observed
-  in `execution.yaml` history; set conservative, let the plan override.)
-- Watchdog interval — how fast must a breach be caught? (Once per minute is
-  probably enough; the cap, not the interval, bounds the damage.)
-- Secret-scan pattern source: hand-rolled regex set vs. an existing
-  lightweight scanner. Bias: small hand-rolled set for v1 (AWS keys, private
-  key headers, `ghp_`/`sk-` tokens, `.env`-shaped additions).
-- Power assertion mechanism: `IOPMAssertionCreateWithName` via a crate vs.
-  spawning `caffeinate -w <pid>`. Bias: `caffeinate` child — no new native
-  dependency, dies with the process.
-- Base branch for the draft PR: repo default assumed; does the picker need a
-  base-branch override? v1: no override.
+- **Resolved — budget defaults**: 500,000 tokens per phase, 90 minutes per
+  phase, and 8 hours per run; all three are queue-time overrides in `RunPlan`.
+- **Resolved — watchdog**: `tokio::time::timeout` enforces the effective
+  minimum of the phase deadline and remaining total-run deadline.
+- **Open — secret-scan ordering**: retain the small hand-rolled v1 pattern set,
+  but move enforcement ahead of push and cover the abort path with a test.
+- **Resolved — power assertion**: spawn `caffeinate -w <pid>` on macOS and
+  release it through the run-scoped guard's `Drop` path.
+- **Resolved — base branch**: use the repository default in v1; no picker
+  override.
