@@ -56,6 +56,15 @@ fn resolve_in(name: &str, path_var: &OsStr) -> Result<PathBuf, AppError> {
         if !dir.is_absolute() {
             continue;
         }
+        // Skip npm-injected `node_modules/.bin` dirs: `npm run`/`npx` prepend
+        // the nearest package's `.bin` onto `$PATH` for the lifetime of that
+        // script, so launching from a monorepo root can shadow the real
+        // system binary with whatever version that one package happens to
+        // depend on (see issue #45 — `codex` resolved to a stale copy inside
+        // `node_modules/@openai/codex` instead of `/usr/local/bin/codex`).
+        if dir.ends_with("node_modules/.bin") {
+            continue;
+        }
         for candidate in candidate_paths(&dir, name) {
             if let Some(resolved) = vet(&candidate) {
                 return Ok(resolved);
@@ -276,6 +285,32 @@ mod tests {
         assert_eq!(resolved, bin);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A `node_modules/.bin` PATH entry is skipped even when it holds a valid
+    /// executable, so an npm-injected shim can't shadow the real binary
+    /// (issue #45).
+    #[cfg(unix)]
+    #[test]
+    fn skips_node_modules_bin_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ld-resolve-nmbin-{}", uuid::Uuid::new_v4()));
+        let nm_bin = root.join("node_modules/.bin");
+        std::fs::create_dir_all(&nm_bin).unwrap();
+        let shim = nm_bin.join("ld-nm-bin");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&shim, perms).unwrap();
+
+        let nm_bin_s = nm_bin.to_str().expect("temp dir is utf-8");
+        let pv = path_var(&[nm_bin_s]);
+        assert!(
+            resolve_in("ld-nm-bin", &pv).is_err(),
+            "node_modules/.bin must be skipped even with a valid executable"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// An absolute-but-nonexistent dir is skipped silently; resolution
