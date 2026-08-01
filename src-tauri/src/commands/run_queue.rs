@@ -26,7 +26,9 @@ use crate::run_executor::{
 use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
