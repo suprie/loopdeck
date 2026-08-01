@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Layers,
   Zap,
   CheckCircle2,
   Circle,
+  CheckSquare,
+  Square,
   Loader2,
   Pencil,
   ChevronRight,
@@ -28,6 +30,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { Progress } from "../ui/progress";
 import { SpecEditor } from "./SpecEditor";
 import { PrdContent } from "./PrdContent";
+import { RunQueuePanel } from "./RunQueuePanel";
 
 // ── Derived progress helpers ─────────────────────────────────────────────────
 
@@ -112,6 +115,31 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [editingSpec, setEditingSpec] = useState<string | null>(null);
   /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
+  /** Stable execution IDs checked in the overnight-run phase picker, in
+   * selection order (prd-run-queue Phase 5). */
+  const [selectedForRun, setSelectedForRun] = useState<string[]>([]);
+
+  const toggleSelectedForRun = (id: string) => {
+    setSelectedForRun((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  // Stable ID -> title, so the run-queue view can show human-readable phase
+  // names instead of raw execution IDs.
+  const idToTitle = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const epic of epics) {
+      for (const prd of epic.prds) {
+        for (const phase of prd.phases) {
+          for (const loop of phase.loops) {
+            if (loop.id) map[loop.id] = loop.title;
+          }
+        }
+      }
+    }
+    return map;
+  }, [epics]);
 
   // Derived progress is a best-effort enrichment: a project still in legacy
   // mode (no execution.yaml) has no snapshot, and the panel falls back to
@@ -357,6 +385,13 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
         </div>
       )}
 
+      <RunQueuePanel
+        projectPath={projectPath}
+        selectedIds={selectedForRun}
+        idToTitle={idToTitle}
+        onQueued={() => setSelectedForRun([])}
+      />
+
       <div className="space-y-4">
         {epics.map((epic) => {
           const epicCount = progress?.epics[epic.slug];
@@ -571,6 +606,30 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                             style={{ color: "var(--warning)" }}
                                           />
                                         </span>
+                                      )}
+
+                                      {/* Overnight-run picker checkbox — only on not-done loops
+                                          with a stable ID (the join key create_run_plan needs) */}
+                                      {!done && loop.id && (
+                                        <button
+                                          onClick={() => toggleSelectedForRun(loop.id!)}
+                                          title={
+                                            selectedForRun.includes(loop.id)
+                                              ? "Remove from overnight-run selection"
+                                              : "Add to overnight-run selection"
+                                          }
+                                          className={`shrink-0 transition-colors ${
+                                            selectedForRun.includes(loop.id)
+                                              ? "text-[var(--primary)]"
+                                              : "text-muted-foreground/40 hover:text-foreground"
+                                          }`}
+                                        >
+                                          {selectedForRun.includes(loop.id) ? (
+                                            <CheckSquare size={12} />
+                                          ) : (
+                                            <Square size={12} />
+                                          )}
+                                        </button>
                                       )}
 
                                       {/* Promote action — only on not-done loops with a stable ID */}

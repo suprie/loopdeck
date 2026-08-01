@@ -19,13 +19,82 @@ use crate::run_executor::{
     self, build_interview_prompt, build_phase_prompt, extract_interview_answers, extract_verdict,
     RunHandle, RunVerdict,
 };
-use crate::runplan::{self, InterviewStatus, RunPhaseStatus, RunPlan};
+use crate::runplan::{self, InterviewStatus, RunPhaseStatus, RunPlan, StallPolicy};
+use chrono::Utc;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tracing::{info, warn};
+use uuid::Uuid;
+
+/// Build and persist a new `.loopdeck/run-plan.yaml` from a picker selection
+/// (Phase 5): the phases the user checked, in the order they were selected,
+/// under one queue-time `stall_policy` and draft-PR consent.
+///
+/// Every ID is validated against `docs/epics/` (`epic::find_loop_by_id`) so a
+/// stale or mistyped ID is rejected before it's written to disk, not
+/// discovered later at run time. `depends_on` defaults to the authored
+/// selection order — each phase depends on its immediate predecessor — per
+/// the PRD's "linear chain, no editor" v1 design; there is no edge editor in
+/// this phase. Every phase starts `Queued`/`Pending` (interview unanswered),
+/// so `queue_run` still gates on the pre-flight interview as usual.
+///
+/// Replaces any existing plan outright — a fresh picker selection is always
+/// meant to start a new plan, not merge into a stale one — but refuses while
+/// a run is actively executing (same guard `queue_run` uses), so a picker
+/// selection can't clobber the plan an in-flight executor is reading.
+#[tauri::command]
+pub async fn create_run_plan(
+    path: String,
+    execution_ids: Vec<String>,
+    stall_policy: StallPolicy,
+    draft_pr_authorized: bool,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+
+    if execution_ids.is_empty() {
+        return Err(AppError::RunPlan(
+            "select at least one phase to queue".into(),
+        ));
+    }
+
+    {
+        let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+        if handles.contains_key(&root) {
+            return Err(AppError::RunPlan(
+                "a run is already in progress for this project — cancel it before queuing a new plan".into(),
+            ));
+        }
+    }
+
+    for id in &execution_ids {
+        epic::find_loop_by_id(&root, id).ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "no PRD checklist loop with id \"{id}\" found under docs/epics/"
+            ))
+        })?;
+    }
+
+    let plan = run_executor::build_run_plan(
+        format!("run-{}", Uuid::new_v4()),
+        root.clone(),
+        Utc::now(),
+        &execution_ids,
+        stall_policy,
+        draft_pr_authorized,
+    );
+
+    runplan::save(&root, &plan)?;
+    info!(
+        "run plan queued for {} with {} phase(s)",
+        root.display(),
+        plan.phases.len()
+    );
+    Ok(plan)
+}
 
 /// Start executing a project's queued run plan in the background.
 ///

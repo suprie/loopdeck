@@ -175,7 +175,8 @@ pub fn run() {
             // Migration from legacy loops.md → execution.yaml — 0.2.1 Phase 4
             commands::execution::get_migration_preview,
             commands::execution::apply_migration,
-            // Run queue — prd-run-queue Phase 2
+            // Run queue — prd-run-queue Phase 2 (+ create_run_plan, Phase 5 picker)
+            commands::run_queue::create_run_plan,
             commands::run_queue::queue_run,
             commands::run_queue::cancel_run,
             commands::run_queue::get_run_status,
