@@ -804,6 +804,22 @@ export interface ConversationSummary {
   first_user_excerpt: string;
 }
 
+/**
+ * An image the human attached to a user turn.
+ *
+ * Stored inline as base64 in the transcript (no sidecar files on disk), and
+ * passed straight through to the agent as an Anthropic `image` content block.
+ * The composer downscales and re-encodes before building this, so `data` is
+ * always unwrapped standard base64 with no `data:` URI prefix — the backend
+ * rejects anything else.
+ */
+export interface Attachment {
+  /** IANA media type; one of image/png, image/jpeg, image/gif, image/webp. */
+  media_type: string;
+  /** Base64 of the raw image bytes, without a `data:` prefix. */
+  data: string;
+}
+
 export interface ConversationTurn {
   /** ISO-8601 timestamp. */
   ts: string;
@@ -821,6 +837,12 @@ export interface ConversationTurn {
   source?: "user" | "loop" | "";
   /** Turn body — user prompt text or assistant result text. */
   text: string;
+  /**
+   * Images attached to this user turn, in composer order. Absent on assistant
+   * turns, on auto-generated loop prompts, and on transcripts written before
+   * attachments existed.
+   */
+  attachments?: Attachment[];
   /** Claude session id (assistant turns only; absent on user turns). */
   session_id?: string;
   /** Whether the assistant turn was an error. Always false for user turns. */

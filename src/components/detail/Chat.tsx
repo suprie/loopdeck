@@ -17,8 +17,11 @@ import {
   ListChecks,
   CheckCircle2,
   XCircle,
+  Paperclip,
+  X,
 } from "lucide-react";
 import type {
+  Attachment,
   ConversationTurn,
   ClaudeEvent,
   ContentBlock,
@@ -28,6 +31,15 @@ import type {
   ApprovalDecision,
   PlanApprovalDecision,
 } from "../../types";
+import {
+  attachmentSrc,
+  base64ToBlob,
+  fileToAttachment,
+  isAttachableImage,
+  AttachmentError,
+  MAX_ATTACHMENTS,
+} from "../../lib/attachments";
+import { agentReadImageAttachment } from "../../lib/tauri";
 import { Markdown } from "../shared/Markdown";
 import { FileMentionMenu, useFileMention } from "./FileMentionMenu";
 import { SkillMenu, useSkillDiscovery } from "./SkillMenu";
@@ -103,8 +115,13 @@ export interface ChatProps {
   } | null;
   /** Error message to show as a banner above the transcript. */
   error: string | null;
-  /** Called when the user sends a message from the composer. */
-  onSend: (text: string) => void;
+  /**
+   * Called when the user sends a message from the composer.
+   *
+   * `attachments` are images pasted, dropped, or picked into the composer,
+   * already downscaled and base64-encoded. Empty for a plain text message.
+   */
+  onSend: (text: string, attachments: Attachment[]) => void;
   /** Called when the user clears the error banner. */
   onClearError?: () => void;
   /** Whether the composer and Start button should be disabled. */
@@ -528,9 +545,25 @@ function TurnBubble({ turn, onRetryOverload, autonomous = false }: {
           // User turns: render the prompt text once. (Previously this was
           // duplicated — the fallback ternary below also rendered user text,
           // so every user bubble showed its message twice.)
-          <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-            {sanitise(turn.text)}
-          </p>
+          <>
+            {turn.attachments && turn.attachments.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {turn.attachments.map((attachment, i) => (
+                  <img
+                    key={i}
+                    src={attachmentSrc(attachment)}
+                    alt={`Attached image ${i + 1}`}
+                    className="max-h-40 max-w-full rounded border border-border/60 object-contain"
+                  />
+                ))}
+              </div>
+            )}
+            {turn.text.trim() && (
+              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                {sanitise(turn.text)}
+              </p>
+            )}
+          </>
         ) : turn.blocks && turn.blocks.length > 0 ? (
           <BlockList blocks={turn.blocks} autonomous={autonomous} />
         ) : (
@@ -1093,6 +1126,116 @@ export function Chat({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isStreaming = streamingBlocks !== null;
 
+  // ── Image attachments ──
+  // Staged alongside the draft and cleared together with it on send, so the
+  // composer is a single unit of "what I'm about to say".
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  /** Rejection reason for the last attach attempt (bad type, too big, …). */
+  const [attachError, setAttachError] = useState<string | null>(null);
+  /** True while a drag is over the composer, for the drop-target highlight. */
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Convert and stage image blobs, enforcing the count cap.
+   *
+   * Non-image items are dropped silently: a paste or drop routinely carries
+   * extra flavours (an HTML rendition of a copied region, a stray text/plain)
+   * that the user never thought of as attachments. Only an item that *is* an
+   * image but can't be used produces a visible message.
+   */
+  async function addImages(blobs: Blob[]) {
+    const images = blobs.filter(isAttachableImage);
+    if (images.length === 0) return;
+
+    setAttachError(null);
+    const room = MAX_ATTACHMENTS - attachments.length;
+    if (room <= 0) {
+      setAttachError(`You can attach at most ${MAX_ATTACHMENTS} images.`);
+      return;
+    }
+    if (images.length > room) {
+      setAttachError(
+        `Only the first ${room} image${room === 1 ? "" : "s"} were attached (max ${MAX_ATTACHMENTS}).`,
+      );
+    }
+
+    const accepted: Attachment[] = [];
+    for (const image of images.slice(0, room)) {
+      try {
+        accepted.push(await fileToAttachment(image));
+      } catch (e) {
+        setAttachError(
+          e instanceof AttachmentError ? e.message : "Could not attach that image.",
+        );
+      }
+    }
+    if (accepted.length > 0) {
+      setAttachments((prev) => [...prev, ...accepted]);
+    }
+  }
+
+  function removeAttachment(index: number) {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+    setAttachError(null);
+  }
+
+  // Tauri delivers file drops as OS-level events carrying filesystem *paths*,
+  // not as webview drop events carrying bytes. We read those paths through the
+  // backend rather than switching the window to webview-level HTML5 drops,
+  // because the import screen's folder drop depends on the native events (see
+  // ImportFlow) and a folder has no `File` equivalent to fall back on.
+  useEffect(() => {
+    if (readOnly) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const un = await getCurrentWindow().onDragDropEvent(async (event) => {
+          if (event.payload.type === "over") {
+            setDragOver(true);
+            return;
+          }
+          if (event.payload.type === "leave") {
+            setDragOver(false);
+            return;
+          }
+          setDragOver(false);
+          const blobs: Blob[] = [];
+          for (const path of event.payload.paths) {
+            try {
+              const read = await agentReadImageAttachment(path);
+              // Round-trip through a Blob so dropped files go through exactly
+              // the same downscale/re-encode path as pasted ones — the backend
+              // hands back the file at original size.
+              blobs.push(await base64ToBlob(read.data, read.media_type));
+            } catch (e) {
+              setAttachError(
+                e instanceof Error ? e.message : String(e ?? "Could not read that file."),
+              );
+            }
+          }
+          if (blobs.length > 0) await addImages(blobs);
+        });
+        if (cancelled) un();
+        else unlisten = un;
+      } catch {
+        // Not running under Tauri (browser dev) — drop is simply unavailable;
+        // paste and the attach button still work.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+    // `addImages` closes over `attachments` for the count cap, so the listener
+    // is re-registered when the staged set changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly, attachments.length]);
+
   // ── `@`-mention autocomplete ──
   // The caret index mirrors the textarea's selectionStart so the mention hook
   // can re-parse the active `@…` token as the user types/moves. Kept in state
@@ -1168,8 +1311,15 @@ export function Chat({
   /** Handle the composer send action: validate, clear, fire callback. */
   function handleSend() {
     const text = draft.trim();
-    if (!text || disabled || busy || readOnly) return;
+    // An image with no words ("look at this") is a valid message, so the
+    // guard is "nothing at all to send" rather than "no text".
+    if ((!text && attachments.length === 0) || disabled || busy || readOnly) {
+      return;
+    }
+    const staged = attachments;
     setDraft("");
+    setAttachments([]);
+    setAttachError(null);
     // Sending implies "show me what happens next" — re-arm stick-to-bottom so
     // the user's own bubble (rendered by the parent's optimistic insert) and
     // the upcoming assistant reply scroll into view, even if the user had
@@ -1178,7 +1328,7 @@ export function Chat({
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-    onSend(text);
+    onSend(text, staged);
   }
 
   // Whether any parking affordance is active — the composer is disabled
@@ -1285,7 +1435,10 @@ export function Chat({
                       const lastUser = [...turns]
                         .reverse()
                         .find((t) => t.role === "user" && (t.text ?? "").trim());
-                      if (lastUser) onSend(lastUser.text.trim());
+                      // Re-send the images too — a retry that silently dropped
+                      // them would ask the model about an image it can't see.
+                      if (lastUser)
+                        onSend(lastUser.text.trim(), lastUser.attachments ?? []);
                     }
                   : undefined
               }
@@ -1410,7 +1563,58 @@ export function Chat({
             messages.
           </div>
         ) : (
-          <div className="relative flex items-end gap-2">
+          <div
+            className={
+              dragOver
+                ? "rounded-md ring-2 ring-primary/60 ring-offset-2 ring-offset-background transition"
+                : undefined
+            }
+          >
+            {/* ── Staged attachments ──
+                Thumbnails of what will be sent with the next message. Sits
+                above the input row so it reads as part of the draft, and
+                disappears with it on send. */}
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap gap-2 pb-2">
+                {attachments.map((attachment, i) => (
+                  <div
+                    key={i}
+                    className="group relative size-14 shrink-0 overflow-hidden rounded-md border border-border bg-muted"
+                  >
+                    <img
+                      src={attachmentSrc(attachment)}
+                      alt={`Attachment ${i + 1}`}
+                      className="size-full object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(i)}
+                      title="Remove attachment"
+                      className="absolute right-0.5 top-0.5 inline-flex size-4 items-center justify-center rounded-full bg-background/85 text-muted-foreground opacity-0 transition group-hover:opacity-100 hover:text-foreground"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Attach failures are shown here, not in the transcript's error
+                banner — nothing was sent, so this is composer feedback. */}
+            {attachError && (
+              <div className="flex items-start gap-1.5 pb-2 text-[11px] text-destructive">
+                <AlertTriangle className="mt-px size-3 shrink-0" />
+                <span className="flex-1">{attachError}</span>
+                <button
+                  onClick={() => setAttachError(null)}
+                  className="shrink-0 opacity-60 transition-opacity hover:opacity-100"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            <div className="relative flex items-end gap-2">
             {/* `@`-mention popup — anchored to the textarea caret. Rendered as
                 a child of this `relative` row so the caret-local coordinates
                 from caretCoords (whose origin is the textarea's top-left, which
@@ -1454,12 +1658,45 @@ export function Chat({
                 <ListChecks className="size-4" />
               </button>
             )}
+            {/* A plain hidden file input rather than the Tauri dialog plugin:
+                the dialog returns a path, which would then need a backend read
+                to get bytes, while the input hands us a `File` directly. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+              hidden
+              onChange={(e) => {
+                void addImages(Array.from(e.target.files ?? []));
+                // Reset so picking the same file twice in a row still fires.
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={composerDisabled}
+              title="Attach an image — you can also paste or drag one in"
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Paperclip className="size-4" />
+            </button>
             <textarea
               ref={inputRef}
               value={draft}
               onChange={(e) => {
                 setDraft(e.target.value);
                 setCaret(e.target.selectionStart);
+              }}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files);
+                // Only swallow the paste when it actually carried an image;
+                // otherwise let the normal text paste through untouched.
+                if (files.some(isAttachableImage)) {
+                  e.preventDefault();
+                  void addImages(files);
+                }
               }}
               onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
               onClick={(e) => setCaret(e.currentTarget.selectionStart)}
@@ -1495,7 +1732,9 @@ export function Chat({
             />
             <button
               onClick={handleSend}
-              disabled={composerDisabled || !draft.trim()}
+              disabled={
+                composerDisabled || (!draft.trim() && attachments.length === 0)
+              }
               className="inline-flex items-center justify-center size-9 shrink-0 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
               title="Send message"
             >
@@ -1505,6 +1744,7 @@ export function Chat({
                 <Send className="size-4" />
               )}
             </button>
+            </div>
           </div>
         )}
       </div>

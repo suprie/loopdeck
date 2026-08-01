@@ -123,6 +123,34 @@ pub const TRANSCRIPT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// 4 MiB is well above any legitimate single stream-json line.
 pub const STREAM_LINE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
+// ── Composer image attachments ─────────────────────────────────────────────
+//
+// Attachments are stored inline as base64 in the transcript AND written inline
+// into the single NDJSON line that carries the user turn to the CLI's stdin.
+// Both of those are why these are bounded here rather than left to the
+// frontend: the browser downscales before encoding (keeping a typical
+// screenshot in the low hundreds of KB), but the backend must not *trust*
+// that — a hand-crafted IPC call could otherwise write an unbounded line to
+// the child process and blow up `TRANSCRIPT_MAX_BYTES` in one turn.
+
+/// Max base64 length of a single attached image.
+///
+/// Base64 inflates by ~4/3, so this is ~3 MiB of raw image — far above
+/// anything the frontend's 1568px downscale produces, while still refusing a
+/// multi-hundred-megabyte paste.
+pub const ATTACHMENT_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Max combined base64 length of all attachments on one turn.
+///
+/// Kept in the same order of magnitude as [`STREAM_LINE_MAX_BYTES`] because
+/// the turn is written as one NDJSON line: what we refuse to *read* at 4 MiB
+/// we should not casually *write* at 100.
+pub const ATTACHMENTS_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Max number of images on a single turn. A guard against pathological counts
+/// of tiny images, which the byte budgets alone would happily allow.
+pub const ATTACHMENTS_MAX_COUNT: usize = 8;
+
 // ── Agent response accumulation (`agents::ResponseAccumulator`) ────────────
 
 /// Max content blocks recorded in one accumulated turn.

@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   AgentConfig,
+  Attachment,
   DirEntry,
   DiscoveredRepo,
   ProjectEntry,
@@ -449,13 +450,39 @@ export async function agentStartLoop(path: string): Promise<AgentResponse> {
 
 /**
  * Send a free-form follow-up message to the project's agent session.
- * Rust: agent_send_message(path: String, prompt: String) -> Result<AgentResponse, AppError>
+ * `attachments` are images pasted/dropped into the composer, sent as inline
+ * base64 content blocks alongside the text.
+ *
+ * Rust: agent_send_message(
+ *   path: String, prompt: String, attachments: Option<Vec<Attachment>>
+ * ) -> Result<AgentResponse, AppError>
  */
 export async function agentSendMessage(
   path: string,
   prompt: string,
+  attachments: Attachment[] = [],
 ): Promise<AgentResponse> {
-  return invoke<AgentResponse>("agent_send_message", { path, prompt });
+  return invoke<AgentResponse>("agent_send_message", {
+    path,
+    prompt,
+    attachments,
+  });
+}
+
+/**
+ * Read an image file from disk into an inline-base64 attachment.
+ *
+ * Only needed for the composer's drag-and-drop path: Tauri delivers a drop as
+ * a filesystem path rather than as bytes, so the file has to be read by the
+ * backend. Paste and the file picker hand the webview a `File` directly and
+ * skip this entirely. Returned at original size — the caller downscales.
+ *
+ * Rust: agent_read_image_attachment(path: String) -> Result<Attachment, AppError>
+ */
+export async function agentReadImageAttachment(
+  path: string,
+): Promise<Attachment> {
+  return invoke<Attachment>("agent_read_image_attachment", { path });
 }
 
 /**
@@ -490,8 +517,12 @@ export async function agentStartLoopStreaming(
  * read-only tools plus `ExitPlanMode`, which surfaces a `plan_approval`
  * channel event instead of letting the agent edit anything.
  *
+ * `attachments` are images pasted/dropped into the composer, sent as inline
+ * base64 content blocks ahead of the text block.
+ *
  * Rust: agent_send_message_streaming(
- *   path: String, prompt: String, on_event: Channel<ClaudeEvent>, plan_mode: bool
+ *   path: String, prompt: String, attachments: Option<Vec<Attachment>>,
+ *   on_event: Channel<ClaudeEvent>, plan_mode: bool
  * ) -> Result<(), AppError>
  */
 export async function agentSendMessageStreaming(
@@ -499,10 +530,12 @@ export async function agentSendMessageStreaming(
   prompt: string,
   onEvent: Channel<ClaudeEvent>,
   planMode: boolean = false,
+  attachments: Attachment[] = [],
 ): Promise<void> {
   return invoke<void>("agent_send_message_streaming", {
     path,
     prompt,
+    attachments,
     onEvent,
     planMode,
   });

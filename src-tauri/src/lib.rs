@@ -194,6 +194,7 @@ pub fn run() {
             commands::agent::agent_start_loop_streaming,
             commands::agent::agent_send_message,
             commands::agent::agent_send_message_streaming,
+            commands::agent::agent_read_image_attachment,
             commands::agent::agent_get_conversation,
             commands::agent::agent_list_conversations,
             commands::agent::agent_get_conversation_by_id,

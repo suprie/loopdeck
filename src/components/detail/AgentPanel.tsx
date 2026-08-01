@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { Play, RotateCcw, Loader2, History, ChevronDown, Square } from "lucide-react";
 import type {
+  Attachment,
   ConversationTurn,
   ClaudeEvent,
   AppError,
@@ -510,8 +511,15 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
    * @param usePlanMode  Only meaningful when `prompt` is set — runs the turn
    *                under the CLI's `plan` permission mode. Loop starts never
    *                use this (no prompt ⇒ always a normal turn).
+   * @param attachments  Composer images to send with `prompt`. Like
+   *                `usePlanMode`, meaningless for a loop start — the loop
+   *                prompt is built server-side and has no composer.
    */
-  async function runStreamingTurn(prompt?: string, usePlanMode = false) {
+  async function runStreamingTurn(
+    prompt?: string,
+    usePlanMode = false,
+    attachments: Attachment[] = [],
+  ) {
     // Synchronous busy guard — closes the double-send race that React state
     // can't (two rapid sends both see `busy === false` before re-render).
     if (busyRef.current) return;
@@ -738,7 +746,13 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
 
     try {
       if (prompt !== undefined) {
-        await api.agentSendMessageStreaming(projectPath, prompt, channel, usePlanMode);
+        await api.agentSendMessageStreaming(
+          projectPath,
+          prompt,
+          channel,
+          usePlanMode,
+          attachments,
+        );
       } else {
         await api.agentStartLoopStreaming(projectPath, channel);
       }
@@ -800,8 +814,10 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
    * it — so the follow-up appends to that conversation and the agent resumes
    * its context. Browsing is free; promotion is lazy and happens only on send.
    */
-  async function runSendMessage(prompt: string) {
-    if (!prompt.trim()) return;
+  async function runSendMessage(prompt: string, attachments: Attachment[] = []) {
+    // An image with no accompanying text is a valid message, so an empty
+    // prompt only bails when there is nothing attached either.
+    if (!prompt.trim() && attachments.length === 0) return;
     // Synchronous busy guard — same race `runStreamingTurn` closes. React's
     // `busy` state is stale within the render cycle, so a rapid double-send
     // (double-click, double Enter before re-render) would pass a `!busy` check
@@ -851,7 +867,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     const usePlanMode = planMode && planModeUsable;
     setPlanMode(false);
 
-    await runStreamingTurn(text, usePlanMode);
+    await runStreamingTurn(text, usePlanMode, attachments);
   }
 
   /**

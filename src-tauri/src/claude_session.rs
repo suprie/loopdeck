@@ -4,6 +4,7 @@ use crate::agents::{
     ControlResponsePayload, ResponseAccumulator, StreamEvent,
 };
 use crate::config::AgentConfig;
+use crate::conversation::Attachment;
 use crate::error::AppError;
 use crate::permission::{Decision, PermissionPolicy};
 use std::collections::HashMap;
@@ -165,6 +166,53 @@ async fn park_until<T>(deadline: tokio::time::Instant, rx: oneshot::Receiver<T>)
 /// unattended caller has something concrete to show in a morning report;
 /// capped at a few hundred chars since a `Write`/`Edit` input or a long plan
 /// could otherwise blow up the message.
+/// Build the `stream-json` user-turn object written to the CLI's stdin.
+///
+/// The CLI accepts the Anthropic Messages API content-block shape verbatim, so
+/// an attached image is a plain `image` block with an inline base64 source —
+/// no CLI-specific wrapper, and no writing the file to disk for the agent to
+/// `Read` back.
+///
+/// Images are emitted **before** the text block. That ordering is Anthropic's
+/// documented recommendation for image+text prompts, and it matches how the
+/// user composes: they paste a screenshot, then type the question about it.
+///
+/// Factored out (rather than inlined at each `write_all`) because the
+/// streaming and non-streaming send paths each build this independently, and
+/// a divergence between them would be invisible until one path silently
+/// dropped attachments.
+fn user_turn_json(text: &str, attachments: &[Attachment]) -> serde_json::Value {
+    let mut content: Vec<serde_json::Value> = attachments
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": a.media_type,
+                    "data": a.data,
+                }
+            })
+        })
+        .collect();
+    // "Here, look at this" with no words is a legitimate message, and the API
+    // rejects an empty text block — so drop the block entirely rather than
+    // sending a blank one. Only when there is nothing else to say: a turn with
+    // neither text nor images keeps the empty text block, preserving the
+    // pre-attachment behaviour for that (composer-blocked) case.
+    if !text.is_empty() || content.is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+
+    serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": content,
+        }
+    })
+}
+
 fn turn_deadline_expired_error(pending_detail: &str) -> AppError {
     const MAX_DETAIL_CHARS: usize = 200;
     let detail: String = if pending_detail.chars().count() > MAX_DETAIL_CHARS {
@@ -1498,6 +1546,7 @@ impl ClaudeSession {
     pub async fn send_message(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         slots: &ParkSlots<'_>,
         _interrupt_slot: &InterruptSlot,
     ) -> Result<AgentResponse, AppError> {
@@ -1516,13 +1565,7 @@ impl ClaudeSession {
                 .as_mut()
                 .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
 
-            let input = serde_json::json!({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}]
-                }
-            });
+            let input = user_turn_json(text, attachments);
             let json_str = format!("{}\n", input);
             stdin
                 .write_all(json_str.as_bytes())
@@ -1644,6 +1687,7 @@ impl ClaudeSession {
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
+        attachments: &[Attachment],
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
@@ -1670,13 +1714,7 @@ impl ClaudeSession {
                 .as_mut()
                 .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
 
-            let input = serde_json::json!({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}]
-                }
-            });
+            let input = user_turn_json(text, attachments);
             let json_str = format!("{}\n", input);
             stdin
                 .write_all(json_str.as_bytes())
@@ -2037,6 +2075,78 @@ fn poll_reap(child: &mut Child, window: Duration) -> bool {
 mod tests {
     use super::*;
 
+    fn png(data: &str) -> Attachment {
+        Attachment {
+            media_type: String::from("image/png"),
+            data: String::from(data),
+        }
+    }
+
+    #[test]
+    fn text_only_turn_keeps_the_single_text_block_shape() {
+        let turn = user_turn_json("hello", &[]);
+
+        assert_eq!(turn["type"], "user");
+        assert_eq!(turn["message"]["role"], "user");
+        let content = turn["message"]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hello");
+    }
+
+    #[test]
+    fn attached_image_becomes_an_inline_base64_source_block() {
+        let turn = user_turn_json("what colour?", &[png("aGVsbG8=")]);
+
+        let content = turn["message"]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "aGVsbG8=");
+    }
+
+    #[test]
+    fn images_precede_the_text_block_and_keep_composer_order() {
+        let turn = user_turn_json("compare these", &[png("Zmlyc3Q="), png("c2Vjb25k")]);
+
+        let content = turn["message"]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["source"]["data"], "Zmlyc3Q=");
+        assert_eq!(content[1]["source"]["data"], "c2Vjb25k");
+        // Text last — see `user_turn_json` for why.
+        assert_eq!(content[2]["type"], "text");
+        assert_eq!(content[2]["text"], "compare these");
+    }
+
+    #[test]
+    fn image_with_no_text_omits_the_empty_text_block() {
+        let turn = user_turn_json("", &[png("YWJj")]);
+
+        let content = turn["message"]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn empty_turn_with_no_images_keeps_a_text_block() {
+        let turn = user_turn_json("", &[]);
+
+        let content = turn["message"]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    /// The turn is written as one NDJSON line, so an embedded newline in the
+    /// base64 (or the text) would split it into two malformed lines.
+    #[test]
+    fn serialized_turn_is_a_single_line() {
+        let turn = user_turn_json("line one\nline two", &[png("YWJj")]);
+        let encoded = turn.to_string();
+
+        assert!(!encoded.contains('\n'), "turn must serialise to one line");
+    }
+
     /// Test agent config.
     ///
     /// Centralised here so both integration tests share one source of truth.
@@ -2266,6 +2376,7 @@ mod tests {
             let response = session
                 .send_message(
                     "reply with exactly: hello",
+                    &[],
                     &ParkSlots {
                         question: &qslot(),
                         permission: &pslot(),
@@ -2309,7 +2420,7 @@ mod tests {
             .expect("failed to spawn claude session");
 
         let response = session
-            .send_message("is there a Cargo.toml in this directory, response with YES or NO only, No preamble", &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
+            .send_message("is there a Cargo.toml in this directory, response with YES or NO only, No preamble", &[], &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
             .await
             .expect("send_message failed");
 
@@ -2347,14 +2458,14 @@ mod tests {
         // Turn 1 — plant a distinctive fact the model could only repeat by
         // remembering it (not by guessing from turn 2's question alone).
         let first = session
-            .send_message("I'm telling you a secret codeword. The codeword is: ZUCCHINI. Reply with exactly: understood.", &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
+            .send_message("I'm telling you a secret codeword. The codeword is: ZUCCHINI. Reply with exactly: understood.", &[], &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
             .await
             .expect("turn 1 (send_message) failed");
         assert!(!first.is_error, "turn 1 should not error, got: {:?}", first);
 
         // Turn 2 — recall it. Same process, same session, no --resume.
         let second = session
-            .send_message("What is the secret codeword I just told you? Reply with only the codeword, nothing else.", &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
+            .send_message("What is the secret codeword I just told you? Reply with only the codeword, nothing else.", &[], &ParkSlots { question: &qslot(), permission: &pslot(), plan: &plan_slot() }, &islot())
             .await
             .expect("turn 2 (send_message) failed");
 
@@ -2411,6 +2522,7 @@ mod tests {
             let response = session
                 .send_message(
                     "reply with: hello",
+                    &[],
                     &ParkSlots {
                         question: &qslot(),
                         permission: &pslot(),
@@ -2466,6 +2578,7 @@ mod tests {
                 .send_message(
                     "I'm telling you a secret codeword. The codeword is: EGGPLANT. \
                      Reply with exactly: understood.",
+                    &[],
                     &ParkSlots {
                         question: &qslot(),
                         permission: &pslot(),
@@ -2503,6 +2616,7 @@ mod tests {
                 .send_message(
                     "What is the secret codeword I told you earlier? \
                      Reply with only the codeword, nothing else.",
+                    &[],
                     &ParkSlots {
                         question: &qslot(),
                         permission: &pslot(),
@@ -2567,6 +2681,7 @@ mod tests {
                 .send_message(
                     "Use the Read tool to read the file `Cargo.toml` in the current directory, \
                      then report the package name in one short sentence.",
+                    &[],
                     &ParkSlots {
                         question: &qslot(),
                         permission: &pslot(),
@@ -2619,6 +2734,7 @@ mod tests {
                 .send_message(
                     "Try to read the file `Cargo.toml` with the Read tool. \
                      If it's blocked, that's fine — just say so in one sentence.",
+                    &[],
                     &ParkSlots {
                         question: &qslot(),
                         permission: &pslot(),
