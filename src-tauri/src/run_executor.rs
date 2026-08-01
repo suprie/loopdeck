@@ -692,9 +692,7 @@ mod tests {
     // ── Integration tests for executor state machine ───────────────────
 
     /// Test helper: create a minimal RunPlan with phases in specified statuses.
-    fn make_plan_with_statuses(
-        phases: Vec<(&str, RunPhaseStatus, Vec<&str>)>,
-    ) -> RunPlan {
+    fn make_plan_with_statuses(phases: Vec<(&str, RunPhaseStatus, Vec<&str>)>) -> RunPlan {
         use chrono::TimeZone;
         let phases = phases
             .into_iter()
@@ -727,8 +725,8 @@ mod tests {
         // PASS, the phase should transition Queued → Running → Completed.
         // We verify this by checking what the executor would do with a PASS.
 
-        let dir = std::env::temp_dir()
-            .join(format!("loopdeck-sm-advance-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-sm-advance-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut plan = make_plan_with_statuses(vec![
@@ -763,8 +761,7 @@ mod tests {
         // should be marked Parked with a payload, and dependent phases should
         // be handled per the stall policy.
 
-        let dir = std::env::temp_dir()
-            .join(format!("loopdeck-sm-park-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-park-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut plan = make_plan_with_statuses(vec![
@@ -781,7 +778,11 @@ mod tests {
         // Apply blocking logic
         let blocked = phases_blocked_by_park(&plan, "phase1", plan.stall_policy);
         for blocked_id in blocked {
-            if let Some(p) = plan.phases.iter_mut().find(|p| p.execution_id == blocked_id) {
+            if let Some(p) = plan
+                .phases
+                .iter_mut()
+                .find(|p| p.execution_id == blocked_id)
+            {
                 p.status = RunPhaseStatus::Parked;
                 p.park_payload = Some(format!("blocked: depends on parked phase \"phase1\""));
             }
@@ -811,10 +812,8 @@ mod tests {
         // correctly computed: if A parks and B depends on A and C depends on
         // B, both B and C should park, but D (unrelated) should stay queued.
 
-        let dir = std::env::temp_dir().join(format!(
-            "loopdeck-sm-transitive-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-sm-transitive-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut plan = make_plan_with_statuses(vec![
@@ -833,7 +832,11 @@ mod tests {
         // Compute blocked phases
         let blocked = phases_blocked_by_park(&plan, "a", plan.stall_policy);
         for blocked_id in blocked {
-            if let Some(p) = plan.phases.iter_mut().find(|p| p.execution_id == blocked_id) {
+            if let Some(p) = plan
+                .phases
+                .iter_mut()
+                .find(|p| p.execution_id == blocked_id)
+            {
                 p.status = RunPhaseStatus::Parked;
                 p.park_payload = Some(format!("blocked: depends on parked phase \"a\""));
             }
@@ -855,8 +858,7 @@ mod tests {
         // Test that under Halt policy, when any phase parks, ALL remaining
         // queued phases are blocked, regardless of dependencies.
 
-        let dir = std::env::temp_dir()
-            .join(format!("loopdeck-sm-halt-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-halt-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut plan = make_plan_with_statuses(vec![
@@ -875,7 +877,11 @@ mod tests {
         // Under Halt, all remaining queued phases are blocked
         let blocked = phases_blocked_by_park(&plan, "phase2", plan.stall_policy);
         for blocked_id in blocked {
-            if let Some(p) = plan.phases.iter_mut().find(|p| p.execution_id == blocked_id) {
+            if let Some(p) = plan
+                .phases
+                .iter_mut()
+                .find(|p| p.execution_id == blocked_id)
+            {
                 p.status = RunPhaseStatus::Parked;
                 p.park_payload = Some(format!("blocked: depends on parked phase \"phase2\""));
             }
@@ -897,8 +903,7 @@ mod tests {
         // on disk from a crash should be downgraded to Interrupted when the
         // app restarts.
 
-        let dir = std::env::temp_dir()
-            .join(format!("loopdeck-sm-resume-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-resume-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut plan = make_plan_with_statuses(vec![
@@ -927,8 +932,7 @@ mod tests {
         // Test that WARN, BLOCK, or missing verdict all result in Failed status.
         // This verifies the executor's "only PASS advances" logic.
 
-        let dir = std::env::temp_dir()
-            .join(format!("loopdeck-sm-fail-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-fail-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut plan = make_plan_with_statuses(vec![
