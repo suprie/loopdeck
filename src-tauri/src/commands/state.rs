@@ -26,7 +26,7 @@ use crate::permission::PermissionPolicy;
 use crate::run_executor::RunHandle;
 use crate::secrets;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +71,51 @@ pub struct AppState {
     /// is driving it right now*, so a restart (no entry, ever) is
     /// distinguishable from a still-running process.
     pub run_handles: Mutex<HashMap<PathBuf, RunHandle>>,
+    /// Roots currently owned by a live multi-agent worker. This is an
+    /// in-memory admission lock, deliberately separate from the durable
+    /// manifest: a fresh app reconciles stale manifest state before accepting
+    /// another run.
+    pub multi_agent_active_runs: Mutex<HashSet<PathBuf>>,
+    /// Serializes durable manifest transitions and linked-worktree creation
+    /// for each project, preventing an interrupt/retry from racing a worker's
+    /// queued → running transition.
+    pub multi_agent_manifest_locks: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+pub(crate) fn acquire_multi_agent_run(state: &AppState, root: &Path) -> Result<(), AppError> {
+    let mut active = state
+        .multi_agent_active_runs
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    if !active.insert(root.to_path_buf()) {
+        return Err(AppError::RunPlan(
+            "a multi-agent loop is already active for this project".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn release_multi_agent_run(state: &AppState, root: &Path) -> Result<(), AppError> {
+    state
+        .multi_agent_active_runs
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .remove(root);
+    Ok(())
+}
+
+pub(crate) fn multi_agent_manifest_lock(
+    state: &AppState,
+    root: &Path,
+) -> Result<Arc<tokio::sync::Mutex<()>>, AppError> {
+    let mut locks = state
+        .multi_agent_manifest_locks
+        .lock()
+        .map_err(|_| AppError::LockError)?;
+    Ok(locks
+        .entry(root.to_path_buf())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone())
 }
 
 /// Pop and fire the interrupt sender for `path`, if a turn is in flight.
@@ -151,8 +196,27 @@ pub(crate) fn resolve_root(state: &AppState, path: &str) -> Result<PathBuf, AppE
     paths::resolve_registered_root(&config, path)
 }
 
-/// Read the agent config from the registry and inject the auth token from the
-/// local secrets file.
+/// Read a named roster entry and inject its UUID-scoped auth token from the
+/// local secrets file. This is the resolver used by multi-agent runs so one
+/// agent can never receive another agent's credential.
+pub(crate) fn resolve_agent_config_by_id(
+    state: &AppState,
+    id: &str,
+) -> Result<AgentConfig, AppError> {
+    let mut agent_config = state
+        .config
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .find_agent_config(id)
+        .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?
+        .config
+        .clone();
+    agent_config.auth_token = secrets::load_agent_auth_token(id)?;
+    Ok(agent_config)
+}
+
+/// Read the default agent config from the registry and inject the auth token
+/// from the local secrets file.
 ///
 /// The token is never stored in `config.yaml` (it lives in a separate
 /// owner-only file — see `secrets`), so it must be resolved here, at spawn
@@ -168,15 +232,27 @@ pub(crate) fn resolve_root(state: &AppState, path: &str) -> Result<PathBuf, AppE
 /// `None`, preserving the prior behaviour where a user may rely on
 /// `ANTHROPIC_AUTH_TOKEN` inherited from their shell.
 pub(crate) fn resolve_agent_config(state: &AppState) -> Result<AgentConfig, AppError> {
-    let mut agent_config = state
+    let default_id = state
+        .config
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .default_named_agent_config()
+        .map(|agent| agent.id.clone());
+    if let Some(id) = default_id {
+        return resolve_agent_config_by_id(state, &id);
+    }
+
+    // Compatibility for tests and unusual startup paths before the one-time
+    // registry migration has persisted an old singleton configuration.
+    let mut legacy = state
         .config
         .lock()
         .map_err(|_| AppError::LockError)?
         .agent
         .clone()
         .unwrap_or_default();
-    agent_config.auth_token = secrets::load_auth_token()?;
-    Ok(agent_config)
+    legacy.auth_token = secrets::load_auth_token()?;
+    Ok(legacy)
 }
 
 /// Resolve the per-project `PermissionPolicy` from the registry.
@@ -475,7 +551,19 @@ mod tests {
             pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
             run_handles: Mutex::new(HashMap::new()),
+            multi_agent_active_runs: Mutex::new(HashSet::new()),
+            multi_agent_manifest_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn multi_agent_admission_is_project_scoped_and_releasable() {
+        let state = empty_state();
+        let root = PathBuf::from("/tmp/loopdeck-multi-agent-lock");
+        acquire_multi_agent_run(&state, &root).unwrap();
+        assert!(acquire_multi_agent_run(&state, &root).is_err());
+        release_multi_agent_run(&state, &root).unwrap();
+        acquire_multi_agent_run(&state, &root).unwrap();
     }
 
     /// Regression: `question_slot`/`permission_slot`/`plan_slot` create their

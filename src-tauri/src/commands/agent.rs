@@ -991,7 +991,7 @@ fn truncate_prompt(s: &str) -> String {
 /// Returns `(prompt, title)` — `title` is the raw step text (when one was
 /// found) so the history list can show it as the conversation's display
 /// name instead of the prompt's generic opening boilerplate.
-fn build_next_loop_prompt(path: &Path) -> (String, Option<String>) {
+pub(crate) fn build_next_loop_prompt(path: &Path) -> (String, Option<String>) {
     let next_step = next_unchecked_loop_step(path);
 
     match next_step {
@@ -1651,15 +1651,30 @@ async fn spawn_fresh(
     // the worktree's private `.loopdeck` directory.
     conversation::archive_conversation(policy_root)?;
 
-    // ── Phase 4: spawn fresh (no --resume) and insert. ──
     let agent_config = resolve_agent_config(state)?;
+    spawn_fresh_with_config(state, path, policy_root, &agent_config, force_autonomous)
+}
+
+/// The fresh-session primitive with an already resolved profile. Multi-agent
+/// runs resolve every roster entry before worktrees are spawned, then use this
+/// function so a later settings edit cannot change an in-flight sub-run.
+pub(crate) fn spawn_fresh_with_config(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    agent_config: &crate::config::AgentConfig,
+    force_autonomous: bool,
+) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
+    // The caller has already performed the busy check / archive steps when it
+    // is the normal `spawn_fresh` path. Multi-agent worktrees are unique, so
+    // their maps cannot collide with an existing session.
     let policy = if force_autonomous {
         PermissionPolicy::with_mode(PermissionMode::Autonomous)
     } else {
         resolve_permission_policy(state, policy_root)
     };
 
-    let session = HarnessSession::spawn(path, &agent_config, None, policy)?;
+    let session = HarnessSession::spawn(path, agent_config, None, policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state
         .claude_sessions
@@ -1801,12 +1816,52 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
     channel: &Channel<ClaudeEvent>,
     options: StreamingRunOptions<'_>,
 ) -> Result<AgentResponse, AppError> {
-    let session_arc = spawn_fresh(state, path, policy_root, options.force_autonomous).await?;
+    start_fresh_and_record_streaming_in_root_with_config(
+        state,
+        path,
+        policy_root,
+        prompt,
+        title,
+        channel,
+        options.token_budget,
+        None,
+        None,
+        options.force_autonomous,
+    )
+    .await
+}
+
+/// Profile-pinned counterpart of [`start_fresh_and_record_streaming_in_root`].
+/// `agent_config` is intentionally owned by the caller's run snapshot; it is
+/// never re-read from global settings after a multi-agent loop has begun.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    prompt: &str,
+    title: Option<String>,
+    channel: &Channel<ClaudeEvent>,
+    token_budget: Option<&TokenBudget>,
+    agent_config: Option<&crate::config::AgentConfig>,
+    // The key used for cached sessions and interactive control slots. Legacy
+    // worktree callers retain `policy_root`; multi-agent workers pass their
+    // own linked worktree so sibling controls can never collide.
+    control_key: Option<&Path>,
+    force_autonomous: bool,
+) -> Result<AgentResponse, AppError> {
+    let session_arc = match agent_config {
+        Some(config) => {
+            spawn_fresh_with_config(state, path, policy_root, config, force_autonomous)?
+        }
+        None => spawn_fresh(state, path, policy_root, force_autonomous).await?,
+    };
     let mut session = session_arc.lock().await;
-    let qslot = question_slot(state, policy_root)?;
-    let pslot = permission_slot(state, policy_root)?;
-    let plnslot = plan_slot(state, policy_root)?;
-    let islot = interrupt_slot(state, policy_root)?;
+    let control_key = control_key.unwrap_or(policy_root);
+    let qslot = question_slot(state, control_key)?;
+    let pslot = permission_slot(state, control_key)?;
+    let plnslot = plan_slot(state, control_key)?;
+    let islot = interrupt_slot(state, control_key)?;
     let slots = ParkSlots {
         question: &qslot,
         permission: &pslot,
@@ -1843,7 +1898,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
         &slots,
         &islot,
         false,
-        options.token_budget,
+        token_budget,
     )
     .await
     {

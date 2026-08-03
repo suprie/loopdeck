@@ -15,6 +15,7 @@ use crate::claude_session::{
 use crate::config::AgentConfig;
 use crate::conversation::{Attachment, ToolCallRecord};
 use crate::error::AppError;
+use crate::harness::HarnessAdapter;
 use crate::permission::{Decision, PermissionPolicy};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -897,6 +898,59 @@ impl CodexSession {
             terminate_code_mode_host(&mut host);
         }
         self.initialized = false;
+    }
+}
+
+impl HarnessAdapter for CodexSession {
+    fn spawn(
+        cwd: &Path,
+        config: &AgentConfig,
+        resume_session_id: Option<&str>,
+        policy: PermissionPolicy,
+    ) -> Result<Self, AppError> {
+        Self::spawn(cwd, config, resume_session_id, policy)
+    }
+
+    fn is_usable(&mut self) -> bool {
+        Self::is_usable(self)
+    }
+
+    async fn send_message(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        slots: &ParkSlots<'_>,
+        interrupt_slot: &InterruptSlot,
+    ) -> Result<AgentResponse, AppError> {
+        Self::send_message(self, text, attachments, slots, interrupt_slot).await
+    }
+
+    async fn send_message_streaming(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        channel: &Channel<ClaudeEvent>,
+        slots: &ParkSlots<'_>,
+        interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<AgentResponse, AppError> {
+        if plan_mode {
+            return Err(AppError::Agent(
+                "plan mode is a Claude-only feature and is not supported by the Codex harness"
+                    .into(),
+            ));
+        }
+        Self::send_message_streaming(
+            self,
+            text,
+            attachments,
+            channel,
+            slots,
+            interrupt_slot,
+            token_budget,
+        )
+        .await
     }
 }
 

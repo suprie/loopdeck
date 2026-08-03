@@ -1,6 +1,12 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { createAgentRosterClient } from "./agentRosterClient";
 import type {
   AgentConfig,
+  NamedAgentConfig,
+  NamedAgentConfigInput,
+  MultiAgentRun,
+  MultiAgentEvent,
+  MultiAgentControlAction,
   Attachment,
   DirEntry,
   DiscoveredRepo,
@@ -430,6 +436,47 @@ export async function clearAuthToken(): Promise<void> {
   return invoke<void>("clear_auth_token");
 }
 
+// ── Named agent roster ────────────────────────────────────────────────────
+
+const agentRosterClient = createAgentRosterClient((command, args) =>
+  invoke(command, args),
+);
+
+/** List the reusable global agent profiles (secrets are never returned). */
+export async function listAgentConfigs(): Promise<NamedAgentConfig[]> {
+  return agentRosterClient.list();
+}
+
+/** Create one reusable global agent profile. */
+export async function createAgentConfig(
+  config: NamedAgentConfigInput,
+): Promise<NamedAgentConfig> {
+  return agentRosterClient.create(config);
+}
+
+/** Update one profile by its immutable UUID. */
+export async function updateAgentConfig(
+  id: string,
+  config: NamedAgentConfigInput,
+): Promise<NamedAgentConfig> {
+  return agentRosterClient.update(id, config);
+}
+
+/** Delete one profile by UUID. The backend rejects deleting the final profile. */
+export async function deleteAgentConfig(id: string): Promise<void> {
+  return agentRosterClient.delete(id);
+}
+
+/** Get the default profile's stable ID, or null when no profile exists. */
+export async function getDefaultAgentConfig(): Promise<NamedAgentConfig | null> {
+  return agentRosterClient.getDefault();
+}
+
+/** Select the default profile used to prefill a new loop assignment. */
+export async function setDefaultAgentConfig(id: string): Promise<NamedAgentConfig> {
+  return agentRosterClient.setDefault(id);
+}
+
 /**
  * Snapshot of the log directory (path, retained files + sizes, total, cap) for
  * the Settings → Diagnostics panel. Reads names/sizes only — never contents.
@@ -514,6 +561,53 @@ export async function agentStartLoopStreaming(
   onEvent: Channel<ClaudeEvent>,
 ): Promise<void> {
   return invoke<void>("agent_start_loop_streaming", { path, onEvent });
+}
+
+// ── Multi-agent loop commands ─────────────────────────────────────────────
+
+/**
+ * Start one logical loop as independently isolated sub-runs, one per assigned
+ * profile. The backend emits `MultiAgentEvent`s tagged with both run and agent
+ * IDs through `onEvent` while the returned snapshot establishes the run card.
+ */
+export async function agentStartMultiLoopStreaming(
+  path: string,
+  agentIds: string[],
+  onEvent: Channel<MultiAgentEvent>,
+): Promise<MultiAgentRun> {
+  return invoke<MultiAgentRun>("agent_start_multi_loop_streaming", {
+    path,
+    agentIds,
+    onEvent,
+  });
+}
+
+/** Read a persisted multi-agent run snapshot (current or historical). */
+export async function agentGetMultiAgentRun(
+  path: string,
+  runId: string,
+): Promise<MultiAgentRun> {
+  return invoke<MultiAgentRun>("agent_get_multi_agent_run", { path, runId });
+}
+
+/** List the newest multi-agent runs for a project. */
+export async function agentListMultiAgentRuns(path: string): Promise<MultiAgentRun[]> {
+  return invoke<MultiAgentRun[]>("agent_list_multi_agent_runs", { path });
+}
+
+/** Interrupt or retry exactly one assigned profile's sub-run. */
+export async function agentControlMultiAgentRun(
+  path: string,
+  runId: string,
+  agentId: string,
+  action: MultiAgentControlAction,
+): Promise<MultiAgentRun> {
+  return invoke<MultiAgentRun>("agent_control_multi_agent_run", {
+    path,
+    runId,
+    agentId,
+    action,
+  });
 }
 
 /**

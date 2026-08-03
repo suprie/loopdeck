@@ -6,9 +6,10 @@ use crate::agents::{
 use crate::config::AgentConfig;
 use crate::conversation::Attachment;
 use crate::error::AppError;
+use crate::harness::HarnessAdapter;
 use crate::permission::{Decision, PermissionPolicy};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -1990,6 +1991,56 @@ impl ClaudeSession {
         let _ = slots.plan.lock().ok().and_then(|mut g| g.take());
 
         result
+    }
+}
+
+impl HarnessAdapter for ClaudeSession {
+    fn spawn(
+        cwd: &Path,
+        config: &AgentConfig,
+        resume_session_id: Option<&str>,
+        policy: PermissionPolicy,
+    ) -> Result<Self, AppError> {
+        Self::spawn(&cwd.to_path_buf(), config, resume_session_id, policy)
+    }
+
+    fn is_usable(&mut self) -> bool {
+        // Claude owns no explicit wedge marker: an existing cached process is
+        // reused just as it was before the adapter extraction.
+        true
+    }
+
+    async fn send_message(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        slots: &ParkSlots<'_>,
+        interrupt_slot: &InterruptSlot,
+    ) -> Result<AgentResponse, AppError> {
+        Self::send_message(self, text, attachments, slots, interrupt_slot).await
+    }
+
+    async fn send_message_streaming(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        channel: &Channel<ClaudeEvent>,
+        slots: &ParkSlots<'_>,
+        interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<AgentResponse, AppError> {
+        Self::send_message_streaming(
+            self,
+            text,
+            attachments,
+            channel,
+            slots,
+            interrupt_slot,
+            plan_mode,
+            token_budget,
+        )
+        .await
     }
 }
 

@@ -1426,6 +1426,8 @@ mod unattended_tests {
             pending_plans: std::sync::Mutex::new(std::collections::HashMap::new()),
             interrupt_slots: std::sync::Mutex::new(std::collections::HashMap::new()),
             run_handles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            multi_agent_active_runs: std::sync::Mutex::new(std::collections::HashSet::new()),
+            multi_agent_manifest_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

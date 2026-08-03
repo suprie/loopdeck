@@ -19,6 +19,7 @@ import {
   revealLogDir,
 } from "../../lib/tauri";
 import type { AgentConfig, LogInfo } from "../../types";
+import { AgentRoster } from "./AgentRoster";
 
 const CLAUDE_EFFORT_OPTIONS = [
   { value: "low", label: "Low — fastest, least thorough" },
@@ -352,6 +353,8 @@ export function Settings() {
               </span>
             )}
           </div>
+
+          <AgentRoster />
 
           {/* Diagnostics — where the logs live + bounded-retention summary.
               Surfaces the user-accessible log folder and the retention cap so

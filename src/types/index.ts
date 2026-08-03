@@ -191,6 +191,63 @@ export interface AgentConfig {
   has_auth_token?: boolean;
 }
 
+/**
+ * A reusable, globally-stored agent profile. `id` is stable and is the only
+ * value persisted in a loop assignment; names can be safely edited later.
+ * Mirrors Rust `NamedAgentConfig`.
+ */
+export interface NamedAgentConfig extends AgentConfig {
+  id: string;
+  name: string;
+  /** The profile selected by default for a new loop assignment. */
+  is_default: boolean;
+}
+
+/** Payload accepted when creating or editing a named profile. The auth token
+ * remains write-only: `has_auth_token` is the only secret-related read value. */
+export interface NamedAgentConfigInput extends AgentConfig {
+  name: string;
+}
+
+/** A multi-agent logical run owns one loop and several isolated sub-runs. */
+export type MultiAgentRunStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+/** One assigned profile's independently isolated execution. */
+export interface MultiAgentSubRun {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  harness: "claude" | "codex";
+  model: string | null;
+  status: MultiAgentRunStatus;
+  branch: string | null;
+  worktree: string | null;
+  result: string | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+/** The durable status snapshot for a multi-agent loop run. */
+export interface MultiAgentRun {
+  id: string;
+  path: string;
+  loop_id: string | null;
+  status: MultiAgentRunStatus;
+  started_at: string;
+  completed_at: string | null;
+  sub_runs: MultiAgentSubRun[];
+}
+
+/** Actions that can be applied to one independently managed sub-run. */
+export type MultiAgentControlAction = "interrupt" | "retry";
+
 /** One retained log file, surfaced in Settings → Diagnostics. Mirrors Rust `LogFileInfo`. */
 export interface LogFileInfo {
   /** File name, e.g. `loopdeck.log.2026-07-23`. */
@@ -611,6 +668,18 @@ export interface RunQueueEvent {
   project_path: string;
   execution_id: string;
   event: ClaudeEvent;
+}
+
+/**
+ * A streaming update attributed to one profile inside a multi-agent run.
+ * `sub_run` is a complete replacement snapshot when present, so callers can
+ * reconcile state even if an individual streaming event was missed.
+ */
+export interface MultiAgentEvent {
+  run_id: string;
+  agent_id: string;
+  event: ClaudeEvent | null;
+  sub_run?: MultiAgentSubRun;
 }
 
 /**

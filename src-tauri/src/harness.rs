@@ -16,6 +16,48 @@ use crate::permission::PermissionPolicy;
 use std::path::Path;
 use tauri::ipc::Channel;
 
+/// Provider adapter contract used by the heterogeneous session owner below.
+///
+/// The two command-line harnesses intentionally retain concrete session types:
+/// their wire protocols, child-process lifetimes, and internal control flows
+/// differ substantially. Their command-facing surface, however, is identical.
+/// Keeping that surface in a crate-private trait makes additions deliberate and
+/// prevents the enum from becoming a second, drifting implementation of every
+/// turn operation. The enum remains the owner so we do not need dynamic async
+/// dispatch (or another dependency) for cached mixed-provider sessions.
+#[allow(async_fn_in_trait)]
+pub(crate) trait HarnessAdapter: Sized {
+    fn spawn(
+        cwd: &Path,
+        config: &AgentConfig,
+        resume_session_id: Option<&str>,
+        policy: PermissionPolicy,
+    ) -> Result<Self, AppError>;
+
+    /// Whether this cached provider process can safely accept another turn.
+    fn is_usable(&mut self) -> bool;
+
+    async fn send_message(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        slots: &ParkSlots<'_>,
+        interrupt_slot: &InterruptSlot,
+    ) -> Result<AgentResponse, AppError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_streaming(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        channel: &Channel<ClaudeEvent>,
+        slots: &ParkSlots<'_>,
+        interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
+        token_budget: Option<&TokenBudget>,
+    ) -> Result<AgentResponse, AppError>;
+}
+
 pub enum HarnessSession {
     Claude(ClaudeSession),
     Codex(CodexSession),
@@ -35,8 +77,8 @@ impl HarnessSession {
     /// after ignoring Stop; `with_session` then replaces it on the next send.
     pub fn is_usable(&mut self) -> bool {
         match self {
-            Self::Claude(_) => true,
-            Self::Codex(session) => session.is_usable(),
+            Self::Claude(session) => HarnessAdapter::is_usable(session),
+            Self::Codex(session) => HarnessAdapter::is_usable(session),
         }
     }
 
@@ -51,13 +93,13 @@ impl HarnessSession {
                 // Codex ids are explicitly tagged in LoopDeck transcripts.
                 // Never pass one to Claude's `--resume`.
                 let resume = resume_session_id.filter(|id| !id.starts_with("codex:"));
-                ClaudeSession::spawn(&cwd.to_path_buf(), config, resume, policy).map(Self::Claude)
+                HarnessAdapter::spawn(cwd, config, resume, policy).map(Self::Claude)
             }
             AgentHarness::Codex => {
                 // Legacy untagged ids belong to Claude. Codex ids are tagged so
                 // switching harnesses cannot cross-resume incompatible state.
                 let resume = resume_session_id.and_then(|id| id.strip_prefix("codex:"));
-                CodexSession::spawn(cwd, config, resume, policy).map(Self::Codex)
+                HarnessAdapter::spawn(cwd, config, resume, policy).map(Self::Codex)
             }
         }
     }
@@ -71,13 +113,11 @@ impl HarnessSession {
     ) -> Result<AgentResponse, AppError> {
         match self {
             Self::Claude(session) => {
-                session
-                    .send_message(text, attachments, slots, interrupt_slot)
+                HarnessAdapter::send_message(session, text, attachments, slots, interrupt_slot)
                     .await
             }
             Self::Codex(session) => {
-                session
-                    .send_message(text, attachments, slots, interrupt_slot)
+                HarnessAdapter::send_message(session, text, attachments, slots, interrupt_slot)
                     .await
             }
         }
@@ -108,35 +148,49 @@ impl HarnessSession {
     ) -> Result<AgentResponse, AppError> {
         match self {
             Self::Claude(session) => {
-                session
-                    .send_message_streaming(
-                        text,
-                        attachments,
-                        channel,
-                        slots,
-                        interrupt_slot,
-                        plan_mode,
-                        token_budget,
-                    )
-                    .await
+                HarnessAdapter::send_message_streaming(
+                    session,
+                    text,
+                    attachments,
+                    channel,
+                    slots,
+                    interrupt_slot,
+                    plan_mode,
+                    token_budget,
+                )
+                .await
             }
             Self::Codex(session) => {
-                if plan_mode {
-                    return Err(AppError::Agent(
-                        "plan mode is a Claude-only feature and is not supported by the Codex harness".into(),
-                    ));
-                }
-                session
-                    .send_message_streaming(
-                        text,
-                        attachments,
-                        channel,
-                        slots,
-                        interrupt_slot,
-                        token_budget,
-                    )
-                    .await
+                HarnessAdapter::send_message_streaming(
+                    session,
+                    text,
+                    attachments,
+                    channel,
+                    slots,
+                    interrupt_slot,
+                    plan_mode,
+                    token_budget,
+                )
+                .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HarnessAdapter;
+    use crate::claude_session::ClaudeSession;
+    use crate::codex_session::CodexSession;
+
+    // This intentionally compiles the complete shared surface for both
+    // providers. If a future provider changes one method's contract, the
+    // adapter cannot silently regress into enum-specific dispatch.
+    fn assert_adapter_contract<T: HarnessAdapter>() {}
+
+    #[test]
+    fn concrete_sessions_implement_the_shared_adapter_contract() {
+        assert_adapter_contract::<ClaudeSession>();
+        assert_adapter_contract::<CodexSession>();
     }
 }

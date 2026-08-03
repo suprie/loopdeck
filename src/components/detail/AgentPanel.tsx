@@ -19,6 +19,7 @@ import { useStreamingState } from "../../store/streamingState";
 import { Chat, buildAllowRule } from "./Chat";
 import { TaskPanel } from "./TaskPanel";
 import { PermissionModeBadge } from "../shared/PermissionModeBadge";
+import { MultiAgentRuns } from "./MultiAgentRuns";
 
 interface AgentPanelProps {
   projectPath: string;
@@ -1175,6 +1176,8 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           )}
         </div>
       </div>
+
+      <MultiAgentRuns projectPath={projectPath} />
 
       {/* ── Chat (transcript + streaming bubble + composer) ── */}
       <Chat
