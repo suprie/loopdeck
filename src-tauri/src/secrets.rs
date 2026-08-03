@@ -28,6 +28,7 @@
 use crate::error::AppError;
 use crate::persist;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Filename holding the auth token, relative to the config directory.
 const TOKEN_FILENAME: &str = "agent_token";
@@ -40,6 +41,22 @@ fn token_path() -> Result<PathBuf, AppError> {
     Ok(crate::config::GlobalConfig::config_dir()?.join(TOKEN_FILENAME))
 }
 
+/// Resolve the token path belonging to one immutable agent-config UUID.
+fn agent_token_path(id: &str) -> Result<PathBuf, AppError> {
+    agent_token_path_in(&crate::config::GlobalConfig::config_dir()?, id)
+}
+
+fn agent_token_path_in(config_dir: &Path, id: &str) -> Result<PathBuf, AppError> {
+    validate_agent_id(id)?;
+    Ok(config_dir.join(format!("agent_token-{id}")))
+}
+
+fn validate_agent_id(id: &str) -> Result<(), AppError> {
+    Uuid::parse_str(id)
+        .map(|_| ())
+        .map_err(|_| AppError::Config(format!("agent config id '{id}' is not a valid UUID")))
+}
+
 /// Load the auth token from the local secrets file.
 ///
 /// Returns `Ok(None)` when no file is present (first run, or the user cleared
@@ -48,18 +65,48 @@ pub fn load_auth_token() -> Result<Option<String>, AppError> {
     load_from(&token_path()?)
 }
 
-/// Store the auth token in the local secrets file, overwriting any existing
-/// value.
-pub fn store_auth_token(token: &str) -> Result<(), AppError> {
-    store_to(&token_path()?, token)
-}
-
 /// Delete the auth-token file.
 ///
 /// Idempotent: a missing file is treated as success (there's nothing to
 /// delete). Other backend errors are returned.
 pub fn delete_auth_token() -> Result<(), AppError> {
     delete_at(&token_path()?)
+}
+
+/// Load the token scoped to a named roster entry.
+pub fn load_agent_auth_token(id: &str) -> Result<Option<String>, AppError> {
+    load_from(&agent_token_path(id)?)
+}
+
+/// Store the token scoped to a named roster entry.
+pub fn store_agent_auth_token(id: &str, token: &str) -> Result<(), AppError> {
+    store_to(&agent_token_path(id)?, token)
+}
+
+/// Delete the token scoped to a named roster entry.
+pub fn delete_agent_auth_token(id: &str) -> Result<(), AppError> {
+    delete_at(&agent_token_path(id)?)
+}
+
+/// One-time, idempotent migration from the historical singleton token file to
+/// a default roster entry. A token already stored for that UUID wins. The old
+/// file is removed only after the destination is durably written.
+pub fn migrate_legacy_auth_token_to_agent(id: &str) -> Result<bool, AppError> {
+    let legacy_path = token_path()?;
+    let target_path = agent_token_path(id)?;
+    migrate_legacy_at(id, &legacy_path, &target_path)
+}
+
+fn migrate_legacy_at(id: &str, legacy_path: &Path, target_path: &Path) -> Result<bool, AppError> {
+    validate_agent_id(id)?;
+    let Some(token) = load_from(legacy_path)? else {
+        return Ok(false);
+    };
+    if load_from(target_path)?.is_none() {
+        store_to(target_path, &token)?;
+    }
+    delete_at(legacy_path)?;
+    Ok(true)
 }
 
 // ── path-parameterized helpers (testable without touching the real config dir) ──
@@ -181,6 +228,65 @@ mod tests {
         store_to(&path, "").unwrap();
         assert_eq!(load_from(&path).unwrap(), None);
         let _ = delete_at(&path);
+    }
+
+    #[test]
+    fn per_agent_paths_are_uuid_scoped_and_isolated() {
+        let dir = temp_token_path();
+        let first = Uuid::new_v4().to_string();
+        let second = Uuid::new_v4().to_string();
+        let first_path = agent_token_path_in(&dir, &first).unwrap();
+        let second_path = agent_token_path_in(&dir, &second).unwrap();
+        assert_ne!(first_path, second_path);
+
+        store_to(&first_path, "first-token").unwrap();
+        store_to(&second_path, "second-token").unwrap();
+        assert_eq!(
+            load_from(&first_path).unwrap().as_deref(),
+            Some("first-token")
+        );
+        assert_eq!(
+            load_from(&second_path).unwrap().as_deref(),
+            Some("second-token")
+        );
+        delete_at(&first_path).unwrap();
+        assert_eq!(load_from(&first_path).unwrap(), None);
+        assert_eq!(
+            load_from(&second_path).unwrap().as_deref(),
+            Some("second-token")
+        );
+        let _ = delete_at(&second_path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_secret_migration_is_idempotent_and_never_overwrites_destination() {
+        let dir = temp_token_path();
+        let id = Uuid::new_v4().to_string();
+        let legacy = dir.join("agent_token");
+        let destination = agent_token_path_in(&dir, &id).unwrap();
+        store_to(&legacy, "legacy-token").unwrap();
+        assert!(migrate_legacy_at(&id, &legacy, &destination).unwrap());
+        assert_eq!(load_from(&legacy).unwrap(), None);
+        assert_eq!(
+            load_from(&destination).unwrap().as_deref(),
+            Some("legacy-token")
+        );
+        assert!(!migrate_legacy_at(&id, &legacy, &destination).unwrap());
+
+        store_to(&legacy, "should-not-win").unwrap();
+        assert!(migrate_legacy_at(&id, &legacy, &destination).unwrap());
+        assert_eq!(
+            load_from(&destination).unwrap().as_deref(),
+            Some("legacy-token")
+        );
+        let _ = delete_at(&destination);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_agent_id_cannot_construct_a_secret_path() {
+        assert!(agent_token_path_in(Path::new("/tmp"), "../../not-a-uuid").is_err());
     }
 
     /// Confirm the owner-only permission floor is applied on Unix.

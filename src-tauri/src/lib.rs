@@ -15,6 +15,7 @@ mod limits;
 mod logging;
 mod memory;
 mod migration;
+mod multi_agent;
 mod paths;
 mod permission;
 mod persist;
@@ -40,7 +41,10 @@ pub use secret_scan::run_secret_scan_cli;
 
 use commands::AppState;
 use config::GlobalConfig;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+};
 
 pub fn run() {
     // Initialize tracing FIRST, before any plugin/spawn — so early logs from
@@ -127,6 +131,12 @@ pub fn run() {
                 project.path.display()
             ),
         }
+        if let Err(e) = multi_agent::reconcile_stale_runs(&project.path) {
+            tracing::warn!(
+                "failed to reconcile interrupted multi-agent runs for {}: {e}",
+                project.path.display()
+            );
+        }
     }
 
     if let Err(e) = tauri::Builder::default()
@@ -140,6 +150,8 @@ pub fn run() {
             pending_plans: Mutex::new(HashMap::new()),
             interrupt_slots: Mutex::new(HashMap::new()),
             run_handles: Mutex::new(HashMap::new()),
+            multi_agent_active_runs: Mutex::new(HashSet::new()),
+            multi_agent_manifest_locks: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             // Composer + scan (composer.rs)
@@ -193,11 +205,21 @@ pub fn run() {
             commands::config_cmds::get_agent_config,
             commands::config_cmds::set_agent_config,
             commands::config_cmds::clear_auth_token,
+            commands::config_cmds::list_agent_configs,
+            commands::config_cmds::create_agent_config,
+            commands::config_cmds::update_agent_config,
+            commands::config_cmds::delete_agent_config,
+            commands::config_cmds::get_default_agent_config,
+            commands::config_cmds::set_default_agent_config,
             commands::config_cmds::get_log_info,
             commands::config_cmds::reveal_log_dir,
             // Agent / Claude session (agent.rs)
             commands::agent::agent_start_loop,
             commands::agent::agent_start_loop_streaming,
+            multi_agent::agent_start_multi_loop_streaming,
+            multi_agent::agent_get_multi_agent_run,
+            multi_agent::agent_list_multi_agent_runs,
+            multi_agent::agent_control_multi_agent_run,
             commands::agent::agent_send_message,
             commands::agent::agent_send_message_streaming,
             commands::agent::agent_read_image_attachment,

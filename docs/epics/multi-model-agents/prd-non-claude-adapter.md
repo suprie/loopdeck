@@ -2,7 +2,7 @@
 prd: prd-non-claude-adapter
 epic: multi-model-agents
 milestone: "0.4.0"
-status: proposed
+status: completed
 description: >
   Extract a pluggable adapter interface from the existing Claude/Codex
   session split, proven with the already-present Codex CLI adapter, so a
@@ -44,25 +44,30 @@ know which harness it's talking to.
 
 ## Design
 
-<!-- Stub — fill in during implementation. Key open question: async trait
-object (dyn-compatible) vs. an enum dispatch that stays closer to the
-current AgentHarness match — pick based on how prd-multi-agent-execution's
-concurrent spawn needs to hold a heterogeneous list of sessions. -->
+`HarnessAdapter` is a crate-private, static-dispatch contract implemented by
+`ClaudeSession` and `CodexSession`. It captures provider spawn and the shared
+session behavior needed by streaming turns and control handling. The existing
+`HarnessSession` enum remains the heterogeneous value stored by the runtime and
+delegates to the concrete implementations. This keeps provider-specific
+construction explicit without introducing boxed async trait objects or changing
+the public event/control protocol.
 
 ## Phases
 
 ### Phase 1 — Adapter interface
 
-- [ ] Define the adapter trait (spawn, stream, control-request handling) in `src-tauri/src/harness.rs`, derived from the current `HarnessSession::spawn` signature shared by `claude_session.rs` and `codex_session.rs`
+- [x] Define the adapter trait (spawn, stream, control-request handling) in `src-tauri/src/harness.rs`, derived from the current `HarnessSession::spawn` signature shared by `claude_session.rs` and `codex_session.rs`
 
 ### Phase 2 — Wire existing Claude + Codex sessions through it
 
-- [ ] Refactor `claude_session.rs` and `codex_session.rs` to implement the adapter interface, and update `harness.rs` dispatch to go through it instead of matching `AgentHarness` directly
+- [x] Refactor `claude_session.rs` and `codex_session.rs` to implement the adapter interface, and update `harness.rs` dispatch to go through it instead of matching `AgentHarness` directly
 
 ### Phase 3 — Tests/verification
 
-- [ ] Adapter-contract tests confirming both Claude and Codex sessions satisfy the same interface; confirm no behavior change via existing `claude_session.rs`/`codex_session.rs` test suites still passing
+- [x] Adapter-contract tests confirming both Claude and Codex sessions satisfy the same interface; confirm no behavior change via existing `claude_session.rs`/`codex_session.rs` test suites still passing
 
 ## Open Questions
 
-- Trait-object vs. enum dispatch — decide based on prd-multi-agent-execution's concurrent-spawn shape once its spike (Phase 1) lands.
+- **Resolved:** retain enum dispatch over concrete implementations. The runtime
+  needs a heterogeneous stored session, but it does not need dynamic adapter
+  registration or trait-object allocation.

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::debug;
+use uuid::Uuid;
 
 // ── Public response types ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -62,6 +63,74 @@ impl std::fmt::Debug for AgentConfig {
             .field("has_auth_token", &self.has_auth_token)
             .finish()
     }
+}
+
+/// A reusable agent definition in the global roster.
+///
+/// The identifier is a UUID generated once at creation time and is the stable
+/// key used by loop assignments and the per-agent secrets store.  `name` is a
+/// user-facing label and may change, but is unique case-insensitively within a
+/// registry. `config` is flattened so the IPC/YAML shape remains pleasantly
+/// small (`id`, `name`, `harness`, `model`, …) and never contains a token.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NamedAgentConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub config: AgentConfig,
+}
+
+// The singleton-to-roster migration must survive a crash between writing the
+// UUID-scoped secret and saving config.yaml. A random id would orphan the
+// secret on restart, so every legacy singleton deterministically maps to this
+// valid, reserved UUID. User-created entries continue to use UUID v4.
+const LEGACY_DEFAULT_AGENT_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+impl std::fmt::Debug for NamedAgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedAgentConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl NamedAgentConfig {
+    pub fn new(name: String, config: AgentConfig) -> Result<Self, AppError> {
+        Ok(Self {
+            id: Uuid::new_v4().to_string(),
+            name: normalize_agent_name(&name)?,
+            config: scrub_agent_config(config),
+        })
+    }
+
+    fn validate(&self) -> Result<(), AppError> {
+        Uuid::parse_str(&self.id).map_err(|_| {
+            AppError::Config(format!("agent config id '{}' is not a valid UUID", self.id))
+        })?;
+        normalize_agent_name(&self.name)?;
+        Ok(())
+    }
+}
+
+fn normalize_agent_name(name: &str) -> Result<String, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::Config("agent config name cannot be empty".into()));
+    }
+    if name.chars().count() > 120 {
+        return Err(AppError::Config(
+            "agent config name must be 120 characters or fewer".into(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn scrub_agent_config(mut config: AgentConfig) -> AgentConfig {
+    config.auth_token = None;
+    config.has_auth_token = false;
+    config
 }
 
 /// High-level project status. Serialized to lowercase strings for the
@@ -229,8 +298,16 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalConfig {
-    #[serde(default)]
+    /// Legacy singleton retained only long enough to migrate existing
+    /// registries. New saves omit it once migration has run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
+    /// Reusable named agents keyed by their immutable UUID `id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<NamedAgentConfig>,
+    /// UUID of the roster entry used by legacy single-agent paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_id: Option<String>,
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
     #[serde(default)]
@@ -238,6 +315,122 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
+    /// Return the selected default roster entry, falling back to the first
+    /// entry when reading an older roster that predates `default_agent_id`.
+    pub fn default_named_agent_config(&self) -> Option<&NamedAgentConfig> {
+        self.default_agent_id
+            .as_deref()
+            .and_then(|id| self.find_agent_config(id))
+            .or_else(|| self.agents.first())
+    }
+
+    pub fn find_agent_config(&self, id: &str) -> Option<&NamedAgentConfig> {
+        self.agents.iter().find(|agent| agent.id == id)
+    }
+
+    pub fn find_agent_config_mut(&mut self, id: &str) -> Option<&mut NamedAgentConfig> {
+        self.agents.iter_mut().find(|agent| agent.id == id)
+    }
+
+    pub fn create_agent_config(
+        &mut self,
+        name: String,
+        config: AgentConfig,
+    ) -> Result<NamedAgentConfig, AppError> {
+        self.ensure_unique_agent_name(&name, None)?;
+        let agent = NamedAgentConfig::new(name, config)?;
+        if self.default_agent_id.is_none() {
+            self.default_agent_id = Some(agent.id.clone());
+        }
+        self.agents.push(agent.clone());
+        Ok(agent)
+    }
+
+    pub fn update_agent_config(
+        &mut self,
+        id: &str,
+        name: String,
+        config: AgentConfig,
+    ) -> Result<NamedAgentConfig, AppError> {
+        Uuid::parse_str(id)
+            .map_err(|_| AppError::Config(format!("agent config id '{id}' is not a valid UUID")))?;
+        self.ensure_unique_agent_name(&name, Some(id))?;
+        let agent = self
+            .find_agent_config_mut(id)
+            .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?;
+        agent.name = normalize_agent_name(&name)?;
+        agent.config = scrub_agent_config(config);
+        Ok(agent.clone())
+    }
+
+    /// Delete an entry and return the removed value. If it was the default,
+    /// the oldest remaining entry becomes default (or no default remains).
+    pub fn delete_agent_config(&mut self, id: &str) -> Result<NamedAgentConfig, AppError> {
+        Uuid::parse_str(id)
+            .map_err(|_| AppError::Config(format!("agent config id '{id}' is not a valid UUID")))?;
+        let index = self
+            .agents
+            .iter()
+            .position(|agent| agent.id == id)
+            .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?;
+        let deleted = self.agents.remove(index);
+        if self.default_agent_id.as_deref() == Some(id) {
+            self.default_agent_id = self.agents.first().map(|agent| agent.id.clone());
+        }
+        Ok(deleted)
+    }
+
+    pub fn set_default_agent_config(&mut self, id: &str) -> Result<NamedAgentConfig, AppError> {
+        let agent = self
+            .find_agent_config(id)
+            .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?
+            .clone();
+        agent.validate()?;
+        self.default_agent_id = Some(id.to_string());
+        Ok(agent)
+    }
+
+    fn ensure_unique_agent_name(
+        &self,
+        name: &str,
+        except_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        let normalized = normalize_agent_name(name)?;
+        if self.agents.iter().any(|agent| {
+            Some(agent.id.as_str()) != except_id
+                && agent.name.to_lowercase() == normalized.to_lowercase()
+        }) {
+            return Err(AppError::Config(format!(
+                "an agent config named '{normalized}' already exists"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Convert the old singleton configuration into one named default entry.
+    /// This only changes memory; callers persist the returned `true` result.
+    /// It is idempotent: once `agent` is absent, subsequent calls are no-ops.
+    pub fn migrate_legacy_agent_to_roster(&mut self) -> Result<bool, AppError> {
+        let Some(legacy) = self.agent.take() else {
+            return Ok(false);
+        };
+        if !self.agents.is_empty() {
+            // A manually-created roster wins. Do not discard the legacy
+            // singleton; retain it so a later manual recovery remains possible.
+            self.agent = Some(legacy);
+            return Ok(false);
+        }
+        // Keep a legacy plaintext token in memory just long enough for the
+        // caller's immediately-following secrets migration to move it. The
+        // public roster CRUD constructors always scrub tokens.
+        let legacy_token = legacy.auth_token.clone().filter(|token| !token.is_empty());
+        let mut entry = NamedAgentConfig::new("Default".into(), legacy)?;
+        entry.id = LEGACY_DEFAULT_AGENT_ID.to_string();
+        entry.config.auth_token = legacy_token;
+        self.default_agent_id = Some(entry.id.clone());
+        self.agents.push(entry);
+        Ok(true)
+    }
     /// Load global config from the platform config dir —
     /// `~/Library/Application Support/com.loopdeck.LoopDeck/config.yaml` on
     /// macOS (`~/.config/loopdeck/config.yaml` is the headless/Linux fallback).
@@ -346,45 +539,46 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Migrate any plaintext `agent.auth_token` still present in the loaded
-    /// config into the local secrets file, scrubbing it from the in-memory
-    /// (and, on the next `save()`, on-disk) config.
+    /// Migrate the legacy singleton and any plaintext credentials into the
+    /// UUID-keyed roster and per-agent secrets files.
     ///
     /// Returns:
-    /// - `Ok(true)` — a token was moved; the caller should `save()` so the
-    ///   plaintext copy is gone from disk.
-    /// - `Ok(false)` — nothing to migrate (no agent block, or no/empty token).
+    /// - `Ok(true)` — the caller should save; a legacy field or plaintext
+    ///   token was scrubbed from the registry.
+    /// - `Ok(false)` — no registry change was needed.
     /// - `Err` — a token was present but the secrets file write failed. The
-    ///   token is put back in place so it is not silently lost; the caller
-    ///   should keep it in the 0600 file as the interim floor rather than drop
-    ///   it.
+    ///   plaintext is restored in memory rather than silently lost.
     pub fn migrate_auth_token_to_secrets_file(&mut self) -> Result<bool, AppError> {
-        let Some(agent) = self.agent.as_mut() else {
-            return Ok(false);
-        };
-        // Only a non-empty token is a real credential worth moving. `None` and
-        // an empty string are left untouched — checked *before* mutating so an
-        // empty value isn't silently cleared.
-        let Some(token) = agent.auth_token.as_deref() else {
-            return Ok(false);
-        };
-        if token.is_empty() {
-            return Ok(false);
-        }
-        let token = token.to_string();
-        // Scrub from config first, then store. If the secrets file rejects it
-        // we restore the token so it is never silently lost.
-        agent.auth_token = None;
-        match crate::secrets::store_auth_token(&token) {
-            Ok(()) => {
-                debug!("migrated plaintext auth token from config.yaml to local secrets file");
-                Ok(true)
+        let mut changed = self.migrate_legacy_agent_to_roster()?;
+        let default_id = self
+            .default_named_agent_config()
+            .map(|agent| agent.id.clone());
+
+        for agent in &mut self.agents {
+            let Some(token) = agent.config.auth_token.take() else {
+                continue;
+            };
+            if token.is_empty() {
+                // Empty legacy values are not credentials; retain prior
+                // behaviour by keeping them in memory until the next edit.
+                agent.config.auth_token = Some(token);
+                continue;
             }
-            Err(e) => {
-                agent.auth_token = Some(token);
-                Err(e)
+            if let Err(e) = crate::secrets::store_agent_auth_token(&agent.id, &token) {
+                agent.config.auth_token = Some(token);
+                return Err(e);
             }
+            changed = true;
+            debug!(agent_id = %agent.id, "migrated plaintext auth token to per-agent secrets file");
         }
+
+        // The old singleton file belongs to the selected default entry. Copy
+        // rather than overwrite so a token explicitly stored for that UUID
+        // always wins. This is safe to repeat after a crash.
+        if let Some(id) = default_id {
+            changed |= crate::secrets::migrate_legacy_auth_token_to_agent(&id)?;
+        }
+        Ok(changed)
     }
 
     /// Find a project entry by path.
@@ -521,6 +715,8 @@ mod tests {
     fn test_config_roundtrip() {
         let config = GlobalConfig {
             agent: None,
+            agents: vec![],
+            default_agent_id: None,
             projects: vec![ProjectEntry {
                 path: PathBuf::from("/tmp/test-project"),
                 name: "Test Project".into(),
@@ -602,6 +798,8 @@ mod tests {
 
         let config = GlobalConfig {
             agent: None,
+            agents: vec![],
+            default_agent_id: None,
             projects: vec![],
             settings: Settings::default(),
         };
@@ -775,6 +973,8 @@ projects:
 
         let config = GlobalConfig {
             agent: Some(agent.clone()),
+            agents: vec![],
+            default_agent_id: None,
             projects: vec![],
             settings: Settings::default(),
         };
@@ -826,6 +1026,8 @@ projects:
 
         let config = GlobalConfig {
             agent: Some(agent),
+            agents: vec![],
+            default_agent_id: None,
             projects: vec![],
             settings: Settings::default(),
         };
@@ -885,6 +1087,8 @@ projects:
         };
         let config = GlobalConfig {
             agent: Some(agent),
+            agents: vec![],
+            default_agent_id: None,
             projects: vec![],
             settings: Settings::default(),
         };
@@ -919,7 +1123,7 @@ agent:
         assert!(!cfg.agent.unwrap().has_auth_token);
     }
 
-    // ── migrate_auth_token_to_secrets_file (offline no-op paths) ──
+    // ── Legacy singleton → roster migration (offline paths) ──────────────
     //
     // The "token present" branch writes to the real secrets file
     // (`<config_dir>/agent_token`), so it is not exercised here. The
@@ -928,14 +1132,14 @@ agent:
     // early-return paths that never touch the secrets file.
 
     #[test]
-    fn migrate_noop_when_no_agent_block() {
+    fn migrate_legacy_agent_noop_when_no_agent_block() {
         let mut config = GlobalConfig::default();
-        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
+        assert!(!config.migrate_legacy_agent_to_roster().unwrap());
         assert!(config.agent.is_none());
     }
 
     #[test]
-    fn migrate_noop_when_token_none() {
+    fn migrates_legacy_agent_without_token_to_default_roster_entry() {
         let mut config = GlobalConfig {
             agent: Some(AgentConfig {
                 harness: AgentHarness::Claude,
@@ -947,12 +1151,17 @@ agent:
             }),
             ..Default::default()
         };
-        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
-        assert!(config.agent.as_ref().unwrap().auth_token.is_none());
+        assert!(config.migrate_legacy_agent_to_roster().unwrap());
+        assert!(config.agent.is_none());
+        let default = config.default_named_agent_config().unwrap();
+        assert_eq!(default.name, "Default");
+        assert_eq!(default.id, LEGACY_DEFAULT_AGENT_ID);
+        assert!(default.config.auth_token.is_none());
+        assert!(!config.migrate_legacy_agent_to_roster().unwrap());
     }
 
     #[test]
-    fn migrate_noop_when_token_empty() {
+    fn legacy_agent_empty_token_is_scrubbed_from_roster() {
         let mut config = GlobalConfig {
             agent: Some(AgentConfig {
                 harness: AgentHarness::Claude,
@@ -964,12 +1173,89 @@ agent:
             }),
             ..Default::default()
         };
-        // Empty string is treated as "no token" — must not touch the secrets file.
-        assert!(!config.migrate_auth_token_to_secrets_file().unwrap());
+        assert!(config.migrate_legacy_agent_to_roster().unwrap());
         assert_eq!(
-            config.agent.as_ref().unwrap().auth_token.as_deref(),
-            Some("")
+            config
+                .default_named_agent_config()
+                .unwrap()
+                .config
+                .auth_token
+                .as_deref(),
+            None
         );
+    }
+
+    #[test]
+    fn named_roster_persists_ids_default_and_flat_config() {
+        let mut config = GlobalConfig::default();
+        let first = config
+            .create_agent_config(
+                "Claude — primary".into(),
+                AgentConfig {
+                    model: Some("claude-opus".into()),
+                    auth_token: Some("must-not-persist".into()),
+                    has_auth_token: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let second = config
+            .create_agent_config("Codex".into(), AgentConfig::default())
+            .unwrap();
+        config.set_default_agent_config(&second.id).unwrap();
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("agents:"));
+        assert!(yaml.contains(&first.id));
+        assert!(yaml.contains("default_agent_id"));
+        assert!(!yaml.contains("must-not-persist"));
+        assert!(!yaml.contains("has_auth_token"));
+
+        let parsed: GlobalConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.agents.len(), 2);
+        assert_eq!(parsed.default_agent_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(
+            parsed.find_agent_config(&first.id).unwrap().name,
+            "Claude — primary"
+        );
+    }
+
+    #[test]
+    fn roster_rejects_case_insensitive_duplicate_names_and_keeps_ids_immutable() {
+        let mut config = GlobalConfig::default();
+        let created = config
+            .create_agent_config("Codex".into(), AgentConfig::default())
+            .unwrap();
+        assert!(config
+            .create_agent_config("  codex  ".into(), AgentConfig::default())
+            .is_err());
+
+        let updated = config
+            .update_agent_config(
+                &created.id,
+                "Codex — fast".into(),
+                AgentConfig {
+                    model: Some("gpt-fast".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.name, "Codex — fast");
+    }
+
+    #[test]
+    fn deleting_default_selects_remaining_agent() {
+        let mut config = GlobalConfig::default();
+        let first = config
+            .create_agent_config("First".into(), AgentConfig::default())
+            .unwrap();
+        let second = config
+            .create_agent_config("Second".into(), AgentConfig::default())
+            .unwrap();
+        config.set_default_agent_config(&second.id).unwrap();
+        config.delete_agent_config(&second.id).unwrap();
+        assert_eq!(config.default_agent_id.as_deref(), Some(first.id.as_str()));
     }
 
     // ── RunState / UncommittedStats tests ──

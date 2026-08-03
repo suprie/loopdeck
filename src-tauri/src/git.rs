@@ -280,6 +280,19 @@ fn has_uncommitted_changes(repo_path: &Path) -> bool {
     }
 }
 
+/// True when a linked worktree contains no staged, unstaged, or untracked
+/// changes. Cleanup callers use this as a deliberately conservative gate:
+/// inability to inspect the tree is treated as dirty and therefore retained.
+pub fn worktree_is_pristine(repo_path: &Path) -> bool {
+    let Some(mut cmd) = git_command(repo_path) else {
+        return false;
+    };
+    match cmd.args(["status", "--porcelain"]).output() {
+        Ok(output) if output.status.success() => output.stdout.is_empty(),
+        _ => false,
+    }
+}
+
 /// Aggregate uncommitted change stats for a dirty working tree.
 ///
 /// `files` counts every entry in `git status --porcelain` (staged + unstaged +

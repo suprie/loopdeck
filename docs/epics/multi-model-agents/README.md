@@ -2,7 +2,7 @@
 title: Multi-Model Agent Runner
 slug: multi-model-agents
 milestone: "0.4.0"
-status: proposed
+status: completed
 started: 2026-08-03
 owner: Suprie
 description: >
@@ -60,19 +60,43 @@ distinguishable per agent in the UI.
 
 | PRD | Description | Status |
 |---|---|---|
-| [prd-agent-config](prd-agent-config.md) | Named agent config roster: schema, CRUD, persistence | proposed |
-| [prd-multi-agent-execution](prd-multi-agent-execution.md) | Per-loop assignment, concurrent execution engine, per-agent output tagging | proposed |
-| [prd-non-claude-adapter](prd-non-claude-adapter.md) | Adapter trait proven with a Codex CLI adapter | proposed |
+| [prd-agent-config](prd-agent-config.md) | Named agent config roster: schema, CRUD, persistence | completed |
+| [prd-multi-agent-execution](prd-multi-agent-execution.md) | Per-loop assignment, concurrent execution engine, per-agent output tagging | completed |
+| [prd-non-claude-adapter](prd-non-claude-adapter.md) | Adapter trait proven with a Codex CLI adapter | completed |
 
 ## Architecture Decisions
 
-### ADR-1: <title> — fill in
+### ADR-1: Global UUID roster with UUID-scoped secrets
+
+Named profiles live in the existing global registry because they are reusable
+across projects. Assignments and secrets use immutable UUIDs, so renaming a
+profile cannot redirect credentials or break a saved run. The legacy singleton
+is migrated to a deterministic default entry and legacy IPC remains as a shim.
+
+### ADR-2: One durable logical run with isolated tagged sub-runs
+
+A multi-agent invocation owns one manifest under
+`.loopdeck/agent-runs/<run-id>/`, with one tagged sub-run per assigned profile.
+Each sub-run gets its own linked worktree and branch. Git worktree creation and
+manifest transitions are serialized per project, while provider turns run
+concurrently. Pristine successful worktrees are removed; modified or failed
+worktrees are retained as inspectable artifacts.
+
+### ADR-3: Shared adapter trait with enum dispatch
+
+Claude and Codex implement the same crate-private `HarnessAdapter` contract.
+`HarnessSession` remains the heterogeneous enum held by callers and delegates
+through that contract, avoiding async trait objects while preserving one
+stream/control surface for both providers.
 
 ## Success Criteria
 
 - Agent configs persist and are reusable across loops.
 - Loop view output/transcripts are distinguishable by which agent config
   produced them.
+- Two to eight assigned agents can run concurrently without sharing a checkout.
+- Run manifests survive restart; stale queued or active sub-runs become
+  retryable cancelled records rather than blocking future work.
 
 ## Risks
 
