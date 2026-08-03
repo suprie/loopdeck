@@ -122,9 +122,14 @@ pub const SKILL_MAX_BYTES: u64 = 256 * 1024;
 
 /// Max bytes of a transcript file read wholesale for display.
 ///
-/// Transcripts are append-only and turn-sized in practice; 16 MiB is hundreds
-/// of turns. Beyond that the file is truncated at a line boundary by the
-/// lenient loader (a partial final line is skipped, as on crash recovery).
+/// Transcripts are append-only and turn-sized in practice; 16 MiB was
+/// hundreds of turns for text-only conversations. Inline base64 image
+/// attachments (up to [`ATTACHMENTS_MAX_TOTAL_BYTES`] per turn) shrink that
+/// margin sharply, so this bound is now reachable within a single
+/// image-heavy conversation. Beyond it, [`read_bounded_tail_to_string`] keeps
+/// the *end* of the file (the most recent turns) rather than the start —
+/// what a still-growing `active.jsonl` needs is its latest turns, not its
+/// oldest.
 pub const TRANSCRIPT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 // ── NDJSON stream line budget (`claude` CLI) ───────────────────────────────
@@ -210,6 +215,47 @@ pub fn read_bounded_to_string<P: AsRef<Path>>(
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Like [`read_bounded_to_string`], but for an append-only log where the
+/// *newest* bytes matter — keeps the last `max_bytes` of `path` instead of
+/// the first.
+///
+/// A file within budget is returned whole. An oversized file is seeked to
+/// `len - max_bytes` and a `warn!` is logged (this is meant to be a rare,
+/// visible event — see `TRANSCRIPT_MAX_BYTES`'s doc comment), then decoded
+/// lossily and trimmed up to the first newline, so a seek that landed
+/// mid-line or mid-UTF-8-codepoint degrades to dropping that one partial
+/// leading line rather than corrupting the first kept line.
+pub fn read_bounded_tail_to_string<P: AsRef<Path>>(
+    path: P,
+    max_bytes: u64,
+) -> Result<String, std::io::Error> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = path.as_ref();
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let truncated = len > max_bytes;
+    if truncated {
+        tracing::warn!(
+            path = %path.display(),
+            len,
+            max_bytes,
+            "transcript exceeds bound, keeping only the most recent portion"
+        );
+        file.seek(SeekFrom::Start(len - max_bytes))?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        Ok(match text.find('\n') {
+            Some(i) => text[i + 1..].to_string(),
+            None => String::new(),
+        })
+    } else {
+        Ok(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +308,42 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("loopdeck-lim-missing-{}", uuid::Uuid::new_v4()));
         assert!(read_bounded_to_string(&path, 1024).is_err());
+    }
+
+    #[test]
+    fn read_bounded_tail_returns_full_small_file() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-lim-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.jsonl");
+        std::fs::write(&path, "line1\nline2\n").unwrap();
+
+        let s = read_bounded_tail_to_string(&path, 1024).unwrap();
+        assert_eq!(s, "line1\nline2\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_bounded_tail_keeps_newest_lines() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-lim-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jsonl");
+        // 5 lines of 11 bytes each ("aaaaaaaaaa\n"). A 25-byte cap seeks into
+        // the middle of line 3 ("cccccccccc\n"); that partial fragment is
+        // dropped, keeping only the two full lines that follow it.
+        let content = "aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd\neeeeeeeeee\n";
+        std::fs::write(&path, content).unwrap();
+
+        let s = read_bounded_tail_to_string(&path, 25).unwrap();
+        assert_eq!(s, "dddddddddd\neeeeeeeeee\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_bounded_tail_missing_file_errors() {
+        let path = std::env::temp_dir().join(format!(
+            "loopdeck-lim-tail-missing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(read_bounded_tail_to_string(&path, 1024).is_err());
     }
 }
