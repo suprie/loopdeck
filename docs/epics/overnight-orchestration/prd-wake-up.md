@@ -71,18 +71,18 @@ Directional; refine during implementation.
 
 ### Phase 1 — Notifications
 
-- [ ] Add `tauri-plugin-notification` with its capability entry
-- [ ] Notify on run completed, budget kill, and all-remaining-phases-parked; clicking focuses the report view
+- [ ] `wake-up/add-tauri-plugin` Add `tauri-plugin-notification` with its capability entry
+- [ ] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked; clicking focuses the report view
 
 ### Phase 2 — Morning report
 
-- [ ] Report view: per-phase verdict table (verify result, PR link, park/kill reason, token + wall-clock usage) via a `get_run_report` read-model command
-- [ ] Parked-question inbox: render pending payloads as the existing question cards; answering pins the answer and requeues the phase
-- [ ] Overnight audit slice: auto-allowed decisions and floor denials during the run window, from the existing audit path
+- [ ] `wake-up/report-per-phase-verdict` Report view: per-phase verdict table (verify result, PR link, park/kill reason, token + wall-clock usage) via a `get_run_report` read-model command
+- [ ] `wake-up/parked-question-index` Parked-question inbox: render pending payloads as the existing question cards; answering pins the answer and requeues the phase
+- [ ] `wake-up/overnight-audit-slice` Overnight audit slice: auto-allowed decisions and floor denials during the run window, from the existing audit path
 
 ### Phase 3 — Tests
 
-- [ ] `npx tsc --noEmit` green; report rendering against a fixture run plan covering completed, parked, and killed rows
+- [ ] `wake-up/report-rendering` `npx tsc --noEmit` green; report rendering against a fixture run plan covering completed, parked, and killed rows
 
 ## Open Questions
 

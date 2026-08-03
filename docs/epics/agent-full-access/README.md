@@ -2,7 +2,7 @@
 title: Agent Full Access
 slug: agent-full-access
 milestone: "0.3.0"
-status: proposed
+status: completed
 started: 2026-07-21
 owner: Suprie
 description: >
