@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { RouterProvider, router } from "./router";
 import { useStuckSessions } from "./hooks/useStuckSessions";
+import { useRunQueueEvents } from "./hooks/useRunQueueEvents";
 import { ThemeProvider } from "./lib/theme";
 import { Toaster } from "./components/ui/sonner";
 import "./styles.css";
@@ -29,6 +30,7 @@ import "./styles.css";
  */
 export default function App() {
   const { reconcileStuckSessions } = useStuckSessions();
+  useRunQueueEvents();
 
   useEffect(() => {
     // Initial reconcile on mount, then re-check whenever the window regains

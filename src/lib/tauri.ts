@@ -272,6 +272,14 @@ export async function getRunStatus(path: string): Promise<RunPlan | null> {
   return invoke<RunPlan | null>("get_run_status", { path });
 }
 
+/** Requeue a parked phase (plus dependents parked solely because of it). */
+export async function requeueRunPhase(
+  path: string,
+  executionId: string,
+): Promise<RunPlan> {
+  return invoke<RunPlan>("requeue_run_phase", { path, executionId });
+}
+
 /**
  * Run one queued phase's pre-flight interview turn (prd-run-queue Phase 3):
  * a bounded session whose `AskUserQuestion` calls render as the same
