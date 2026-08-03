@@ -402,7 +402,7 @@ pub fn load_conversation(repo_path: &Path) -> Vec<ConversationTurn> {
 /// in the UI (e.g. an archive deleted out from under us) just shows nothing.
 pub fn load_conversation_by_id(repo_path: &Path, id: &str) -> Vec<ConversationTurn> {
     let path = file_for_id(repo_path, id);
-    let content = match limits::read_bounded_to_string(&path, limits::TRANSCRIPT_MAX_BYTES) {
+    let content = match limits::read_bounded_tail_to_string(&path, limits::TRANSCRIPT_MAX_BYTES) {
         Ok(c) => c,
         Err(e) => {
             // Missing file is the common case (no turns yet, or stale id) —
@@ -535,7 +535,7 @@ pub fn promote_to_active(repo_path: &Path, id: &str) -> Result<(), std::io::Erro
     let source = file_for_id(repo_path, id);
     let turns = if source.exists() {
         parse_turns(
-            &limits::read_bounded_to_string(&source, limits::TRANSCRIPT_MAX_BYTES)
+            &limits::read_bounded_tail_to_string(&source, limits::TRANSCRIPT_MAX_BYTES)
                 .unwrap_or_default(),
         )
     } else {
@@ -678,10 +678,10 @@ pub(crate) fn append_terminal_if_orphan(
     turn: &ConversationTurn,
 ) -> Result<bool, std::io::Error> {
     // Read the raw transcript (NO orphan filtering — we need to SEE the orphan
-    // to classify it). Bounded by `TRANSCRIPT_MAX_BYTES` per FR4; the extreme
-    // edge of an orphan sitting beyond that bound in a >16 MB transcript is not
-    // reconciled here and instead degrades to the load-time orphan filter.
-    let content = match limits::read_bounded_to_string(
+    // to classify it). Only the tail matters (see below), so this is bounded
+    // by `TRANSCRIPT_MAX_BYTES` per FR4 via the tail-preserving reader — an
+    // orphan at the very end of a >16 MiB transcript is still seen.
+    let content = match limits::read_bounded_tail_to_string(
         active_file(repo_path),
         limits::TRANSCRIPT_MAX_BYTES,
     ) {
@@ -760,6 +760,11 @@ pub fn list_conversations(repo_path: &Path) -> Vec<ConversationSummary> {
                 (format!("archive-{stem}"), "archived")
             };
 
+            // Head-read (not tail): `summarize` wants the *first* user turn
+            // for the excerpt. For a file beyond `TRANSCRIPT_MAX_BYTES` this
+            // means `last_ts`/`turn_count` are approximate — acceptable for a
+            // history-list row (see limits.rs's "not a correctness limit"
+            // design stance); the full-fidelity read is `load_conversation`.
             let turns = parse_turns(
                 &limits::read_bounded_to_string(entry.path(), limits::TRANSCRIPT_MAX_BYTES)
                     .unwrap_or_default(),
