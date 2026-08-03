@@ -600,6 +600,14 @@ export type ClaudeEvent =
       session_id: string;
     };
 
+/** A detached run-queue phase's live event, broadcast by the backend because
+ * background executors cannot hold a frontend-owned Tauri IPC Channel. */
+export interface RunQueueEvent {
+  project_path: string;
+  execution_id: string;
+  event: ClaudeEvent;
+}
+
 /**
  * One selectable option in an `AskUserQuestion` question.
  * Mirrors Rust `AskUserQuestionOption`.
@@ -728,7 +736,7 @@ export type ContentBlock =
  * - `"pending"` — a mutating/executing tool (Bash/Edit/Write/…) needs manual
  *   approval; the agent turn is parked until the user resolves it. Emitted
  *   BEFORE the `control_response` is written.
- * - `"allow"` / `"deny"` — the resolved verdict. For manual-approval tools
+ * - `"allow"` / `"auto-allow"` / `"deny"` — the resolved verdict. For manual-approval tools
  *   this is emitted a second time (after the user's choice); for auto-decided
  *   tools (read-only under allow-by-default, or destructive-floor denies) it's
  *   the only emission and serves as post-hoc narration.
@@ -740,8 +748,8 @@ export interface PermissionDecision {
   tool_name: string;
   /** Raw tool input as a JSON string. */
   input: string;
-  /** `"pending"` (awaiting user), or `"allow"` / `"deny"` (resolved). */
-  decision: "allow" | "deny" | "pending";
+  /** `"pending"` (awaiting user), or an allow/deny verdict (resolved). */
+  decision: "allow" | "auto-allow" | "deny" | "pending";
   /** Why LoopDeck allowed/denied. Empty for pending and plain allows. */
   reason: string;
 }
