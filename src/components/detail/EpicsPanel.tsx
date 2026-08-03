@@ -581,23 +581,31 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                         </span>
                                       )}
 
-                                      {/* Overnight-run picker checkbox — only on not-done loops
-                                          with a stable ID (the join key create_run_plan needs) */}
-                                      {!done && loop.id && (
+                                      {/* Overnight-run picker checkbox — only actionable on loops
+                                          with a stable ID (the join key create_run_plan needs), but
+                                          always rendered (disabled + explained) so a missing ID reads
+                                          as "why is this disabled" instead of "where did it go" —
+                                          same disabled-with-tooltip pattern as promote below. */}
+                                      {!done && (
                                         <button
-                                          onClick={() => toggleSelectedForRun(loop.id!)}
+                                          onClick={() => loop.id && toggleSelectedForRun(loop.id)}
+                                          disabled={noId}
                                           title={
-                                            selectedForRun.includes(loop.id)
-                                              ? "Remove from overnight-run selection"
-                                              : "Add to overnight-run selection"
+                                            noId
+                                              ? "Add a stable ID `namespace/loop` before this loop can be queued for an overnight run"
+                                              : selectedForRun.includes(loop.id!)
+                                                ? "Remove from overnight-run selection"
+                                                : "Add to overnight-run selection"
                                           }
                                           className={`shrink-0 transition-colors ${
-                                            selectedForRun.includes(loop.id)
-                                              ? "text-[var(--primary)]"
-                                              : "text-muted-foreground/40 hover:text-foreground"
+                                            noId
+                                              ? "cursor-not-allowed text-muted-foreground/40"
+                                              : loop.id && selectedForRun.includes(loop.id)
+                                                ? "text-[var(--primary)]"
+                                                : "text-muted-foreground/40 hover:text-foreground"
                                           }`}
                                         >
-                                          {selectedForRun.includes(loop.id) ? (
+                                          {loop.id && selectedForRun.includes(loop.id) ? (
                                             <CheckSquare size={12} />
                                           ) : (
                                             <Square size={12} />

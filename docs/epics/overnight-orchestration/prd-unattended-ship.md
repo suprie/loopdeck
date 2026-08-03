@@ -110,9 +110,9 @@ Directional; refine during implementation.
 ### Phase 2 — Draft-PR autonomy
 
 - [x] Add an unattended mode to the open-pr flow: `gh pr create --draft`, no `--web`, no interactive confirmation, gated on queue-time consent in the `RunPlan`
-- [ ] PR body: PRD link, verify verdict table, `.loopdeck/` memory summary, run metadata (phase id, budgets used)
+- [ ] `unattended-ship/pr-body-metadata` PR body: PRD link, verify verdict table, `.loopdeck/` memory summary, run metadata (phase id, budgets used)
 - [x] Never open a PR on a WARN or BLOCK verify verdict — record the verdict and park instead
-- [ ] Pre-push secret scan of the staged diff for common credential patterns; a hit aborts the PR, parks the phase, and flags the report
+- [ ] `unattended-ship/pre-push-secret-scan` Pre-push secret scan of the staged diff for common credential patterns; a hit aborts the PR, parks the phase, and flags the report
 
 ### Phase 3 — Hard budgets
 
@@ -127,8 +127,8 @@ Directional; refine during implementation.
 
 ### Phase 5 — Tests
 
-- [ ] Budget-kill test with a deliberately stuck fixture phase (proves the epic's top risk mitigation)
-- [ ] Worktree lifecycle tests: create / run / prune / keep-on-failure; secret-scan abort test
+- [ ] `unattended-ship/budget-kill-test` Budget-kill test with a deliberately stuck fixture phase (proves the epic's top risk mitigation)
+- [ ] `unattended-ship/worktree-lifecycle-tests` Worktree lifecycle tests: create / run / prune / keep-on-failure; secret-scan abort test
 
 ## Open Questions
 
