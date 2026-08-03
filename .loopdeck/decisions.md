@@ -2,6 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-04 — `wake-up/add-tauri-plugin`: notification plugin scaffold, Rust-only
+
+- **Status**: accepted
+- **Context**: `prd-wake-up` Phase 1 first step. `Cargo.toml` carried only `tauri-plugin-dialog` and `tauri-plugin-shell` — no notification capability existed, so a finished (or killed) overnight run is silent. The pre-flight clarification pinned this step to Rust-only: the Cargo crate + registration + capability entry, not the `@tauri-apps/plugin-notification` npm package.
+- **Consequences**: `tauri-plugin-notification = "2"` added to `src-tauri/Cargo.toml` (pulls in `notify-rust` + `mac-notification-sys` on macOS); `.plugin(tauri_plugin_notification::init())` registered in `src-tauri/src/lib.rs`; `notification:default` appended to `capabilities/default.json` (validated by `tauri-build` at check time, reflected in the regenerated tracked `gen/schemas/*` ACL manifests). No emission call sites yet — those land in `wake-up/notify-after-completed` (run completed / budget kill / all-remaining-phases-parked).
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 entry) has the full breakdown.
+
 ## 2026-07-28 — `prd-run-queue` Phase 4: stalls only detectable via streaming + `TURN_DEADLINE`, not interrupted early
 
 - **Status**: accepted
