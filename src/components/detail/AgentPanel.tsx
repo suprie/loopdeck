@@ -1157,7 +1157,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
                           </span>
                         </div>
                         <div className="text-xs text-foreground/90 truncate">
-                          {c.first_user_excerpt || (
+                          {c.loop_title || c.first_user_excerpt || (
                             <span className="italic text-muted-foreground">
                               (no prompts)
                             </span>

@@ -47,8 +47,8 @@ pub async fn agent_start_loop(
     // spawned with this as its cwd, so it must be a registered project.
     let root = resolve_root(&state, &path)?;
 
-    let prompt = build_next_loop_prompt(&root);
-    let response = start_fresh_and_record(&state, &root, &prompt).await?;
+    let (prompt, title) = build_next_loop_prompt(&root);
+    let response = start_fresh_and_record(&state, &root, &prompt, title).await?;
     info!("agent_start_loop complete for: {path}");
     Ok(response)
 }
@@ -102,8 +102,8 @@ pub async fn agent_start_loop_streaming(
     debug!("agent_start_loop_streaming called for path: {path}");
     let root = resolve_root(&state, &path)?;
 
-    let prompt = build_next_loop_prompt(&root);
-    let _ = start_fresh_and_record_streaming(&state, &root, &prompt, &on_event).await?;
+    let (prompt, title) = build_next_loop_prompt(&root);
+    let _ = start_fresh_and_record_streaming(&state, &root, &prompt, title, &on_event).await?;
     info!("agent_start_loop_streaming complete for: {path}");
     Ok(())
 }
@@ -988,25 +988,34 @@ fn truncate_prompt(s: &str) -> String {
 /// unchecked steps together, so we read the raw file here to preserve the
 /// distinction). Falls back to a "propose the next loop" prompt when every
 /// step is done or there is no `loops.md` yet.
-fn build_next_loop_prompt(path: &Path) -> String {
+/// Returns `(prompt, title)` — `title` is the raw step text (when one was
+/// found) so the history list can show it as the conversation's display
+/// name instead of the prompt's generic opening boilerplate.
+fn build_next_loop_prompt(path: &Path) -> (String, Option<String>) {
     let next_step = next_unchecked_loop_step(path);
 
     match next_step {
-        Some(step) => format!(
-            "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
-             skill conventions. Read `.loopdeck/loops.md` for full context. The next \
-             unchecked step is: \"{step}\". Implement it. When done, update \
-             `.loopdeck/loops.md` (mark the step `[x]`, refresh `## Current`) and \
-             append any architectural decisions to `.loopdeck/decisions.md` per the \
-             memory convention."
+        Some(step) => (
+            format!(
+                "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
+                 skill conventions. Read `.loopdeck/loops.md` for full context. The next \
+                 unchecked step is: \"{step}\". Implement it. When done, update \
+                 `.loopdeck/loops.md` (mark the step `[x]`, refresh `## Current`) and \
+                 append any architectural decisions to `.loopdeck/decisions.md` per the \
+                 memory convention."
+            ),
+            Some(step),
         ),
-        None => String::from(
-            "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
-             skill conventions. Review `.loopdeck/loops.md`, then propose and start \
-             the next loop. When done, update `.loopdeck/loops.md` (refresh \
-             `## Current`, add new steps under `## Next Steps`) and append any \
-             architectural decisions to `.loopdeck/decisions.md` per the memory \
-             convention.",
+        None => (
+            String::from(
+                "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
+                 skill conventions. Review `.loopdeck/loops.md`, then propose and start \
+                 the next loop. When done, update `.loopdeck/loops.md` (refresh \
+                 `## Current`, add new steps under `## Next Steps`) and append any \
+                 architectural decisions to `.loopdeck/decisions.md` per the memory \
+                 convention.",
+            ),
+            None,
         ),
     }
 }
@@ -1665,6 +1674,7 @@ pub(crate) async fn start_fresh_and_record(
     state: &AppState,
     path: &Path,
     prompt: &str,
+    title: Option<String>,
 ) -> Result<AgentResponse, AppError> {
     let session_arc = spawn_fresh(state, path, path).await?;
     let mut session = session_arc.lock().await;
@@ -1683,7 +1693,7 @@ pub(crate) async fn start_fresh_and_record(
     //    `.loopdeck/loops.md` by `build_next_loop_prompt`, not typed by the
     //    human. The UI renders these as compact system rows instead of
     //    user chat bubbles so they don't drown out real messages.
-    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt, title)) {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
@@ -1747,9 +1757,10 @@ pub(crate) async fn start_fresh_and_record_streaming(
     state: &AppState,
     path: &Path,
     prompt: &str,
+    title: Option<String>,
     channel: &Channel<ClaudeEvent>,
 ) -> Result<AgentResponse, AppError> {
-    start_fresh_and_record_streaming_in_root(state, path, path, prompt, channel, None).await
+    start_fresh_and_record_streaming_in_root(state, path, path, prompt, title, channel, None).await
 }
 
 /// Streaming fresh turn whose process/transcript live in `path`, but whose
@@ -1762,6 +1773,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
     path: &Path,
     policy_root: &Path,
     prompt: &str,
+    title: Option<String>,
     channel: &Channel<ClaudeEvent>,
     token_budget: Option<&TokenBudget>,
 ) -> Result<AgentResponse, AppError> {
@@ -1779,7 +1791,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
 
     // 1. Record the user turn first (crash-safety: intent survives).
     //    Marked `user_loop` (see `start_fresh_and_record` for rationale).
-    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt)) {
+    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt, title)) {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
@@ -2055,9 +2067,10 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = build_next_loop_prompt(&dir);
+        let (prompt, title) = build_next_loop_prompt(&dir);
         assert!(prompt.contains("Wire up the thing"));
         assert!(prompt.contains("loopdeck-orchestrator"));
+        assert_eq!(title.as_deref(), Some("Wire up the thing"));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2067,9 +2080,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("loopdeck-prompt-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let prompt = build_next_loop_prompt(&dir);
+        let (prompt, title) = build_next_loop_prompt(&dir);
         assert!(prompt.contains("propose and start"));
         assert!(!prompt.contains("next unchecked step is"));
+        assert!(title.is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
