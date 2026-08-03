@@ -21,7 +21,7 @@ use crate::git;
 use crate::limits;
 use crate::run_executor::{
     self, build_interview_prompt, build_phase_prompt, extract_draft_pr_url,
-    extract_interview_answers, extract_verdict, RunHandle, RunVerdict,
+    extract_interview_answers, extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
 use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
 use chrono::Utc;
@@ -42,6 +42,35 @@ enum BootstrapStop {
     Completed,
     Cancelled,
     TimedOut,
+}
+
+/// Outcome of racing a phase turn against its wall-clock watchdog.
+#[derive(Debug)]
+enum WatchdogOutcome<T> {
+    /// The turn finished within its budget — carries its own `Result`
+    /// (a turn-level error is still possible; that's unrelated to the clock).
+    Completed(Result<T, AppError>),
+    /// The turn was still running when `watchdog_timeout` elapsed — the
+    /// budget's top risk (a stuck phase burning the night unnoticed), caught.
+    TimedOut,
+}
+
+/// Race `turn` against `watchdog_timeout`. Pure `tokio::time::timeout`
+/// wrapper, factored out of `execute_run` so the "does a runaway phase
+/// actually get caught by its clock" mechanism is unit-testable with a
+/// deliberately stuck fixture future, the same way `wait_for_bootstrap_child`
+/// lets the worktree-bootstrap watchdog be tested with a stuck `sleep 30`
+/// child process. Side effects on a timeout (evicting the cached session so
+/// its Drop reaps the child, marking the turn terminal) stay in the caller —
+/// this function only makes the timeout-vs-real-work decision.
+async fn race_with_watchdog<F, T>(watchdog_timeout: Duration, turn: F) -> WatchdogOutcome<T>
+where
+    F: std::future::Future<Output = Result<T, AppError>>,
+{
+    match tokio::time::timeout(watchdog_timeout, turn).await {
+        Ok(result) => WatchdogOutcome::Completed(result),
+        Err(_) => WatchdogOutcome::TimedOut,
+    }
 }
 
 fn run_worktree_path(root: &Path, run_id: &str) -> PathBuf {
@@ -705,20 +734,27 @@ async fn execute_run(
         )?;
         execution::save(root, &promoted, loaded.state.revision)?;
 
+        let phase_token_cap = resolved_phase_token_cap(&plan);
+        let phase_timeout = resolved_phase_timeout(&plan);
+        let run_timeout = resolved_run_timeout(&plan);
         let prompt = build_phase_prompt(
             &execution_id,
             &loc,
             &interview,
             plan.consent.draft_pr_authorized,
+            ResolvedBudgets {
+                phase_token_cap,
+                phase_wall_clock_secs: phase_timeout.as_secs(),
+                run_wall_clock_secs: run_timeout.as_secs(),
+            },
         );
         // No-op sink: this run has no live UI channel of its own, but the
         // streaming pipeline is what makes AskUserQuestion/permission/plan
         // cards park instead of auto-deny — see this function's doc comment.
         let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-        let token_budget = TokenBudget::new(resolved_phase_token_cap(&plan));
+        let token_budget = TokenBudget::new(phase_token_cap);
         let phase_started = Instant::now();
-        let phase_timeout = resolved_phase_timeout(&plan);
-        let run_remaining = resolved_run_timeout(&plan).saturating_sub(run_started.elapsed());
+        let run_remaining = run_timeout.saturating_sub(run_started.elapsed());
         let (watchdog_timeout, watchdog_reason) = if run_remaining <= phase_timeout {
             (run_remaining, "total run wall-clock budget exceeded")
         } else {
@@ -732,12 +768,13 @@ async fn execute_run(
             &channel,
             Some(&token_budget),
         );
-        let outcome = match tokio::time::timeout(watchdog_timeout, turn).await {
-            Ok(result) => result,
-            Err(_) => {
-                // `timeout` drops the turn future first, releasing its session
-                // lock. Removing the last cached Arc then invokes the harness
-                // Drop path: graceful EOF, bounded wait, and SIGKILL fallback.
+        let outcome = match race_with_watchdog(watchdog_timeout, turn).await {
+            WatchdogOutcome::Completed(result) => result,
+            WatchdogOutcome::TimedOut => {
+                // `timeout` (inside `race_with_watchdog`) drops the turn future
+                // first, releasing its session lock. Removing the last cached
+                // Arc then invokes the harness Drop path: graceful EOF, bounded
+                // wait, and SIGKILL fallback.
                 terminate_session(state, &worktree)?;
                 let error = AppError::RunPlan(format!(
                     "{watchdog_reason} after {} seconds",
@@ -883,12 +920,24 @@ async fn execute_run(
     }
 
     plan.wall_clock_secs = run_started.elapsed().as_secs();
+    finalize_worktree(root, &worktree, &mut plan);
+    runplan::save(root, &plan)?;
+
+    Ok(())
+}
+
+/// Cleanup policy for the run's isolated worktree, applied once every phase
+/// has been attempted (`prd-unattended-ship.md` P0: "prune on success, keep +
+/// flag on failure/kill"). Split out of `execute_run` so the decision itself
+/// — prune vs. keep, and keep-on-prune-failure — is testable against a real
+/// worktree without needing a live `claude_session` turn.
+fn finalize_worktree(root: &Path, worktree: &Path, plan: &mut RunPlan) {
     if plan
         .phases
         .iter()
         .all(|phase| phase.status == RunPhaseStatus::Completed)
     {
-        if let Err(error) = git::worktree_remove(root, &worktree) {
+        if let Err(error) = git::worktree_remove(root, worktree) {
             plan.environment.worktree_kept = true;
             if let Some(phase) = plan.phases.last_mut() {
                 phase.park_payload = Some(format!(
@@ -902,9 +951,6 @@ async fn execute_run(
     } else {
         plan.environment.worktree_kept = true;
     }
-    runplan::save(root, &plan)?;
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -972,5 +1018,272 @@ mod unattended_tests {
         assert_eq!(outcome, BootstrapStop::TimedOut);
         child.kill().await.expect("kill stuck fixture");
         child.wait().await.expect("reap stuck fixture");
+    }
+
+    /// The epic's top risk (`docs/postmortem-runaway-token-usage.md`): a
+    /// phase turn that never finishes must not burn the night unnoticed. This
+    /// races `race_with_watchdog` — the exact mechanism `execute_run` uses to
+    /// decide "kill this phase" — against a deliberately stuck fixture future
+    /// standing in for a wedged `claude_session` turn (no mockable seam for a
+    /// real one exists in this codebase; see `run_executor.rs`'s test module
+    /// docs for the same limitation on `execute_run` itself).
+    #[tokio::test]
+    async fn stuck_phase_turn_is_caught_by_the_watchdog() {
+        let stuck = async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<u32, AppError>(0)
+        };
+        let outcome = race_with_watchdog(Duration::from_millis(20), stuck).await;
+        assert!(matches!(outcome, WatchdogOutcome::TimedOut));
+    }
+
+    /// The non-stuck path: a turn that finishes well inside its budget is
+    /// reported as `Completed` with its own result, not mistaken for a stall.
+    #[tokio::test]
+    async fn fast_phase_turn_completes_before_the_watchdog_fires() {
+        let fast = async { Ok::<u32, AppError>(42) };
+        let outcome = race_with_watchdog(Duration::from_secs(5), fast).await;
+        match outcome {
+            WatchdogOutcome::Completed(Ok(value)) => assert_eq!(value, 42),
+            other => panic!("expected Completed(Ok(42)), got {other:?}"),
+        }
+    }
+
+    /// A turn-level error (not a stall) still surfaces through `Completed`,
+    /// not `TimedOut` — the watchdog and turn-failure paths must stay
+    /// distinguishable so `execute_run` reports the right phase status
+    /// (`Failed` vs `Killed`).
+    #[tokio::test]
+    async fn turn_error_within_budget_is_not_mistaken_for_a_timeout() {
+        let erroring = async { Err::<u32, AppError>(AppError::RunPlan("boom".into())) };
+        let outcome = race_with_watchdog(Duration::from_secs(5), erroring).await;
+        match outcome {
+            WatchdogOutcome::Completed(Err(AppError::RunPlan(msg))) => assert_eq!(msg, "boom"),
+            other => panic!("expected Completed(Err(RunPlan(\"boom\"))), got {other:?}"),
+        }
+    }
+
+    fn empty_app_state() -> AppState {
+        AppState {
+            config: std::sync::Mutex::new(crate::config::GlobalConfig::default()),
+            claude_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_answers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_permissions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_plans: std::sync::Mutex::new(std::collections::HashMap::new()),
+            interrupt_slots: std::sync::Mutex::new(std::collections::HashMap::new()),
+            run_handles: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    // ── worktree lifecycle: create / resume / prune / keep-on-failure ──────
+
+    fn init_test_repo(dir: &Path) {
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@loopdeck.dev"],
+            vec!["config", "user.name", "LoopDeck Test"],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C"])
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(dir.join("README.md"), "# test\n").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-m", "initial"]] {
+            std::process::Command::new("git")
+                .args(["-C"])
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+        }
+    }
+
+    /// A fresh temp git repo (with one commit) for worktree lifecycle tests.
+    /// Distinct from `plan()` above, which targets a fake `/repo` path — these
+    /// tests spawn real `git worktree` commands, so they need a real repo.
+    fn temp_git_repo(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "loopdeck-runqueue-worktree-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_test_repo(&dir);
+        dir
+    }
+
+    fn plan_with_phases(project: &Path, phases: Vec<runplan::RunPhase>) -> RunPlan {
+        let mut p = plan();
+        // `run_worktree_path` derives the worktree's destination from
+        // `root.parent()/.loopdeck-runs/<plan.id>` — every temp repo here
+        // shares the OS temp dir as its parent, so a shared `plan.id` (the
+        // `plan()` fixture's fixed "run-budget-test") would make parallel
+        // tests race to create a linked worktree at the identical path. A
+        // unique id per test keeps each worktree lifecycle test isolated.
+        p.id = format!("run-{}", uuid::Uuid::new_v4());
+        p.project = project.to_path_buf();
+        p.phases = phases;
+        p
+    }
+
+    fn completed_phase(id: &str) -> runplan::RunPhase {
+        runplan::RunPhase {
+            execution_id: id.into(),
+            status: RunPhaseStatus::Completed,
+            interview: vec![],
+            interview_status: InterviewStatus::Answered,
+            depends_on: vec![],
+            park_payload: None,
+            token_usage: 0,
+            wall_clock_secs: 0,
+        }
+    }
+
+    fn failed_phase(id: &str) -> runplan::RunPhase {
+        runplan::RunPhase {
+            status: RunPhaseStatus::Failed,
+            ..completed_phase(id)
+        }
+    }
+
+    /// Create: `ensure_worktree` on a plan with no recorded environment
+    /// creates a real linked worktree and persists its path/branch.
+    #[test]
+    fn ensure_worktree_creates_and_persists_environment() {
+        let dir = temp_git_repo("create");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+
+        assert_eq!(
+            plan.environment.worktree_path.as_deref(),
+            Some(worktree.as_path())
+        );
+        assert!(plan.environment.worktree_branch.is_some());
+        assert!(git::worktree_list(&dir).unwrap().contains(&worktree));
+
+        git::worktree_remove(&dir, &worktree).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Resume: calling `ensure_worktree` again on a plan whose recorded
+    /// worktree still exists is idempotent — no second worktree/branch.
+    #[test]
+    fn ensure_worktree_resumes_an_existing_worktree_without_duplicating_it() {
+        let dir = temp_git_repo("resume");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let first = ensure_worktree(&dir, &mut plan).expect("create worktree");
+
+        let second = ensure_worktree(&dir, &mut plan).expect("resume worktree");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            git::worktree_list(&dir)
+                .unwrap()
+                .iter()
+                .filter(|p| **p == first)
+                .count(),
+            1,
+            "resuming must not create a second linked worktree"
+        );
+
+        git::worktree_remove(&dir, &first).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A restart whose recorded worktree was deleted out-of-band (e.g. by
+    /// hand, or a prior crash mid-remove) fails loudly rather than silently
+    /// creating a second branch for the same run.
+    #[test]
+    fn ensure_worktree_errors_when_recorded_worktree_is_missing() {
+        let dir = temp_git_repo("missing");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        plan.environment.worktree_path = Some(dir.join("nonexistent-linked-worktree"));
+
+        let err = ensure_worktree(&dir, &mut plan).unwrap_err();
+        assert!(err.to_string().contains("missing"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Prune: every phase `Completed` → the worktree is removed and the
+    /// plan's environment fields are cleared.
+    #[test]
+    fn finalize_worktree_prunes_on_full_success() {
+        let dir = temp_git_repo("prune");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+
+        finalize_worktree(&dir, &worktree, &mut plan);
+
+        assert!(!plan.environment.worktree_kept);
+        assert!(plan.environment.worktree_path.is_none());
+        assert!(plan.environment.worktree_branch.is_none());
+        assert!(!worktree.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Keep-on-failure: any phase not `Completed` → the worktree is left on
+    /// disk and flagged, so a failed run stays inspectable.
+    #[test]
+    fn finalize_worktree_keeps_on_any_non_completed_phase() {
+        let dir = temp_git_repo("keep-failed");
+        let mut plan = plan_with_phases(
+            &dir,
+            vec![completed_phase("phase-1"), failed_phase("phase-2")],
+        );
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+
+        finalize_worktree(&dir, &worktree, &mut plan);
+
+        assert!(plan.environment.worktree_kept);
+        assert_eq!(
+            plan.environment.worktree_path.as_deref(),
+            Some(worktree.as_path())
+        );
+        assert!(worktree.exists(), "a kept worktree must remain on disk");
+
+        git::worktree_remove(&dir, &worktree).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Keep-and-flag: every phase `Completed` but the prune itself fails
+    /// (e.g. the recorded path no longer matches a real linked worktree) —
+    /// the run must not lose track of it silently.
+    #[test]
+    fn finalize_worktree_keeps_and_flags_when_prune_fails() {
+        let dir = temp_git_repo("prune-fails");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        // No real worktree was ever created at this path — `git worktree
+        // remove` must fail.
+        let bogus = dir.join("never-actually-a-worktree");
+
+        finalize_worktree(&dir, &bogus, &mut plan);
+
+        assert!(plan.environment.worktree_kept);
+        let payload = plan.phases.last().unwrap().park_payload.as_deref();
+        assert!(
+            payload.is_some_and(|p| p.contains("worktree cleanup failed")),
+            "expected a cleanup-failure payload, got {payload:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `terminate_session` is the side effect a caught stall relies on to
+    /// actually free the stuck process (its removal drops the last `Arc`,
+    /// which invokes the harness's graceful-EOF-then-SIGKILL `Drop`). Without
+    /// a mockable `claude_session`, this only proves the map-eviction half —
+    /// removing an absent entry is a safe no-op, which is what every timeout
+    /// on a project with no cached session (the common unattended-run case:
+    /// each phase spawns fresh) actually exercises.
+    #[test]
+    fn terminate_session_on_an_absent_entry_is_a_safe_no_op() {
+        let state = empty_app_state();
+        assert!(terminate_session(&state, Path::new("/does/not/matter")).is_ok());
     }
 }

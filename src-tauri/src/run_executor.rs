@@ -89,6 +89,21 @@ pub(crate) fn extract_draft_pr_url(text: &str) -> Option<String> {
     })
 }
 
+/// Resolved (default-applied) budget values for one run, injected into the
+/// phase prompt's run-metadata block. `prd-unattended-ship.md`'s PR body
+/// requires "run metadata (phase id, budgets used)" — the *caps this run
+/// operated under*, since a turn has no way to introspect its own live token
+/// count or elapsed time to report actual usage. Resolution (applying
+/// `limits::DEFAULT_RUN_*` where the plan left a cap unset) happens once in
+/// `commands::run_queue::execute_run`; this module only renders the
+/// already-resolved numbers into prompt text.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedBudgets {
+    pub phase_token_cap: u64,
+    pub phase_wall_clock_secs: u64,
+    pub run_wall_clock_secs: u64,
+}
+
 /// Build the prompt for one queued phase's orchestrated turn.
 ///
 /// Mirrors `commands::agent::build_next_loop_prompt`'s shape (same
@@ -102,6 +117,7 @@ pub(crate) fn build_phase_prompt(
     loc: &LoopLocation,
     interview: &[PinnedAnswer],
     draft_pr_authorized: bool,
+    budgets: ResolvedBudgets,
 ) -> String {
     let mut prompt = format!(
         "You are working on this LoopDeck project as part of an unattended \
@@ -136,7 +152,7 @@ pub(crate) fn build_phase_prompt(
          verify→ship flow (Phases 6-7)",
     );
     if draft_pr_authorized {
-        prompt.push_str(
+        prompt.push_str(&format!(
             " — this run was pre-authorized at queue time to open a draft pull \
              request unattended (RunConsent.draft_pr_authorized = true). When you \
              reach the `loopdeck-open-pr` skill, this prompt is your explicit \
@@ -147,10 +163,25 @@ pub(crate) fn build_phase_prompt(
              before invoking `loopdeck-open-pr` at all. Before any push, run the \
              unattended open-pr skill's required staged-diff secret scan; a hit \
              must abort the draft PR and report a parked phase, never be ignored. \
+             The PR body's `## Verify Verdict` section must reproduce, verbatim, \
+             the per-criterion table and `**Verdict:**` line from the \
+             `loopdeck-prd-verifier` report you already produced earlier in this \
+             turn. The PR body's `## Run metadata` section must state this exact \
+             run metadata (do not invent or recompute it):\n\
+             - Phase: `{execution_id}` — \"{title}\" ({epic} / {prd} / {phase})\n\
+             - Budgets: {token_cap} tokens/phase cap · {phase_secs}s/phase \
+             wall-clock cap · {run_secs}s total-run wall-clock cap\n\n\
              After a successful draft creation, end your final response with an \
              exact `**Draft PR:** https://github.com/<owner>/<repo>/pull/<number>` \
              line so the executor can retain the review artifact.",
-        );
+            title = loc.title,
+            epic = loc.epic,
+            prd = loc.prd,
+            phase = loc.phase,
+            token_cap = budgets.phase_token_cap,
+            phase_secs = budgets.phase_wall_clock_secs,
+            run_secs = budgets.run_wall_clock_secs,
+        ));
     } else {
         prompt.push_str(
             " — no human is present to gate a PR open, so stop after Phase 6's \
@@ -424,7 +455,13 @@ mod tests {
             question: "Which stall policy?".into(),
             answer: "halt".into(),
         }];
-        let prompt = build_phase_prompt("prd-run-queue/phase-2", &loc, &interview, false);
+        let prompt = build_phase_prompt(
+            "prd-run-queue/phase-2",
+            &loc,
+            &interview,
+            false,
+            test_budgets(),
+        );
         assert!(prompt.contains("prd-run-queue/phase-2"));
         assert!(prompt.contains("Queue executor"));
         assert!(prompt.contains("Which stall policy?"));
@@ -439,7 +476,7 @@ mod tests {
             phase: "ph".into(),
             title: "t".into(),
         };
-        let prompt = build_phase_prompt("e/p-1", &loc, &[], false);
+        let prompt = build_phase_prompt("e/p-1", &loc, &[], false, test_budgets());
         assert!(!prompt.contains("already answered"));
     }
 
@@ -451,7 +488,7 @@ mod tests {
             phase: "ph".into(),
             title: "t".into(),
         };
-        let prompt = build_phase_prompt("e/p-1", &loc, &[], false);
+        let prompt = build_phase_prompt("e/p-1", &loc, &[], false, test_budgets());
         assert!(prompt.contains("stop after Phase 6's `**Verdict:**` line"));
         assert!(!prompt.contains("--draft"));
         assert!(!prompt.contains("pre-authorized"));
@@ -465,7 +502,7 @@ mod tests {
             phase: "ph".into(),
             title: "t".into(),
         };
-        let prompt = build_phase_prompt("e/p-1", &loc, &[], true);
+        let prompt = build_phase_prompt("e/p-1", &loc, &[], true, test_budgets());
         assert!(
             prompt.contains("pre-authorized at queue time to open a draft pull request unattended")
         );
@@ -474,6 +511,36 @@ mod tests {
         assert!(prompt.contains("no `--web`"));
         assert!(prompt.contains("never mark it ready for review or merge it"));
         assert!(!prompt.contains("stop after Phase 6's `**Verdict:**` line unless"));
+    }
+
+    #[test]
+    fn build_phase_prompt_authorized_includes_verdict_table_and_run_metadata_instructions() {
+        let loc = LoopLocation {
+            epic: "overnight-orchestration".into(),
+            prd: "prd-unattended-ship".into(),
+            phase: "Phase 2".into(),
+            title: "Draft-PR autonomy".into(),
+        };
+        let budgets = ResolvedBudgets {
+            phase_token_cap: 500_000,
+            phase_wall_clock_secs: 5_400,
+            run_wall_clock_secs: 28_800,
+        };
+        let prompt = build_phase_prompt("prd-unattended-ship/phase-2", &loc, &[], true, budgets);
+        assert!(prompt.contains("## Verify Verdict"));
+        assert!(prompt.contains("## Run metadata"));
+        assert!(prompt.contains("prd-unattended-ship/phase-2"));
+        assert!(prompt.contains("500000 tokens/phase cap"));
+        assert!(prompt.contains("5400s/phase wall-clock cap"));
+        assert!(prompt.contains("28800s total-run wall-clock cap"));
+    }
+
+    fn test_budgets() -> ResolvedBudgets {
+        ResolvedBudgets {
+            phase_token_cap: 500_000,
+            phase_wall_clock_secs: 5_400,
+            run_wall_clock_secs: 28_800,
+        }
     }
 
     #[test]

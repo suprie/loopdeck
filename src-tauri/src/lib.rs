@@ -24,6 +24,7 @@ pub mod retry;
 mod run_executor;
 mod runplan;
 mod scanner;
+mod secret_scan;
 mod secrets;
 mod skills;
 mod state_cli;
@@ -31,6 +32,11 @@ mod state_cli;
 /// Entry point for the `loopdeck state` subcommand (Phase 3 `state-command`).
 /// Branch is taken in `main.rs` when the binary's first arg is `state`.
 pub use state_cli::run_state_cli;
+
+/// Entry point for the `loopdeck secret-scan` subcommand
+/// (`prd-unattended-ship.md` P1). Branch is taken in `main.rs` when the
+/// binary's first arg is `secret-scan`.
+pub use secret_scan::run_secret_scan_cli;
 
 use commands::AppState;
 use config::GlobalConfig;
