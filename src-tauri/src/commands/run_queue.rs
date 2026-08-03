@@ -496,7 +496,9 @@ pub async fn run_phase_interview(
     // only the channel's *presence* matters, so a parked AskUserQuestion is
     // answerable instead of auto-denied (see this fn's doc comment).
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-    let response = start_fresh_and_record_streaming(&state, &root, &prompt, &channel).await?;
+    let response =
+        start_fresh_and_record_streaming(&state, &root, &prompt, Some(loc.title.clone()), &channel)
+            .await?;
     let answers = extract_interview_answers(&response.result);
 
     // Reload rather than reuse the plan loaded before the (possibly long)
@@ -729,6 +731,7 @@ async fn execute_run(
             &worktree,
             root,
             &prompt,
+            Some(loc.title.clone()),
             &channel,
             Some(&token_budget),
         );

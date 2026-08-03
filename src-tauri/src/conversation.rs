@@ -58,6 +58,14 @@ pub struct ConversationSummary {
     /// First user prompt, truncated for the row preview. Empty when the
     /// transcript has no user turns (e.g. all orphans filtered out).
     pub first_user_excerpt: String,
+    /// The loop/step title (from `.loopdeck/loops.md` or `docs/epics/`) when
+    /// the first user turn was auto-built by "Start next loop", not typed by
+    /// the human. Preferred over `first_user_excerpt` for the row label,
+    /// since the excerpt would otherwise be generic boilerplate text rather
+    /// than the actual step being worked on. `None` for human-typed
+    /// conversations.
+    #[serde(default)]
+    pub loop_title: Option<String>,
 }
 
 /// A tool call made by the assistant during a turn, persisted in the transcript.
@@ -204,6 +212,10 @@ pub struct ConversationTurn {
     /// transcripts load as an empty vec via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The loop/step title this auto-built prompt was generated for (see
+    /// `user_loop`). Absent on human-typed user turns and on assistant turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_title: Option<String>,
 }
 
 impl ConversationTurn {
@@ -235,6 +247,7 @@ impl ConversationTurn {
             blocks: Vec::new(),
             tasks: Vec::new(),
             attachments: Vec::new(),
+            loop_title: None,
         }
     }
 
@@ -242,7 +255,12 @@ impl ConversationTurn {
     /// boilerplate "next unchecked step is: …" prompt built from
     /// `.loopdeck/loops.md`). Distinct from `user` so the UI can render these
     /// as compact system rows instead of human chat bubbles.
-    pub fn user_loop(text: impl Into<String>) -> Self {
+    ///
+    /// `title` is the human-readable step/loop name (when the caller has
+    /// one) — carried separately from `text` (the full boilerplate prompt)
+    /// so the history list can show the real title instead of the prompt's
+    /// generic opening line.
+    pub fn user_loop(text: impl Into<String>, title: Option<String>) -> Self {
         Self {
             ts: Utc::now().to_rfc3339(),
             role: String::from("user"),
@@ -259,6 +277,7 @@ impl ConversationTurn {
             tasks: Vec::new(),
             // Auto-generated loop prompts are text-only by construction.
             attachments: Vec::new(),
+            loop_title: title,
         }
     }
 
@@ -307,6 +326,7 @@ impl ConversationTurn {
             // Attachments are a human-composer concept; the assistant never
             // produces them.
             attachments: Vec::new(),
+            loop_title: None,
         }
     }
 
@@ -344,6 +364,7 @@ impl ConversationTurn {
             blocks: Vec::new(),
             tasks: Vec::new(),
             attachments: Vec::new(),
+            loop_title: None,
         }
     }
 }
@@ -788,11 +809,11 @@ pub fn list_conversations(repo_path: &Path) -> Vec<ConversationSummary> {
 fn summarize(id: &str, kind: &str, turns: &[ConversationTurn]) -> ConversationSummary {
     let started_ts = turns.first().map(|t| t.ts.clone()).unwrap_or_default();
     let last_ts = turns.last().map(|t| t.ts.clone()).unwrap_or_default();
-    let first_user_excerpt = turns
-        .iter()
-        .find(|t| t.role == "user")
+    let first_user_turn = turns.iter().find(|t| t.role == "user");
+    let first_user_excerpt = first_user_turn
         .map(|t| truncate_preview(&t.text))
         .unwrap_or_default();
+    let loop_title = first_user_turn.and_then(|t| t.loop_title.clone());
     ConversationSummary {
         id: id.to_string(),
         kind: kind.to_string(),
@@ -800,6 +821,7 @@ fn summarize(id: &str, kind: &str, turns: &[ConversationTurn]) -> ConversationSu
         last_ts,
         turn_count: turns.len(),
         first_user_excerpt,
+        loop_title,
     }
 }
 

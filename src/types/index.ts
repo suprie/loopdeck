@@ -814,6 +814,13 @@ export interface ConversationSummary {
   turn_count: number;
   /** First user prompt, truncated to one line — the row preview. */
   first_user_excerpt: string;
+  /**
+   * The loop/step title when the first user turn was auto-built by "Start
+   * next loop", instead of typed by the human. Preferred over
+   * `first_user_excerpt` for the row label. `null` for human-typed
+   * conversations.
+   */
+  loop_title: string | null;
 }
 
 /**
