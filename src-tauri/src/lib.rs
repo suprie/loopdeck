@@ -198,6 +198,7 @@ pub fn run() {
             commands::run_queue::queue_run,
             commands::run_queue::cancel_run,
             commands::run_queue::get_run_status,
+            commands::run_queue::requeue_run_phase,
             // Run queue pre-flight interview — prd-run-queue Phase 3
             commands::run_queue::run_phase_interview,
             commands::run_queue::skip_phase_interview,

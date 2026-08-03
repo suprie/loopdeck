@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Loader2, Play, Square as StopIcon, Zap } from "lucide-react";
+import { Activity, AlertTriangle, Loader2, Play, RotateCcw, Square as StopIcon, Zap } from "lucide-react";
 import { toast } from "sonner";
-import type { AppError, RunBudgets, RunPhase, RunPhaseStatus, RunPlan, StallPolicy } from "../../types";
+import type { AppError, ContentBlock, RunBudgets, RunPhase, RunPhaseStatus, RunPlan, StallPolicy } from "../../types";
 import * as api from "../../lib/tauri";
+import { useStreamingState } from "../../store/streamingState";
 import {
   Select,
   SelectContent,
@@ -56,7 +57,7 @@ export function RunQueuePanel({
 }: RunQueuePanelProps) {
   const [plan, setPlan] = useState<RunPlan | null>(null);
   const [stallPolicy, setStallPolicy] = useState<StallPolicy>("continue_independent");
-  const [draftPrAuthorized, setDraftPrAuthorized] = useState(false);
+  const [draftPrAuthorized, setDraftPrAuthorized] = useState(true);
   const [phaseTokenCap, setPhaseTokenCap] = useState("500000");
   const [phaseMinutes, setPhaseMinutes] = useState("90");
   const [runHours, setRunHours] = useState("8");
@@ -65,11 +66,18 @@ export function RunQueuePanel({
   const [cancelling, setCancelling] = useState(false);
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
   const [skippingId, setSkippingId] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [runActive, setRunActive] = useState(false);
+  const live = useStreamingState((s) => s.byPath[projectPath] ?? null);
 
   const loadPlan = useCallback(async () => {
     try {
       const loaded = await api.getRunStatus(projectPath);
-      setPlan(loaded);
+      setPlan(loaded.plan);
+      setRunActive(loaded.active);
+      if (!loaded.active && useStreamingState.getState().get(projectPath).busy) {
+        useStreamingState.getState().patch(projectPath, { busy: false, retrying: null });
+      }
     } catch (err) {
       console.warn("getRunStatus failed", err);
     }
@@ -115,14 +123,34 @@ export function RunQueuePanel({
   const handleStartRun = async () => {
     setStarting(true);
     try {
+      useStreamingState.getState().beginTurn(projectPath);
       await api.queueRun(projectPath);
       toast.success("Overnight run started");
       await loadPlan();
     } catch (err) {
+      useStreamingState.getState().clear(projectPath);
       const appErr = err as AppError;
       toast.error("Failed to start run", { description: appErr.message ?? String(err) });
     } finally {
       setStarting(false);
+    }
+  };
+
+  const handleRetry = async (executionId: string) => {
+    setRetryingId(executionId);
+    try {
+      const updated = await api.requeueRunPhase(projectPath, executionId);
+      setPlan(updated);
+      useStreamingState.getState().beginTurn(projectPath);
+      await api.queueRun(projectPath);
+      toast.success("Parked phase restarted unattended");
+      await loadPlan();
+    } catch (err) {
+      useStreamingState.getState().clear(projectPath);
+      const appErr = err as AppError;
+      toast.error("Failed to retry phase", { description: appErr.message ?? String(err) });
+    } finally {
+      setRetryingId(null);
     }
   };
 
@@ -166,7 +194,7 @@ export function RunQueuePanel({
     }
   };
 
-  const isRunning = plan?.phases.some((p) => p.status === "running") ?? false;
+  const isRunning = runActive;
   const hasQueuedPhase = plan?.phases.some((p) => p.status === "queued") ?? false;
   const hasPendingInterview =
     plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
@@ -202,7 +230,7 @@ export function RunQueuePanel({
               onChange={(e) => setDraftPrAuthorized(e.target.checked)}
               className="size-3.5"
             />
-            Authorize draft PR
+            Open draft PR automatically
           </label>
           <label className="flex items-center gap-1 text-xs text-muted-foreground">
             Tokens/phase
@@ -242,6 +270,10 @@ export function RunQueuePanel({
             {queuing ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
             Queue overnight run
           </button>
+          <p className="basis-full text-[11px] leading-relaxed text-muted-foreground">
+            Unattended mode automatically allows safe project-scoped actions and plan execution.
+            Destructive actions remain denied by the safety floor.
+          </p>
         </div>
       )}
 
@@ -294,11 +326,17 @@ export function RunQueuePanel({
                 title={idToTitle[phase.execution_id] ?? phase.execution_id}
                 interviewing={interviewingId === phase.execution_id}
                 skipping={skippingId === phase.execution_id}
+                retrying={retryingId === phase.execution_id}
                 onAnswer={() => handleAnswer(phase.execution_id)}
                 onSkip={() => handleSkip(phase.execution_id)}
+                onRetry={() => handleRetry(phase.execution_id)}
               />
             ))}
           </ul>
+
+          {live?.streamingBlocks && live.streamingBlocks.length > 0 && (
+            <LiveRunActivity blocks={live.streamingBlocks} busy={runActive} />
+          )}
         </div>
       )}
     </>
@@ -310,21 +348,26 @@ function RunPhaseRow({
   title,
   interviewing,
   skipping,
+  retrying,
   onAnswer,
   onSkip,
+  onRetry,
 }: {
   phase: RunPhase;
   title: string;
   interviewing: boolean;
   skipping: boolean;
+  retrying: boolean;
   onAnswer: () => void;
   onSkip: () => void;
+  onRetry: () => void;
 }) {
   const needsInterview = phase.status === "queued" && phase.interview_status === "pending";
   const busy = interviewing || skipping;
 
   return (
-    <li className="flex items-center gap-2 rounded px-1.5 py-1 text-xs">
+    <li className="rounded px-1.5 py-1 text-xs">
+      <div className="flex items-center gap-2">
       <span
         className="w-20 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-medium uppercase tracking-wider"
         style={{ color: STATUS_COLOR[phase.status] }}
@@ -334,11 +377,6 @@ function RunPhaseRow({
       <span className="flex-1 truncate text-foreground" title={phase.execution_id}>
         {title}
       </span>
-      {phase.park_payload && (
-        <span title={phase.park_payload} className="shrink-0">
-          <AlertTriangle size={11} style={{ color: "var(--warning)" }} />
-        </span>
-      )}
       {phase.token_usage > 0 && (
         <span className="shrink-0 text-[10px] text-muted-foreground">
           {phase.token_usage.toLocaleString()} tok · {phase.wall_clock_secs}s
@@ -361,6 +399,15 @@ function RunPhaseRow({
             {skipping ? <Loader2 size={10} className="animate-spin" /> : "Skip"}
           </button>
         </span>
+      ) : ["parked", "failed", "interrupted", "killed"].includes(phase.status) ? (
+        <button
+          onClick={onRetry}
+          disabled={retrying}
+          className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)] transition-colors hover:bg-accent disabled:opacity-50"
+        >
+          {retrying ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} />}
+          Retry unattended
+        </button>
       ) : (
         phase.status === "queued" && (
           <span className="shrink-0 text-[10px] text-muted-foreground">
@@ -368,6 +415,47 @@ function RunPhaseRow({
           </span>
         )
       )}
+      </div>
+      {phase.park_payload && (
+        <div className="mt-1 flex items-start gap-1.5 rounded bg-amber-500/5 px-2 py-1.5 text-[11px] leading-relaxed text-[var(--warning)]">
+          <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+          <span className="break-words">{phase.park_payload}</span>
+        </div>
+      )}
     </li>
   );
+}
+
+function LiveRunActivity({ blocks, busy }: { blocks: ContentBlock[]; busy: boolean }) {
+  const visible = blocks.slice(-8);
+  return (
+    <div className="mt-3 rounded-md border border-border bg-background/60 p-2.5">
+      <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {busy ? <Loader2 size={11} className="animate-spin" /> : <Activity size={11} />}
+        {busy ? "Agent running live" : "Latest agent activity"}
+      </div>
+      <div className="max-h-52 space-y-1.5 overflow-y-auto font-mono text-[11px] leading-relaxed">
+        {visible.map((block, index) => {
+          if (block.type === "tool_use") {
+            return (
+              <div key={index} className="text-violet-400">
+                › {block.name} <span className="text-muted-foreground">{summarize(block.input, 180)}</span>
+              </div>
+            );
+          }
+          const text = block.type === "text" ? block.text : block.thinking;
+          return (
+            <div key={index} className={block.type === "thinking" ? "text-muted-foreground italic" : "text-foreground"}>
+              {summarize(text, 500)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function summarize(value: string, max: number) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
 }

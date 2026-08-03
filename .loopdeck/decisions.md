@@ -2,12 +2,6 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
-## 2026-07-28 — "Start next loop" skips `Review & merge:` reminders instead of "implementing" them
-
-- **Status**: accepted
-- **Context**: `loopdeck-open-pr`'s Phase 7 appends `- [ ] Review & merge: <url>` to `.loopdeck/loops.md`'s `## Next Steps` as a human bookkeeping reminder. `next_unchecked_loop_step` (`commands/agent.rs`) treated every `- [ ]` line in that section as equally actionable, so after a user merged a PR and pulled, "Start next loop" picked the still-unchecked merge reminder and told the agent to "implement" it — the agent's only compliant move was to check the box, which read to the user as the app silently marking a real task done instead of starting new work.
-- **Consequences**: `next_unchecked_loop_step` now skips any `- [ ] Review & merge:` line (case-insensitive prefix match) and keeps scanning for the next real step; if only reminders remain it falls through to the existing "propose the next loop" prompt instead of fabricating work. Fix is scoped to the one function with the false positive — did not touch `loopdeck-open-pr`'s insertion behavior, since the reminder itself is still useful for a human. Flagged as a background task: the distinction is still a hardcoded string match rather than part of the `loops.md` format itself, so a future skill adding a different non-actionable reminder type would reproduce the same bug class.
-
 ## 2026-07-28 — `prd-run-queue` Phase 4: stalls only detectable via streaming + `TURN_DEADLINE`, not interrupted early
 
 - **Status**: accepted
@@ -94,3 +88,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: The multi-model-agents epic needed reusable provider/model credentials and concurrent mixed Claude/Codex execution without sharing a checkout or letting restart/control races corrupt run state.
 - **Consequences**: Named profiles live in the global registry with UUID-scoped owner-only secrets and legacy migration; one durable run manifest owns N agent-tagged sub-runs, provider turns execute concurrently in separate linked worktrees, and project-scoped admission/manifest locks serialize lifecycle transitions. Only pristine successful worktrees are removed; modified, failed, or cancelled worktrees remain inspectable. Claude and Codex share the crate-private `HarnessAdapter` contract while `HarnessSession` remains the stored enum.
+
+## 2026-08-03 — Unattended runs own autonomous policy and root-scoped observability
+- **Status**: accepted
+- **Context**: Queue execution previously discarded its live stream, persisted transcripts under an isolated worktree, and inherited project manual-approval mode, making safe unattended work invisible or silently parked.
+- **Consequences**: Run phases now force autonomous policy within the existing destructive safety floor, broadcast live events app-wide, persist project-visible transcripts, expose parked reasons and approval cards, and support dependency-aware unattended retry.

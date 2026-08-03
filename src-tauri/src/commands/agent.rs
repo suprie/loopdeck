@@ -12,7 +12,7 @@ use crate::conversation::{self, Attachment, ConversationSummary, ConversationTur
 use crate::error::AppError;
 use crate::harness::HarnessSession;
 use crate::limits;
-use crate::permission::Decision as PermissionDecision;
+use crate::permission::{Decision as PermissionDecision, PermissionMode, PermissionPolicy};
 use crate::retry;
 use crate::retry::MAX_ATTEMPTS;
 use serde::Deserialize;
@@ -1607,6 +1607,7 @@ async fn spawn_fresh(
     state: &AppState,
     path: &Path,
     policy_root: &Path,
+    force_autonomous: bool,
 ) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
     // ── Phase 1: try_lock the existing arc to prove it's idle. ──
     // Scoped so the map's std Mutex guard is dropped before we await anything.
@@ -1644,7 +1645,11 @@ async fn spawn_fresh(
     // ── Phase 3: archive the transcript (rotate active.jsonl aside). ──
     // Surfaced as a real error: the user asked for a fresh conversation and
     // didn't get one.
-    conversation::archive_conversation(path)?;
+    // A run may execute in an isolated worktree while its user-visible
+    // transcript belongs to the registered project. Archive the latter so
+    // the Agent surface can show the unattended turn instead of hiding it in
+    // the worktree's private `.loopdeck` directory.
+    conversation::archive_conversation(policy_root)?;
 
     let agent_config = resolve_agent_config(state)?;
     spawn_fresh_with_config(state, path, policy_root, &agent_config)
@@ -1663,6 +1668,11 @@ pub(crate) fn spawn_fresh_with_config(
     // is the normal `spawn_fresh` path. Multi-agent worktrees are unique, so
     // their maps cannot collide with an existing session.
     let policy = resolve_permission_policy(state, policy_root);
+    let policy = if force_autonomous {
+        PermissionPolicy::with_mode(PermissionMode::Autonomous)
+    } else {
+        resolve_permission_policy(state, policy_root)
+    };
 
     let session = HarnessSession::spawn(path, agent_config, None, policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
@@ -1690,7 +1700,7 @@ pub(crate) async fn start_fresh_and_record(
     prompt: &str,
     title: Option<String>,
 ) -> Result<AgentResponse, AppError> {
-    let session_arc = spawn_fresh(state, path, path).await?;
+    let session_arc = spawn_fresh(state, path, path, false).await?;
     let mut session = session_arc.lock().await;
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
@@ -1774,7 +1784,22 @@ pub(crate) async fn start_fresh_and_record_streaming(
     title: Option<String>,
     channel: &Channel<ClaudeEvent>,
 ) -> Result<AgentResponse, AppError> {
-    start_fresh_and_record_streaming_in_root(state, path, path, prompt, title, channel, None).await
+    start_fresh_and_record_streaming_in_root(
+        state,
+        path,
+        path,
+        prompt,
+        title,
+        channel,
+        StreamingRunOptions::default(),
+    )
+    .await
+}
+
+#[derive(Default)]
+pub(crate) struct StreamingRunOptions<'a> {
+    pub(crate) token_budget: Option<&'a TokenBudget>,
+    pub(crate) force_autonomous: bool,
 }
 
 /// Streaming fresh turn whose process/transcript live in `path`, but whose
@@ -1789,7 +1814,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
     prompt: &str,
     title: Option<String>,
     channel: &Channel<ClaudeEvent>,
-    token_budget: Option<&TokenBudget>,
+    options: StreamingRunOptions<'_>,
 ) -> Result<AgentResponse, AppError> {
     start_fresh_and_record_streaming_in_root_with_config(
         state,
@@ -1827,6 +1852,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         Some(config) => spawn_fresh_with_config(state, path, policy_root, config)?,
         None => spawn_fresh(state, path, policy_root).await?,
     };
+    let session_arc = spawn_fresh(state, path, policy_root, options.force_autonomous).await?;
     let mut session = session_arc.lock().await;
     let control_key = control_key.unwrap_or(policy_root);
     let qslot = question_slot(state, control_key)?;
@@ -1841,7 +1867,9 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
 
     // 1. Record the user turn first (crash-safety: intent survives).
     //    Marked `user_loop` (see `start_fresh_and_record` for rationale).
-    if let Err(e) = conversation::append_turn(path, &ConversationTurn::user_loop(prompt, title)) {
+    if let Err(e) =
+        conversation::append_turn(policy_root, &ConversationTurn::user_loop(prompt, title))
+    {
         tracing::warn!("failed to append user turn to transcript: {e}");
     }
 
@@ -1867,13 +1895,13 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         &slots,
         &islot,
         false,
-        token_budget,
+        options.token_budget,
     )
     .await
     {
         Ok(r) => r,
         Err(e) => {
-            mark_turn_terminal(path, &e);
+            mark_turn_terminal(policy_root, &e);
             return Err(e);
         }
     };
@@ -1890,7 +1918,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         response.blocks.clone(),
         response.tasks.clone(),
     );
-    if let Err(e) = conversation::append_turn(path, &assistant_turn) {
+    if let Err(e) = conversation::append_turn(policy_root, &assistant_turn) {
         tracing::warn!("failed to append assistant turn to transcript: {e}");
     }
 

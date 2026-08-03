@@ -30,14 +30,20 @@ import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
-import { PermissionApprovalCard, buildAllowRule } from "./Chat";
+import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { StatusBadge } from "../shared/StatusBadge";
 import { PermissionModeBadge } from "../shared/PermissionModeBadge";
 import { PageHeader } from "../layout/AppShell";
 import { Section, IconButton, ActionButton } from "./Section";
 import { cn } from "../../lib/utils";
-import type { AskUserQuestionAnswers, ApprovalDecision, DetailTab, ProjectEntry } from "../../types";
+import type {
+  AskUserQuestionAnswers,
+  ApprovalDecision,
+  DetailTab,
+  PlanApprovalDecision,
+  ProjectEntry,
+} from "../../types";
 
 const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
@@ -137,6 +143,7 @@ export function ProjectDetail() {
           renders, reading from the same navigation-stable store. */}
       <StuckQuestionCallout projectPath={project.path} />
       <StuckPermissionCallout projectPath={project.path} />
+      <StuckPlanCallout projectPath={project.path} />
 
       {/* Body: tab rail + content */}
       <div className="flex flex-1 min-h-0">
@@ -317,6 +324,27 @@ function StuckPermissionCallout({ projectPath }: { projectPath: string }) {
         onDecide={onDecide}
         onAlwaysAllow={onAlwaysAllow}
       />
+    </div>
+  );
+}
+
+function StuckPlanCallout({ projectPath }: { projectPath: string }) {
+  const pending = usePendingInteractions((s) => s.plans[projectPath] ?? null);
+  const clearPlan = usePendingInteractions((s) => s.clearPlan);
+  if (!pending) return null;
+
+  async function onDecide(decision: PlanApprovalDecision) {
+    try {
+      await api.agentAnswerPlan(projectPath, pending.requestId, decision);
+    } catch (err) {
+      console.warn("agentAnswerPlan failed", err);
+      clearPlan(projectPath);
+    }
+  }
+
+  return (
+    <div className="border-b border-sky-500/30 bg-sky-500/5 px-6 py-3">
+      <PlanApprovalCard plan={pending.plan} onDecide={onDecide} />
     </div>
   );
 }
