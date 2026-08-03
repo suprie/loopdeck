@@ -428,6 +428,11 @@ export interface RunPlan {
   phases: RunPhase[];
 }
 
+export interface RunQueueStatus {
+  plan: RunPlan | null;
+  active: boolean;
+}
+
 /**
  * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
  * Mirrors Rust `Epic` in epic.rs.

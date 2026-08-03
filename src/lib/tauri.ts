@@ -16,6 +16,7 @@ import type {
   ProgressSnapshot,
   RunBudgets,
   RunPlan,
+  RunQueueStatus,
   StallPolicy,
   AgentResponse,
   ClaudeEvent,
@@ -266,13 +267,13 @@ export async function cancelRun(path: string): Promise<void> {
 /**
  * Read the current run plan (and its live per-phase status) for a project.
  * `null` when no plan has ever been queued.
- * Rust: get_run_status(path) -> Result<Option<RunPlan>, AppError>
+ * Rust: get_run_status(path) -> Result<RunQueueStatus, AppError>
  */
-export async function getRunStatus(path: string): Promise<RunPlan | null> {
-  return invoke<RunPlan | null>("get_run_status", { path });
+export async function getRunStatus(path: string): Promise<RunQueueStatus> {
+  return invoke<RunQueueStatus>("get_run_status", { path });
 }
 
-/** Requeue a parked phase (plus dependents parked solely because of it). */
+/** Requeue a retryable terminal phase (plus dependents parked solely because of it). */
 export async function requeueRunPhase(
   path: string,
   executionId: string,
