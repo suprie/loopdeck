@@ -1652,7 +1652,7 @@ async fn spawn_fresh(
     conversation::archive_conversation(policy_root)?;
 
     let agent_config = resolve_agent_config(state)?;
-    spawn_fresh_with_config(state, path, policy_root, &agent_config)
+    spawn_fresh_with_config(state, path, policy_root, &agent_config, force_autonomous)
 }
 
 /// The fresh-session primitive with an already resolved profile. Multi-agent
@@ -1663,11 +1663,11 @@ pub(crate) fn spawn_fresh_with_config(
     path: &Path,
     policy_root: &Path,
     agent_config: &crate::config::AgentConfig,
+    force_autonomous: bool,
 ) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
     // The caller has already performed the busy check / archive steps when it
     // is the normal `spawn_fresh` path. Multi-agent worktrees are unique, so
     // their maps cannot collide with an existing session.
-    let policy = resolve_permission_policy(state, policy_root);
     let policy = if force_autonomous {
         PermissionPolicy::with_mode(PermissionMode::Autonomous)
     } else {
@@ -1823,9 +1823,10 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
         prompt,
         title,
         channel,
-        token_budget,
+        options.token_budget,
         None,
         None,
+        options.force_autonomous,
     )
     .await
 }
@@ -1847,12 +1848,14 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     // worktree callers retain `policy_root`; multi-agent workers pass their
     // own linked worktree so sibling controls can never collide.
     control_key: Option<&Path>,
+    force_autonomous: bool,
 ) -> Result<AgentResponse, AppError> {
     let session_arc = match agent_config {
-        Some(config) => spawn_fresh_with_config(state, path, policy_root, config)?,
-        None => spawn_fresh(state, path, policy_root).await?,
+        Some(config) => {
+            spawn_fresh_with_config(state, path, policy_root, config, force_autonomous)?
+        }
+        None => spawn_fresh(state, path, policy_root, force_autonomous).await?,
     };
-    let session_arc = spawn_fresh(state, path, policy_root, options.force_autonomous).await?;
     let mut session = session_arc.lock().await;
     let control_key = control_key.unwrap_or(policy_root);
     let qslot = question_slot(state, control_key)?;
@@ -1895,7 +1898,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         &slots,
         &islot,
         false,
-        options.token_budget,
+        token_budget,
     )
     .await
     {
