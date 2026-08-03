@@ -17,7 +17,7 @@ use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::{ClaudeEvent, TokenBudget};
 use crate::epic;
 use crate::error::AppError;
-use crate::execution::{self, LoopOrigin};
+use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::limits;
 use crate::run_executor::{
@@ -47,6 +47,12 @@ struct RunQueueEvent {
     project_path: String,
     execution_id: String,
     event: serde_json::Value,
+}
+
+#[derive(Serialize)]
+pub struct RunQueueStatus {
+    plan: Option<RunPlan>,
+    active: bool,
 }
 
 fn emit_run_queue_terminal(app: &AppHandle, root: &Path, result: String, is_error: bool) {
@@ -378,14 +384,6 @@ pub async fn queue_run(
 ) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
 
-    // A `Running` phase left over from a prior crash isn't actually running
-    // on this fresh process — reconcile before deciding whether a run is
-    // already active, so a stale status can't block queuing forever.
-    run_executor::reconcile_running_phases(&root)?;
-
-    let plan = runplan::load(&root)?
-        .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
-
     {
         let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
         if handles.contains_key(&root) {
@@ -394,6 +392,15 @@ pub async fn queue_run(
             ));
         }
     }
+
+    // A `Running` phase left over from a prior crash isn't actually running
+    // on this fresh process — reconcile before deciding whether a run is
+    // already active, so a stale status can't block queuing forever.
+    run_executor::reconcile_running_phases(&root)?;
+
+    let plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
+    reconcile_inactive_execution(&root, &plan)?;
 
     if !plan
         .phases
@@ -504,21 +511,69 @@ pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), 
 pub async fn get_run_status(
     path: String,
     state: State<'_, AppState>,
-) -> Result<Option<RunPlan>, AppError> {
+) -> Result<RunQueueStatus, AppError> {
     let root = resolve_root(&state, &path)?;
-    let has_handle = state
+    let active = state
         .run_handles
         .lock()
         .map_err(|_| AppError::LockError)?
         .contains_key(&root);
-    if !has_handle {
+    if !active {
         run_executor::reconcile_running_phases(&root)?;
     }
-    runplan::load(&root)
+    let plan = runplan::load(&root)?;
+    if !active {
+        if let Some(plan) = &plan {
+            reconcile_inactive_execution(&root, plan)?;
+        }
+    }
+    Ok(RunQueueStatus { plan, active })
 }
 
-/// Requeue one parked phase and any phases parked only because they depend on
-/// it. The next `queue_run` starts a fresh unattended turn.
+fn reconcile_inactive_execution(root: &Path, plan: &RunPlan) -> Result<(), AppError> {
+    let loaded = execution::load(root)?;
+    if let Some(next) = reconcile_inactive_execution_state(&loaded.state, plan, Utc::now())? {
+        execution::save(root, &next, loaded.state.revision)?;
+    }
+    Ok(())
+}
+
+fn reconcile_inactive_execution_state(
+    state: &ExecutionState,
+    plan: &RunPlan,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<ExecutionState>, AppError> {
+    let Some(current) = state.current.as_ref() else {
+        return Ok(None);
+    };
+    let Some(phase) = plan
+        .phases
+        .iter()
+        .find(|phase| phase.execution_id == current.id)
+    else {
+        return Ok(None);
+    };
+
+    let next = match phase.status {
+        RunPhaseStatus::Completed => state.complete_current(now, None, false)?,
+        RunPhaseStatus::Parked
+        | RunPhaseStatus::Failed
+        | RunPhaseStatus::Interrupted
+        | RunPhaseStatus::Killed => state.abandon_current(
+            format!(
+                "reconciled inactive run phase \"{}\" in {:?} state",
+                phase.execution_id, phase.status
+            ),
+            now,
+            false,
+        )?,
+        RunPhaseStatus::Queued | RunPhaseStatus::Running => return Ok(None),
+    };
+    Ok(Some(next))
+}
+
+/// Requeue one retryable terminal phase and any phases parked only because
+/// they depend on it. The next `queue_run` starts a fresh unattended turn.
 #[tauri::command]
 pub async fn requeue_run_phase(
     path: String,
@@ -539,12 +594,12 @@ pub async fn requeue_run_phase(
 
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
-    requeue_parked_phase(&mut plan, &execution_id)?;
+    requeue_terminal_phase(&mut plan, &execution_id)?;
     runplan::save(&root, &plan)?;
     Ok(plan)
 }
 
-fn requeue_parked_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), AppError> {
+fn requeue_terminal_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), AppError> {
     let Some(phase) = plan
         .phases
         .iter_mut()
@@ -554,9 +609,15 @@ fn requeue_parked_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), Ap
             "phase \"{execution_id}\" is not part of this run"
         )));
     };
-    if phase.status != RunPhaseStatus::Parked {
+    if !matches!(
+        phase.status,
+        RunPhaseStatus::Parked
+            | RunPhaseStatus::Failed
+            | RunPhaseStatus::Interrupted
+            | RunPhaseStatus::Killed
+    ) {
         return Err(AppError::RunPlan(format!(
-            "phase \"{execution_id}\" is not parked"
+            "phase \"{execution_id}\" is not retryable"
         )));
     }
     phase.status = RunPhaseStatus::Queued;
@@ -1122,6 +1183,82 @@ mod unattended_tests {
         )
     }
 
+    fn active_execution(id: &str) -> ExecutionState {
+        ExecutionState::default()
+            .promote_loop_into_current(
+                id,
+                "Test phase",
+                LoopOrigin {
+                    epic: "test-epic".into(),
+                    prd: "test-prd".into(),
+                    phase: "Phase 1".into(),
+                },
+                Utc::now(),
+            )
+            .expect("test phase should promote")
+    }
+
+    #[test]
+    fn inactive_parked_queue_phase_clears_matching_execution_current() {
+        let mut plan = parked_chain();
+        plan.phases[0].status = RunPhaseStatus::Parked;
+        let state = active_execution("phase-a");
+
+        let reconciled = reconcile_inactive_execution_state(&state, &plan, Utc::now())
+            .expect("reconciliation should succeed")
+            .expect("terminal queue phase should reconcile");
+
+        assert!(reconciled.current.is_none());
+        let history = reconciled.history.last().expect("abandon record");
+        assert_eq!(history.id, "phase-a");
+        assert_eq!(history.outcome, crate::execution::Outcome::Abandoned);
+    }
+
+    #[test]
+    fn inactive_completed_queue_phase_completes_matching_execution_current() {
+        let mut plan = parked_chain();
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        let state = active_execution("phase-a");
+
+        let reconciled = reconcile_inactive_execution_state(&state, &plan, Utc::now())
+            .expect("reconciliation should succeed")
+            .expect("completed queue phase should reconcile");
+
+        assert!(reconciled.current.is_none());
+        assert_eq!(
+            reconciled
+                .history
+                .last()
+                .expect("completion record")
+                .outcome,
+            crate::execution::Outcome::Completed
+        );
+    }
+
+    #[test]
+    fn inactive_queue_reconciliation_never_clears_an_unrelated_manual_loop() {
+        let plan = parked_chain();
+        let state = active_execution("manual-loop");
+
+        let reconciled = reconcile_inactive_execution_state(&state, &plan, Utc::now())
+            .expect("reconciliation should succeed");
+
+        assert!(reconciled.is_none());
+        assert_eq!(state.current.as_ref().unwrap().id, "manual-loop");
+    }
+
+    #[test]
+    fn inactive_queue_reconciliation_keeps_a_queued_current_phase() {
+        let plan = parked_chain();
+        let state = active_execution("phase-a");
+
+        let reconciled = reconcile_inactive_execution_state(&state, &plan, Utc::now())
+            .expect("reconciliation should succeed");
+
+        assert!(reconciled.is_none());
+        assert_eq!(state.current.as_ref().unwrap().id, "phase-a");
+    }
+
     #[test]
     fn retrying_a_parked_phase_requeues_dependents_blocked_only_by_it() {
         let mut plan = parked_chain();
@@ -1132,7 +1269,7 @@ mod unattended_tests {
             phase.park_payload = Some("blocked: depends on parked phase phase-a".into());
         }
 
-        requeue_parked_phase(&mut plan, "phase-a").expect("parked phase should be retryable");
+        requeue_terminal_phase(&mut plan, "phase-a").expect("parked phase should be retryable");
 
         assert!(plan
             .phases
@@ -1152,7 +1289,7 @@ mod unattended_tests {
         plan.phases[2].status = RunPhaseStatus::Parked;
         plan.phases[2].park_payload = Some("independent failure".into());
 
-        requeue_parked_phase(&mut plan, "phase-a").expect("parked phase should be retryable");
+        requeue_terminal_phase(&mut plan, "phase-a").expect("parked phase should be retryable");
 
         assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
         assert_eq!(plan.phases[1].status, RunPhaseStatus::Queued);
@@ -1164,11 +1301,26 @@ mod unattended_tests {
     }
 
     #[test]
-    fn retry_rejects_a_phase_that_is_not_parked() {
+    fn retry_rejects_a_phase_that_is_not_retryable() {
         let mut plan = parked_chain();
-        let error = requeue_parked_phase(&mut plan, "phase-a")
+        let error = requeue_terminal_phase(&mut plan, "phase-a")
             .expect_err("queued phase must not be silently restarted");
-        assert!(error.to_string().contains("is not parked"));
+        assert!(error.to_string().contains("is not retryable"));
+    }
+
+    #[test]
+    fn retry_accepts_a_failed_or_interrupted_phase() {
+        for status in [RunPhaseStatus::Failed, RunPhaseStatus::Interrupted] {
+            let mut plan = parked_chain();
+            plan.phases[0].status = status;
+            plan.phases[0].park_payload = Some("turn interrupted".into());
+
+            requeue_terminal_phase(&mut plan, "phase-a")
+                .expect("failed and interrupted phases should be retryable");
+
+            assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
+            assert!(plan.phases[0].park_payload.is_none());
+        }
     }
 
     #[test]

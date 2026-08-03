@@ -67,12 +67,17 @@ export function RunQueuePanel({
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [runActive, setRunActive] = useState(false);
   const live = useStreamingState((s) => s.byPath[projectPath] ?? null);
 
   const loadPlan = useCallback(async () => {
     try {
       const loaded = await api.getRunStatus(projectPath);
-      setPlan(loaded);
+      setPlan(loaded.plan);
+      setRunActive(loaded.active);
+      if (!loaded.active && useStreamingState.getState().get(projectPath).busy) {
+        useStreamingState.getState().patch(projectPath, { busy: false, retrying: null });
+      }
     } catch (err) {
       console.warn("getRunStatus failed", err);
     }
@@ -189,7 +194,7 @@ export function RunQueuePanel({
     }
   };
 
-  const isRunning = (live?.busy ?? false) || (plan?.phases.some((p) => p.status === "running") ?? false);
+  const isRunning = runActive;
   const hasQueuedPhase = plan?.phases.some((p) => p.status === "queued") ?? false;
   const hasPendingInterview =
     plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
@@ -330,7 +335,7 @@ export function RunQueuePanel({
           </ul>
 
           {live?.streamingBlocks && live.streamingBlocks.length > 0 && (
-            <LiveRunActivity blocks={live.streamingBlocks} busy={live.busy} />
+            <LiveRunActivity blocks={live.streamingBlocks} busy={runActive} />
           )}
         </div>
       )}
@@ -394,7 +399,7 @@ function RunPhaseRow({
             {skipping ? <Loader2 size={10} className="animate-spin" /> : "Skip"}
           </button>
         </span>
-      ) : phase.status === "parked" ? (
+      ) : ["parked", "failed", "interrupted", "killed"].includes(phase.status) ? (
         <button
           onClick={onRetry}
           disabled={retrying}
