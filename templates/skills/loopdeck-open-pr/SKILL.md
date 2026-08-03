@@ -48,8 +48,11 @@ and opens the PR.
 │     — SKIPPED when the invoking prompt states           │
 │       unattended pre-authorization                      │
 ├──────────────────────────────────────────────────────┤
-│  5. Commit uncommitted work + push (gated by Phase 4,  │
-│     or by the stated pre-authorization)                │
+│  5. Stage → secret-scan (unattended only) → commit →   │
+│     push (gated by Phase 4, or by the stated            │
+│     pre-authorization). The scan runs on the staged     │
+│     diff BEFORE commit or push — a hit aborts here,      │
+│     nothing is ever pushed.                              │
 ├──────────────────────────────────────────────────────┤
 │  6. gh pr create --title … --body-file … --web          │
 │     (or --draft, no --web, when pre-authorized)         │
@@ -126,6 +129,23 @@ If `.loopdeck/` does not exist (not a LoopDeck-tracked project), the Summary,
 Decisions, and PRD sections degrade to commit-derived content and an `N/A` PRD —
 the skill still works.
 
+### Unattended pre-authorized runs only: verify report + run metadata
+
+When the invoking prompt states unattended pre-authorization (Phase 4a),
+also gather, from **this same turn's own scrollback** (do not re-run
+anything to produce these — they were already produced earlier this turn):
+
+- The most recent `loopdeck-prd-verifier` report: its `## PRD Verification`
+  per-criterion table and `**Verdict:**` line, copied verbatim.
+- The run metadata the invoking prompt itself stated (phase id, epic, PRD,
+  phase, and the run's token/wall-clock budget caps) — the prompt spells
+  these out explicitly for exactly this purpose. Quote them verbatim; do not
+  recompute or estimate them.
+
+These feed the `## Verify Verdict` and `## Run metadata` sections of Phase 3's
+body template. Skip both sections entirely for an interactively-invoked ship
+with no verify step in this session.
+
 ### Nothing-to-ship guard
 
 If `git log main..HEAD --oneline` is empty **and** `git status --porcelain` is
@@ -167,6 +187,22 @@ docs/epics/<slug>/prd-<name>.md — or `N/A` if not orchestrator-driven>
 ## Test plan
 <stack-inferred checklist from the table below>
 - [ ] Manual: <the PRD's top success criterion, or "verify the feature end-to-end">
+```
+
+**Unattended pre-authorized runs only** (omit both sections entirely for an
+interactive ship with no verify step this session):
+
+```markdown
+## Verify Verdict
+<the `## PRD Verification` per-criterion table and **Verdict:** line from
+this turn's own loopdeck-prd-verifier report, copied verbatim>
+
+## Run metadata
+- Phase: `<execution_id>` — "<PRD phase title>" (<epic> / <PRD> / <phase>)
+- Budgets: <token cap> tokens/phase cap · <phase wall-clock cap>s/phase ·
+  <total-run wall-clock cap>s total-run
+- _(both lines copied verbatim from the invoking prompt's stated run metadata —
+  never invented or recomputed)_
 ```
 
 ### Title
@@ -279,16 +315,36 @@ commit + push + public publish.
 
 ## Phase 5: Commit Uncommitted Work + Push (gated by Phase 4)
 
-Runs **only after** the user confirms the body in Phase 4. Two steps: fold any
-uncommitted work into one coherent commit (message from the verified scope), then
-push. This is where an orchestrated feature's WIP becomes a pushable, PR-able
+Runs **only after** the user confirms the body in Phase 4. Three steps: stage
+and (for an unattended run) secret-scan the staged diff, fold any uncommitted
+work into one coherent commit (message from the verified scope), then push.
+This is where an orchestrated feature's WIP becomes a pushable, PR-able
 branch tip.
 
-### 5a. Stage + commit (only if the working tree is dirty)
+### 5a. Stage, scan (unattended only), commit (only if the working tree is dirty)
 
 ```bash
 # Stage the whole feature — the body the user just confirmed lists this scope.
 git add -A
+
+# Unattended pre-authorized runs only (Phase 4a). Scan the STAGED diff for
+# credential-shaped content now, before it is committed or pushed — this is
+# the earliest point a hit can still be stopped instead of already sitting on
+# a remote. A hit is a hard stop: abort the whole ship step, leave the phase
+# parked, and report the offending line. Interactive runs skip this — Phase
+# 4's human confirmation is the review gate instead, and the body/diff are
+# already on screen for the user to catch.
+if <this run is unattended pre-authorized (Phase 4a)>; then
+  loopdeck secret-scan --path .
+  scan_status=$?
+  if [ "$scan_status" -eq 1 ]; then
+    echo "secret-scan: possible credential found in the staged diff — aborting the unattended ship, nothing pushed" >&2
+    exit 1
+  elif [ "$scan_status" -ne 0 ]; then
+    echo "secret-scan: could not run (see stderr above) — aborting the unattended ship rather than push unscanned" >&2
+    exit 1
+  fi
+fi
 
 # Commit only if something is staged; skip cleanly if the tree was already clean.
 if ! git diff --cached --quiet; then
@@ -301,7 +357,10 @@ fi
   identically.
 - If the working tree was already clean (everything committed in earlier phases),
   `git diff --cached --quiet` is true and the commit is skipped — Phase 5 just
-  pushes the existing commits.
+  scans (if unattended) and pushes the existing commits. `git diff --cached`
+  is empty in that case, so `loopdeck secret-scan` scans zero lines and passes
+  trivially — the already-committed history was never re-scanned here, only
+  what this skill itself is about to add.
 - **No squash, no history rewrite.** Existing WIP commits on the branch are
   pushed as-is. The human picks the merge strategy (squash-merge vs. merge) at
   merge time; this skill never rewrites published history. (If there are many
@@ -358,16 +417,10 @@ Report the URL `gh` returned to the user.
 If Phase 4a found explicit pre-authorization, open the PR as a **draft**,
 headlessly, instead:
 
-Before pushing, scan the staged diff. A match is a hard stop: do not push or
-create the PR; report the matching line(s) and leave the unattended phase
-parked for human review. v1 deliberately uses a small, visible pattern set:
-
-```bash
-git diff --cached -- . | rg -n '(AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|(?i:api[_-]?key|secret|token)\s*[:=]\s*["'"''][^"'"'']{12,})'
-```
-
-If the command exits `0`, abort the ship step. Exit `1` means no match and it
-is safe to continue. This is a guardrail, not a substitute for review.
+The staged-diff secret scan already ran in Phase 5a, **before** the commit and
+the push — by this point the branch is already on the remote, so a scan here
+would be too late to stop anything. There is nothing left to check; proceed
+straight to creating the draft PR.
 
 ```bash
 tmpfile="$(mktemp)"
@@ -429,6 +482,14 @@ created and reported in Phase 6.
   owns the stage → commit → push → publish tail so the commit message is
   authored from the verified scope and the WIP is grouped into one coherent
   commit before push.
+- **The secret scan runs before anything is pushed, not after.** For an
+  unattended pre-authorized run, Phase 5a runs `loopdeck secret-scan` on the
+  staged diff immediately after `git add -A` and before the commit — the
+  earliest point a hit can still be stopped. A match aborts the whole ship
+  step (exit non-zero, nothing committed further, nothing pushed) rather than
+  being caught after the branch is already on the remote. Interactive runs
+  don't run this scan — the human reviewing the Phase 4 body is the gate
+  instead.
 - **No squash, no history rewrite, no force-push.** Existing WIP commits are
   pushed as-is; the human chooses the merge strategy at merge time. A rejected
   push stops the skill — it is never forced past.

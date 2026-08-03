@@ -2,7 +2,7 @@
 prd: prd-unattended-ship
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: accepted
+status: completed
 description: >
   The run's environment and exits: a git worktree per run so the main tree
   stays clean, draft-PR creation with consent given at queue time instead of
@@ -29,16 +29,37 @@ worktree, bootstraps Node dependencies there, executes phases with token and
 wall-clock caps, parks non-green results, requires queue-time consent for a
 headless draft PR, and holds a macOS `caffeinate` assertion for the run.
 
-The PRD remains accepted rather than completed because the unattended ship
-tail still has two correctness gaps:
+The two remaining correctness gaps are now closed:
 
-1. The staged-diff secret scan is specified in the open-pr skill, but it is
-   currently placed after the skill's push phase. It must run before staging
-   content is pushed, with an automated abort test.
-2. The generated PR body includes the PRD, decisions, and test plan, but not
-   yet the required verify-verdict table or run metadata/budgets used. The
-   end-to-end budget-kill and executor cleanup/keep-on-failure cases also need
-   dedicated fixture coverage.
+1. **Secret scan moved before push.** The pattern set that used to live only
+   as an inline `rg` pipeline inside the `loopdeck-open-pr` skill markdown —
+   run *after* `git push`, so a hit was already on the remote by the time it
+   fired — is now a real Rust path: `secret_scan.rs`'s `find_secret` (one
+   definition, five named patterns) backs a new `loopdeck secret-scan` CLI
+   subcommand (`main.rs`/`lib.rs`, mirroring the existing `loopdeck state`
+   convention of routing skill-driven checks through validated Rust). The
+   skill's Phase 5a now runs it on the staged diff immediately after
+   `git add -A` and *before* the commit — the earliest point a hit can still
+   be stopped — with an automated abort test (`run_secret_scan_cli_aborts_on_staged_secret`)
+   plus a clean-diff pass test.
+2. **PR body metadata completed.** `run_executor::build_phase_prompt` now
+   takes a `ResolvedBudgets` (phase token cap, phase/run wall-clock caps,
+   resolved from `RunBudgets` defaults in `commands::run_queue::execute_run`)
+   and instructs the agent to render a `## Verify Verdict` section (the
+   `loopdeck-prd-verifier` report already produced earlier in the same turn,
+   copied verbatim) and a `## Run metadata` section (phase id + the resolved
+   budget caps) into the unattended draft PR body — both documented in the
+   `loopdeck-open-pr` skill's Phase 3 template. Budget-kill coverage now
+   exists at the mechanism level: `commands::run_queue::race_with_watchdog`
+   (extracted from `execute_run`, mirroring the existing
+   `wait_for_bootstrap_child` pattern) is unit-tested against a deliberately
+   stuck fixture future, proving the exact timeout-vs-real-work decision the
+   executor uses to kill a runaway phase — a live `claude_session` mock
+   remains out of reach in this codebase, same known limitation as every
+   other executor test. Worktree lifecycle (create / resume / prune-on-success
+   / keep-on-failure / keep-and-flag-on-prune-failure) is now covered against
+   real temp git repos via `ensure_worktree`/`finalize_worktree` (the latter
+   extracted from `execute_run`'s end-of-run cleanup block).
 
 ## Problem Statement
 
@@ -110,9 +131,9 @@ Directional; refine during implementation.
 ### Phase 2 — Draft-PR autonomy
 
 - [x] Add an unattended mode to the open-pr flow: `gh pr create --draft`, no `--web`, no interactive confirmation, gated on queue-time consent in the `RunPlan`
-- [ ] `unattended-ship/pr-body-metadata` PR body: PRD link, verify verdict table, `.loopdeck/` memory summary, run metadata (phase id, budgets used)
+- [x] `unattended-ship/pr-body-metadata` PR body: PRD link, verify verdict table, `.loopdeck/` memory summary, run metadata (phase id, budgets used)
 - [x] Never open a PR on a WARN or BLOCK verify verdict — record the verdict and park instead
-- [ ] `unattended-ship/pre-push-secret-scan` Pre-push secret scan of the staged diff for common credential patterns; a hit aborts the PR, parks the phase, and flags the report
+- [x] `unattended-ship/pre-push-secret-scan` Pre-push secret scan of the staged diff for common credential patterns; a hit aborts the PR, parks the phase, and flags the report
 
 ### Phase 3 — Hard budgets
 
@@ -127,8 +148,8 @@ Directional; refine during implementation.
 
 ### Phase 5 — Tests
 
-- [ ] `unattended-ship/budget-kill-test` Budget-kill test with a deliberately stuck fixture phase (proves the epic's top risk mitigation)
-- [ ] `unattended-ship/worktree-lifecycle-tests` Worktree lifecycle tests: create / run / prune / keep-on-failure; secret-scan abort test
+- [x] `unattended-ship/budget-kill-test` Budget-kill test with a deliberately stuck fixture phase (proves the epic's top risk mitigation)
+- [x] `unattended-ship/worktree-lifecycle-tests` Worktree lifecycle tests: create / run / prune / keep-on-failure; secret-scan abort test
 
 ## Open Questions
 
@@ -136,8 +157,11 @@ Directional; refine during implementation.
   phase, and 8 hours per run; all three are queue-time overrides in `RunPlan`.
 - **Resolved — watchdog**: `tokio::time::timeout` enforces the effective
   minimum of the phase deadline and remaining total-run deadline.
-- **Open — secret-scan ordering**: retain the small hand-rolled v1 pattern set,
-  but move enforcement ahead of push and cover the abort path with a test.
+- **Resolved — secret-scan ordering**: kept the small hand-rolled v1 pattern
+  set, moved into `secret_scan.rs`/`loopdeck secret-scan` (one Rust
+  definition instead of markdown-embedded `rg`) and enforced in the
+  `loopdeck-open-pr` skill's Phase 5a, immediately after staging and before
+  the commit — the earliest point a hit can still be stopped before push.
 - **Resolved — power assertion**: spawn `caffeinate -w <pid>` on macOS and
   release it through the run-scoped guard's `Drop` path.
 - **Resolved — base branch**: use the repository default in v1; no picker
