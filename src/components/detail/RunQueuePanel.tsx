@@ -56,7 +56,7 @@ export function RunQueuePanel({
 }: RunQueuePanelProps) {
   const [plan, setPlan] = useState<RunPlan | null>(null);
   const [stallPolicy, setStallPolicy] = useState<StallPolicy>("continue_independent");
-  const [draftPrAuthorized, setDraftPrAuthorized] = useState(false);
+  const [draftPrAuthorized, setDraftPrAuthorized] = useState(true);
   const [phaseTokenCap, setPhaseTokenCap] = useState("500000");
   const [phaseMinutes, setPhaseMinutes] = useState("90");
   const [runHours, setRunHours] = useState("8");

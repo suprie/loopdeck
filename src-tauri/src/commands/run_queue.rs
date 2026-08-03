@@ -821,6 +821,20 @@ async fn execute_run(
                         plan.phases[idx].status = RunPhaseStatus::Parked;
                         plan.phases[idx].park_payload = Some(reason.into());
                         plan.environment.worktree_kept = true;
+                        for blocked_id in
+                            run_executor::phases_blocked_by_park(&plan, &execution_id, plan.stall_policy)
+                        {
+                            if let Some(p) = plan
+                                .phases
+                                .iter_mut()
+                                .find(|p| p.execution_id == blocked_id)
+                            {
+                                p.status = RunPhaseStatus::Parked;
+                                p.park_payload = Some(format!(
+                                    "blocked: depends on parked phase \"{execution_id}\""
+                                ));
+                            }
+                        }
                         runplan::save(root, &plan)?;
                         let loaded = execution::load(root)?;
                         let abandoned =
@@ -828,7 +842,7 @@ async fn execute_run(
                                 .state
                                 .abandon_current(reason, chrono::Utc::now(), false)?;
                         execution::save(root, &abandoned, loaded.state.revision)?;
-                        return Ok(());
+                        continue;
                     };
                     plan.phases[idx].status = RunPhaseStatus::Completed;
                     plan.phases[idx].park_payload = Some(format!("draft PR: {url}"));
@@ -850,6 +864,20 @@ async fn execute_run(
                     plan.phases[idx].status = RunPhaseStatus::Parked;
                     plan.phases[idx].park_payload = Some(reason.clone());
                     plan.environment.worktree_kept = true;
+                    for blocked_id in
+                        run_executor::phases_blocked_by_park(&plan, &execution_id, plan.stall_policy)
+                    {
+                        if let Some(p) = plan
+                            .phases
+                            .iter_mut()
+                            .find(|p| p.execution_id == blocked_id)
+                        {
+                            p.status = RunPhaseStatus::Parked;
+                            p.park_payload = Some(format!(
+                                "blocked: depends on parked phase \"{execution_id}\""
+                            ));
+                        }
+                    }
                     runplan::save(root, &plan)?;
 
                     let loaded = execution::load(root)?;
@@ -858,7 +886,7 @@ async fn execute_run(
                             .state
                             .abandon_current(reason, chrono::Utc::now(), false)?;
                     execution::save(root, &abandoned, loaded.state.revision)?;
-                    return Ok(());
+                    continue;
                 }
             }
             Err(AppError::TurnParked(detail)) => {
