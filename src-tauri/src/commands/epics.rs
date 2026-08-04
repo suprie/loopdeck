@@ -112,6 +112,26 @@ pub async fn toggle_prd_loop(
     Ok(now_checked)
 }
 
+/// Assign a fresh stable ID to an id-less PRD checklist item, rewriting only
+/// that line. Rejects (does not overwrite) if the target already has an id.
+/// Returns the assigned id.
+#[tauri::command]
+pub async fn assign_loop_id(
+    path: String,
+    epic_slug: String,
+    prd_filename: String,
+    loop_title: String,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    debug!("assign_loop_id called for path: {path}, epic: {epic_slug}, prd: {prd_filename}");
+
+    // Resolve the canonical, registered root (PRD FR3). `epic_slug` /
+    // `prd_filename` are additionally sandboxed to `docs/epics/` inside
+    // `epic::assign_loop_id` via the shared `paths::resolve_within` helper.
+    let root = resolve_root(&state, &path)?;
+    epic::assign_loop_id(&root, &epic_slug, &prd_filename, &loop_title)
+}
+
 /// Read a spec file (epic README or PRD) under `docs/epics/`.
 /// `rel_path` is relative to `docs/epics/` (e.g. `<slug>/prd-x.md`).
 #[tauri::command]

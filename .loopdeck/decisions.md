@@ -2,6 +2,20 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-04 — `prd-assign-loop-id` complete: real-file round-trip test added, frontend e2e stays an honest gap
+
+- **Status**: accepted
+- **Context**: Phase 3's three items were the PRD's last. Phase 1's own tests (`test_generate_loop_id_no_collision`/`_one_collision`/`_multiple_collisions`, `test_assign_loop_id_rejects_when_already_has_id`, `test_assign_loop_id_rewrites_line_preserving_rest_unchecked`/`_preserves_checked_state`/`_collision_scoped_to_epic`) already covered collision handling, rejection, and round-trip preservation — but only against synthetic fixtures from `create_temp_repo`/`write_prd`, not "this repo's own real PRD files" as `round-trip-tests` literally asks. For `frontend-check`, this repo's only frontend test infra (`npm run test:frontend`, Node's built-in `node:test`) has no DOM (`jsdom`/`happy-dom`/React Testing Library absent from `package.json` and `node_modules`), and no `.claude/launch.json`/IPC mock harness exists — so a real component render+click test isn't achievable without adding a new dependency the PRD didn't call for.
+- **Consequences**: Added one new test, `test_assign_loop_id_round_trips_against_real_repo_prd` (`src-tauri/src/epic.rs:2229`), which round-trips `assign_loop_id` against the real, tracked `docs/epics/optimization/prd-memory-hygiene.md` (copied into a temp dir so the tracked file is never mutated) and asserts byte-for-byte equality outside the one target line. `collision-tests` and the round-trip half of `round-trip-tests` are checked on the strength of Phase 1's existing tests alone — no redundant tests added there. `frontend-check` is checked on `tsc --noEmit` clean (its own literal first-half wording) plus static verification that `EpicsPanel.tsx`'s "Assign ID" button wiring calls `api.assignLoopId` with the right args — not a live or mocked click-through, which remains genuinely out of reach in this environment, same as Phase 2 already documented. PRD frontmatter `status: proposed` → `completed`, matching this epic's own sibling-PRD convention (`prd-run-queue`/`prd-wake-up`/`prd-unattended-ship`/`prd-safety-prereqs` all use `completed`).
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 `assign-loop-id/collision-tests` + `round-trip-tests` + `frontend-check` entry) has the full breakdown.
+
+## 2026-08-04 — `assign-loop-id`: rewrite scoped to one line, collision check scoped to one epic
+
+- **Status**: accepted
+- **Context**: `prd-assign-loop-id.md` Phase 1's remaining two items (`rewrite-checklist-line`, `reject-already-id-loops`) are two facets of the same `assign_loop_id` command, not independently buildable — implemented together. Two judgment calls the PRD left open: how wide to scope `generate_loop_id`'s collision check, and whether to normalize the checkbox token or preserve it byte-for-byte.
+- **Consequences**: Collision check scoped to the target loop's own epic (every id `parse_epics` finds under that `epic_slug`), not repo-wide — ids are already `<epic_slug>/<slug>`-namespaced, so cross-epic collisions can't happen and a repo-wide scan would just add cost with no new safety. The rewrite inserts the backtick id token immediately after the matched `- [ ] `/`- [x] `/`- [X] ` prefix and leaves everything else on that line untouched (no re-serialization of the checkbox or title), satisfying the PRD's "byte-for-byte" requirement by construction rather than by reconstructing the line.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 `assign-loop-id/rewrite-checklist-line` entry) has the full file/symbol breakdown.
+
 ## 2026-08-04 — `wake-up/add-tauri-plugin`: notification plugin scaffold, Rust-only
 
 - **Status**: accepted
@@ -119,3 +133,14 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: proposed
 - **Context**: AI session active on LoopDeck development.
 
+## 2026-08-04 — `assign-loop-id/generate-collision-free-slug` promoted and implemented
+- **Status**: accepted
+- **Context**: First loop of the newly-drafted `docs/epics/overnight-orchestration/prd-assign-loop-id.md` (Phase 1), promoted into a background worktree session rather than worked inline in this conversation.
+- **Consequences**: New pure `epic::generate_loop_id(epic_slug, title, existing_ids) -> String` + private `kebab_case` helper (`src-tauri/src/epic.rs`) — kebab-cases a loop title, scopes it `<epic_slug>/<title-slug>`, appends `-2`/`-3`/... on collision against a caller-supplied id list. `#[allow(dead_code)]` on both — no production caller yet; the `assign_loop_id` IPC command that will call this is a separate, unpromoted Phase 1 item. 4 new tests (no collision, one collision, multiple collisions, real kebab-casing of punctuation/spaces/mixed case). The background session ran in an isolated worktree branched from git history, so it never saw this session's still-uncommitted PRD file and reconstructed a stub from the task prompt alone — its code changes were verified correct and reapplied here against the real, full PRD (which now has this one item checked `[x]`); its own worktree/PRD stub was left untouched, not merged.
+- **Detail**: Gates green in this worktree: fmt/clippy(lib, `-D warnings`)/test(580 passed, +4, 8 ignored). No frontend change.
+
+## 2026-08-04 — `assign-loop-id/picker-action` + `assign-loop-id/refresh-on-success` promoted and implemented
+- **Status**: accepted
+- **Context**: `prd-assign-loop-id.md` Phase 2's two items (`picker-action`, `refresh-on-success`) are the frontend action and its success-refresh behavior — not independently buildable, since a picker action that doesn't refresh state would leave the checkbox stuck disabled after a successful assignment. Implemented together in a worktree branched from `claude/assign-loop-id-generate-slug` (PR #65, CI green, not yet merged), which already carried Phase 1's backend in full.
+- **Consequences**: New `api.assignLoopId` wrapper (`src/lib/tauri.ts`) and an "Assign ID" button in `EpicsPanel.tsx`'s picker row, guarded by the same `!done && noId` condition the disabled picker checkbox and promote button already use. On success it refetches epics state via the existing `load()` (the same pattern `handlePromote` uses for a structural change, versus `handleToggle`'s local-patch pattern for a same-shape boolean flip) — `loop.id` going from `null` to a string unlocks the picker checkbox automatically, no manual reload. Errors surface via `toast.error`, matching the existing `handlePromote`/`handleToggle` pattern.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 `assign-loop-id/picker-action` entry) has the full file/symbol breakdown, gate results, and an explicit note that UI verification was tsc/build only — no live click-through was practical in this environment (Tauri desktop app, no browser-mode IPC mock).

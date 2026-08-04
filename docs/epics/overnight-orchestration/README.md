@@ -106,13 +106,17 @@ Out of scope (deferred or parked):
 | [prd-run-queue.md](./prd-run-queue.md) | `RunPlan` data model + persistence, sequential queue executor, pre-flight interview, stall-policy runtime, phase-picker UI |
 | [prd-unattended-ship.md](./prd-unattended-ship.md) | Worktree-per-run lifecycle, draft-PR autonomy with queue-time consent, hard token/wall-clock budgets, keep-awake |
 | [prd-wake-up.md](./prd-wake-up.md) | `tauri-plugin-notification`, morning report view (verdicts, PR links, parked-question inbox, overnight audit slice) |
+| [prd-assign-loop-id.md](./prd-assign-loop-id.md) | One-click stable-ID assignment for a loop that lacks one, so it can enter the picker checkbox's existing `execution_id` gate |
 
 **Delivery order is strict — index order, each PRD depends on artifacts of
 the previous.** `prd-safety-prereqs` gates everything (ADR-6);
 `prd-unattended-ship`'s draft-PR and budget hooks assume `prd-run-queue`'s
 executor and `RunPlan` exist; `prd-wake-up`'s report reads the `RunPlan`,
 park payloads, and budget usage from both. Do not start a PRD before the
-previous one completes.
+previous one completes. **`prd-assign-loop-id` is the exception** — it only
+touches the picker's pre-queue gate (`EpicsPanel.tsx`, `epic.rs`), not the
+`RunPlan`/executor artifacts the strict chain above governs, so it can be
+picked up independently of where the other four stand.
 
 ## Architecture Decisions
 
