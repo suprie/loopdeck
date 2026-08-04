@@ -116,7 +116,7 @@ pub struct RunEnvironment {
 /// execution ID ([`crate::epic::PrdLoop::id`], the same ID `execution.rs`
 /// tracks) — never a free-text phase name, so a PRD rename after queuing
 /// can't silently detach the run from its phase.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RunPhase {
     pub execution_id: String,
     #[serde(default = "default_status")]
@@ -205,6 +205,114 @@ pub fn save_to_path(path: &Path, plan: &RunPlan) -> Result<(), AppError> {
     let yaml = serde_yaml::to_string(plan)?;
     persist::atomic_write(path, &yaml)?;
     Ok(())
+}
+
+// ── Morning report (prd-wake-up Phase 2) ────────────────────────────────────
+
+/// Derived verdict label for one phase, extracted from its terminal state
+/// without re-running the verifier. The morning report presents, never re-judges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PhaseVerdict {
+    Pass,
+    Warn,
+    Block,
+    Killed,
+    Failed,
+    Parked,
+    Running,
+}
+
+/// One row in the morning per-phase verdict table. Derived from the RunPhase
+/// on-disk state; no new storage.
+#[derive(Debug, Clone, Serialize)]
+pub struct PhaseReportEntry {
+    pub execution_id: String,
+    pub status: RunPhaseStatus,
+    pub verdict: PhaseVerdict,
+    /// Extracted from `park_payload` for Completed phases that shipped a draft PR.
+    pub draft_pr_url: Option<String>,
+    /// The park/kill/fail reason, verbatim from `park_payload`.
+    pub reason: Option<String>,
+    pub token_usage: u64,
+    pub wall_clock_secs: u64,
+}
+
+/// Audit summary for the overnight run window (prd-wake-up Phase 2 P1).
+/// Summarized auto-allow count; floor denials itemized.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AuditSlice {
+    /// How many tool calls were auto-allowed during the run window.
+    pub auto_allow_count: u64,
+    /// Floor denials, each as `"tool_name: input"`.
+    pub floor_denials: Vec<String>,
+}
+
+/// The morning report read model — joins RunPlan with derived per-phase
+/// verdicts and the overnight audit slice. No new storage.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunReport {
+    pub plan: RunPlan,
+    pub phases: Vec<PhaseReportEntry>,
+    pub audit: AuditSlice,
+}
+
+impl RunReport {
+    /// Build the read model from the on-disk run plan. Verdict labels are
+    /// derived from phase status + `park_payload` markers.
+    pub fn from_plan(plan: RunPlan, audit: AuditSlice) -> Self {
+        let phases = plan
+            .phases
+            .iter()
+            .map(|p| {
+                let (verdict, draft_pr_url) = derive_verdict(p);
+                PhaseReportEntry {
+                    execution_id: p.execution_id.clone(),
+                    status: p.status,
+                    verdict,
+                    draft_pr_url,
+                    reason: p.park_payload.clone(),
+                    token_usage: p.token_usage,
+                    wall_clock_secs: p.wall_clock_secs,
+                }
+            })
+            .collect();
+        Self {
+            plan,
+            phases,
+            audit,
+        }
+    }
+}
+
+/// Derive a human-readable verdict and optional PR URL from a RunPhase's
+/// terminal state. Pure — only reads existing fields.
+fn derive_verdict(p: &RunPhase) -> (PhaseVerdict, Option<String>) {
+    match p.status {
+        RunPhaseStatus::Completed => {
+            let url = p
+                .park_payload
+                .as_deref()
+                .and_then(|payload| payload.strip_prefix("draft PR: "))
+                .map(|s| s.to_string());
+            (PhaseVerdict::Pass, url)
+        }
+        RunPhaseStatus::Parked => {
+            let payload = p.park_payload.as_deref().unwrap_or_default();
+            if payload.contains("verdict: BLOCK") {
+                (PhaseVerdict::Block, None)
+            } else if payload.contains("verdict: WARN") {
+                (PhaseVerdict::Warn, None)
+            } else {
+                (PhaseVerdict::Parked, None)
+            }
+        }
+        RunPhaseStatus::Killed => (PhaseVerdict::Killed, None),
+        RunPhaseStatus::Failed => (PhaseVerdict::Failed, None),
+        RunPhaseStatus::Running => (PhaseVerdict::Running, None),
+        RunPhaseStatus::Queued => (PhaseVerdict::Parked, None), // never reached, but derive
+        RunPhaseStatus::Interrupted => (PhaseVerdict::Failed, None),
+    }
 }
 
 #[cfg(test)]
@@ -311,5 +419,145 @@ phases:
         assert_eq!(loaded, plan);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Morning report fixture tests (prd-wake-up Phase 3) ──────────────────
+
+    fn fixture_plan() -> RunPlan {
+        RunPlan {
+            id: "test-run-1".into(),
+            project: PathBuf::from("/repo"),
+            created: chrono::Utc::now(),
+            consent: RunConsent {
+                draft_pr_authorized: true,
+            },
+            budgets: RunBudgets::default(),
+            environment: RunEnvironment::default(),
+            wall_clock_secs: 3600,
+            stall_policy: StallPolicy::ContinueIndependent,
+            phases: vec![
+                // Completed phase with draft PR
+                RunPhase {
+                    execution_id: "epic/prd/phase-completed".into(),
+                    status: RunPhaseStatus::Completed,
+                    park_payload: Some("draft PR: https://github.com/user/repo/pull/42".into()),
+                    token_usage: 125000,
+                    wall_clock_secs: 600,
+                    ..Default::default()
+                },
+                // Parked phase with WARN verdict
+                RunPhase {
+                    execution_id: "epic/prd/phase-warn".into(),
+                    status: RunPhaseStatus::Parked,
+                    park_payload: Some("verify verdict: WARN".into()),
+                    token_usage: 89000,
+                    wall_clock_secs: 420,
+                    ..Default::default()
+                },
+                // Parked phase with BLOCK verdict
+                RunPhase {
+                    execution_id: "epic/prd/phase-block".into(),
+                    status: RunPhaseStatus::Parked,
+                    park_payload: Some("verify verdict: BLOCK".into()),
+                    token_usage: 67000,
+                    wall_clock_secs: 310,
+                    ..Default::default()
+                },
+                // Killed phase (token budget)
+                RunPhase {
+                    execution_id: "epic/prd/phase-killed".into(),
+                    status: RunPhaseStatus::Killed,
+                    park_payload: Some("phase token budget exceeded".into()),
+                    token_usage: 500000,
+                    wall_clock_secs: 1800,
+                    ..Default::default()
+                },
+                // Failed phase
+                RunPhase {
+                    execution_id: "epic/prd/phase-failed".into(),
+                    status: RunPhaseStatus::Failed,
+                    park_payload: Some(
+                        "no verify verdict found in the turn's final response".into(),
+                    ),
+                    token_usage: 200000,
+                    wall_clock_secs: 900,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn report_derives_correct_verdicts() {
+        let plan = fixture_plan();
+        let report = RunReport::from_plan(plan, AuditSlice::default());
+
+        assert_eq!(report.phases.len(), 5);
+
+        // Completed → Pass with PR URL
+        assert_eq!(report.phases[0].verdict, PhaseVerdict::Pass);
+        assert_eq!(
+            report.phases[0].draft_pr_url,
+            Some("https://github.com/user/repo/pull/42".into())
+        );
+
+        // Parked with WARN → Warn
+        assert_eq!(report.phases[1].verdict, PhaseVerdict::Warn);
+        assert!(report.phases[1].draft_pr_url.is_none());
+
+        // Parked with BLOCK → Block
+        assert_eq!(report.phases[2].verdict, PhaseVerdict::Block);
+
+        // Killed → Killed
+        assert_eq!(report.phases[3].verdict, PhaseVerdict::Killed);
+        assert!(report.phases[3]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("token budget"));
+
+        // Failed → Failed
+        assert_eq!(report.phases[4].verdict, PhaseVerdict::Failed);
+    }
+
+    #[test]
+    fn report_preserves_token_and_wall_clock() {
+        let plan = fixture_plan();
+        let report = RunReport::from_plan(plan, AuditSlice::default());
+
+        assert_eq!(report.phases[0].token_usage, 125000);
+        assert_eq!(report.phases[0].wall_clock_secs, 600);
+        assert_eq!(report.phases[3].token_usage, 500000);
+        assert_eq!(report.phases[3].wall_clock_secs, 1800);
+    }
+
+    #[test]
+    fn report_derives_parked_verdict_for_generic_parked_phase() {
+        let phase = RunPhase {
+            execution_id: "x".into(),
+            status: RunPhaseStatus::Parked,
+            park_payload: Some("turn deadline elapsed".into()),
+            ..Default::default()
+        };
+        let (verdict, url) = derive_verdict(&phase);
+        assert_eq!(verdict, PhaseVerdict::Parked);
+        assert!(url.is_none());
+    }
+
+    #[test]
+    fn report_pass_without_pr_url_when_consent_missing() {
+        // Completed with no draft PR in payload → should still be Pass but no URL
+        let phase = RunPhase {
+            execution_id: "x".into(),
+            status: RunPhaseStatus::Completed,
+            park_payload: Some(
+                "green verification passed, but queue-time consent for an unattended draft PR is required"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let (verdict, url) = derive_verdict(&phase);
+        assert_eq!(verdict, PhaseVerdict::Pass);
+        assert!(url.is_none());
     }
 }

@@ -100,3 +100,18 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Queue execution previously discarded its live stream, persisted transcripts under an isolated worktree, and inherited project manual-approval mode, making safe unattended work invisible or silently parked.
 - **Consequences**: Run phases now force autonomous policy within the existing destructive safety floor, broadcast live events app-wide, persist project-visible transcripts, expose parked reasons and approval cards, and support dependency-aware unattended retry.
+
+## 2026-08-03 — `prd-unattended-ship` reconciled complete: work merged via PR #56, milestone row was stale
+- **Status**: accepted
+- **Context**: An orchestrator dispatch ("implement `prd-unattended-ship`") fired on the milestone checklist row reading "not started", but the work was already complete and merged: all 5 phases shipped from the `prd-unattended-ship-phase2-5` worktree via PR #56 (`631369f`), the PRD frontmatter reads `status: completed` with every phase `[x]`, and the same-day decisions already record the secret-scan CLI, PR-body metadata, and budget-kill/worktree-lifecycle tests. The stale row is the same "checklist says undone, work actually shipped" pattern this repo has reconciled repeatedly — the exact trap `prd-skill-split`'s near-miss warned about, caught here by checking `decisions.md` and the merged branch before writing any code.
+- **Consequences**: Verified the merged implementation against the PRD's 5 phases on `main` (symbols confirmed: `secret_scan.rs` + `loopdeck secret-scan` CLI in `main.rs`/`lib.rs`, `run_executor::ResolvedBudgets`, `commands::run_queue::race_with_watchdog`/`WatchdogOutcome`, `ensure_worktree`/`finalize_worktree` + lifecycle tests, `git.rs::worktree_add`/`worktree_remove`, `/usr/bin/caffeinate` guard), marked the milestone row `[x]`, and refreshed `## Current` to reflect `prd-wake-up` now in progress — its first run was attempted 2026-08-03 per `execution.yaml`/`run-plan.yaml` (first phases parked/failed, remaining queued) even though the PRD is still `proposed`. No code changes — reconciliation only.
+
+## 2026-08-03 — Backend run handles are authoritative for queue activity
+- **Status**: accepted
+- **Context**: A missed terminal stream event left the frontend busy while a terminal queue phase remained current in execution state, preventing any retry or restart.
+- **Consequences**: Run status now reports the real backend handle, reconciles only matching inactive terminal queue phases, clears stale live UI state, and permits unattended retry for parked, failed, interrupted, or killed phases.
+
+## 2026-08-04 — Session heartbeat
+- **Status**: proposed
+- **Context**: AI session active on LoopDeck development.
+

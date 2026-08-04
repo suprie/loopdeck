@@ -2,7 +2,7 @@
 prd: prd-wake-up
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: proposed
+status: completed
 description: >
   The morning half of the accountability story: OS notifications when the run
   finishes, dies, or fully parks, and a morning report view with per-phase
@@ -72,17 +72,17 @@ Directional; refine during implementation.
 ### Phase 1 — Notifications
 
 - [x] `wake-up/add-tauri-plugin` Add `tauri-plugin-notification` with its capability entry
-- [ ] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked; clicking focuses the report view
+- [x] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked; notification click focuses the report view
 
 ### Phase 2 — Morning report
 
-- [ ] `wake-up/report-per-phase-verdict` Report view: per-phase verdict table (verify result, PR link, park/kill reason, token + wall-clock usage) via a `get_run_report` read-model command
-- [ ] `wake-up/parked-question-index` Parked-question inbox: render pending payloads as the existing question cards; answering pins the answer and requeues the phase
-- [ ] `wake-up/overnight-audit-slice` Overnight audit slice: auto-allowed decisions and floor denials during the run window, from the existing audit path
+- [x] `wake-up/report-per-phase-verdict` Report view: per-phase verdict table (verify result, PR link, park/kill reason, token + wall-clock usage) via a `get_run_report` read-model command
+- [x] `wake-up/parked-question-index` Parked-question inbox: render pending payloads as the existing question cards; answering pins the answer and requeues the phase
+- [x] `wake-up/overnight-audit-slice` Overnight audit slice: auto-allowed decisions and floor denials during the run window, from the existing audit path
 
 ### Phase 3 — Tests
 
-- [ ] `wake-up/report-rendering` `npx tsc --noEmit` green; report rendering against a fixture run plan covering completed, parked, and killed rows
+- [x] `wake-up/report-rendering` `npx tsc --noEmit` green; report rendering against a fixture run plan covering completed, parked, and killed rows
 
 ## Open Questions
 

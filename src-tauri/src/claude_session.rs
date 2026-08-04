@@ -214,7 +214,7 @@ fn user_turn_json(text: &str, attachments: &[Attachment]) -> serde_json::Value {
     })
 }
 
-fn turn_deadline_expired_error(pending_detail: &str) -> AppError {
+fn turn_deadline_expired_error(pending_detail: &str, questions_json: Option<String>) -> AppError {
     const MAX_DETAIL_CHARS: usize = 200;
     let detail: String = if pending_detail.chars().count() > MAX_DETAIL_CHARS {
         format!(
@@ -227,12 +227,15 @@ fn turn_deadline_expired_error(pending_detail: &str) -> AppError {
     } else {
         pending_detail.to_string()
     };
-    AppError::TurnParked(format!(
-        "turn deadline ({} minutes) elapsed while parked for a decision — the \
-         project lock was released; the live session survived, so re-send to \
-         resume. Pending: {detail}",
-        TURN_DEADLINE.as_secs() / 60
-    ))
+    AppError::TurnParked {
+        detail: format!(
+            "turn deadline ({} minutes) elapsed while parked for a decision — the \
+             project lock was released; the live session survived, so re-send to \
+             resume. Pending: {detail}",
+            TURN_DEADLINE.as_secs() / 60
+        ),
+        parked_questions_json: questions_json,
+    }
 }
 
 /// Read one newline-terminated line from `reader` into `buf`, bounding peak
@@ -906,9 +909,10 @@ impl ClaudeSession {
             }
             ParkOutcome::Expired => {
                 self.write_interrupt_control_request().await;
-                return Err(turn_deadline_expired_error(&format!(
-                    "plan approval — {plan}"
-                )));
+                return Err(turn_deadline_expired_error(
+                    &format!("plan approval — {plan}"),
+                    None,
+                ));
             }
         };
 
@@ -1066,7 +1070,8 @@ impl ClaudeSession {
                         .collect::<Vec<_>>()
                         .join("; ")
                 );
-                return Err(turn_deadline_expired_error(&detail));
+                let questions_json = serde_json::to_string(&questions).ok();
+                return Err(turn_deadline_expired_error(&detail, questions_json));
             }
         };
 
@@ -1220,7 +1225,7 @@ impl ClaudeSession {
                 // per-project lock. See `TURN_DEADLINE`.
                 self.write_interrupt_control_request().await;
                 let detail = format!("{} — {input_str}", request.tool_name);
-                return Err(turn_deadline_expired_error(&detail));
+                return Err(turn_deadline_expired_error(&detail, None));
             }
         };
 
@@ -2372,8 +2377,8 @@ mod tests {
 
     #[test]
     fn turn_deadline_expired_error_describes_lock_release() {
-        let msg = match turn_deadline_expired_error("AskUserQuestion — which port?") {
-            AppError::TurnParked(m) => m,
+        let msg = match turn_deadline_expired_error("AskUserQuestion — which port?", None) {
+            AppError::TurnParked { detail, .. } => detail,
             _ => panic!("expected AppError::TurnParked variant"),
         };
         assert!(msg.contains("turn deadline"), "msg: {msg}");
@@ -2384,8 +2389,8 @@ mod tests {
     #[test]
     fn turn_deadline_expired_error_truncates_long_detail() {
         let long_input = "x".repeat(500);
-        let msg = match turn_deadline_expired_error(&long_input) {
-            AppError::TurnParked(m) => m,
+        let msg = match turn_deadline_expired_error(&long_input, None) {
+            AppError::TurnParked { detail, .. } => detail,
             _ => panic!("expected AppError::TurnParked variant"),
         };
         assert!(!msg.contains(&long_input), "detail should be truncated");

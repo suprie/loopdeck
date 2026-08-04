@@ -22,6 +22,7 @@ import type {
   ProgressSnapshot,
   RunBudgets,
   RunPlan,
+  RunReport,
   RunQueueStatus,
   StallPolicy,
   AgentResponse,
@@ -277,6 +278,40 @@ export async function cancelRun(path: string): Promise<void> {
  */
 export async function getRunStatus(path: string): Promise<RunQueueStatus> {
   return invoke<RunQueueStatus>("get_run_status", { path });
+}
+
+/**
+ * Morning report read model — joins the on-disk run plan with derived
+ * per-phase verdict labels and the overnight audit slice (prd-wake-up Phase 2).
+ * Rust: get_run_report(path) -> Result<RunReport, AppError>
+ */
+export async function getRunReport(path: string): Promise<RunReport> {
+  return invoke<RunReport>("get_run_report", { path });
+}
+
+/**
+ * Answer a parked phase's AskUserQuestion, pin the answers into its interview,
+ * and requeue it (prd-wake-up Phase 2). Returns the updated plan.
+ * Rust: answer_parked_question(path, execution_id, answers) -> Result<RunPlan, AppError>
+ */
+export async function answerParkedQuestion(
+  path: string,
+  executionId: string,
+  answers: AskUserQuestionAnswers,
+): Promise<RunPlan> {
+  // Convert camelCase `otherText` to snake_case `other_text`, same as agentAnswerQuestion.
+  const wire: Record<string, { labels: string[]; other_text?: string }> = {};
+  for (const [q, a] of Object.entries(answers)) {
+    wire[q] = { labels: a.labels ?? [] };
+    if (a.otherText != null && a.otherText.trim() !== "") {
+      wire[q].other_text = a.otherText;
+    }
+  }
+  return invoke<RunPlan>("answer_parked_question", {
+    path,
+    executionId,
+    answers: wire,
+  });
 }
 
 /** Requeue a retryable terminal phase (plus dependents parked solely because of it). */

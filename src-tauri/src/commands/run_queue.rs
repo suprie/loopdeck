@@ -37,6 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -78,6 +79,24 @@ fn emit_run_queue_terminal(app: &AppHandle, root: &Path, result: String, is_erro
         },
     ) {
         warn!("failed to emit unattended run terminal activity: {error}");
+    }
+}
+
+/// Send an OS notification for a terminal run transition (prd-wake-up Phase 1).
+/// Three call sites, per the PRD: run completed, budget kill, all phases parked.
+/// On click, the OS activates the app; we focus the main window so the morning
+/// report is the first thing the user sees.
+fn notify_run_terminal(app: &AppHandle, root: &Path, title: &str, body: &str) {
+    let project_name = root
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        warn!("failed to send OS notification for run \"{project_name}\": {e}");
+    }
+    // Focus the main window so clicking the notification lands on the report.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_focus();
     }
 }
 
@@ -530,6 +549,165 @@ pub async fn get_run_status(
     Ok(RunQueueStatus { plan, active })
 }
 
+/// Morning report read model — joins the on-disk run plan with derived
+/// per-phase verdict labels and the overnight audit slice (prd-wake-up Phase 2).
+/// Pure read: no side effects, no new storage.
+#[tauri::command]
+pub async fn get_run_report(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<crate::runplan::RunReport, AppError> {
+    let root = resolve_root(&state, &path)?;
+    let plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
+    let audit = build_audit_slice(&root, &plan).unwrap_or_default();
+    Ok(crate::runplan::RunReport::from_plan(plan, audit))
+}
+
+/// Answer a parked phase's `AskUserQuestion`, pin the answers into its
+/// interview, and requeue it (prd-wake-up Phase 2). The phase must be `Parked`
+/// and its `park_payload` must carry a `__QUESTIONS__` marker (meaning the
+/// turn parked on an unanswered question, not a verify-verdict park).
+#[tauri::command]
+pub async fn answer_parked_question(
+    path: String,
+    execution_id: String,
+    answers: std::collections::HashMap<String, super::agent::AnswerWire>,
+    state: State<'_, AppState>,
+) -> Result<crate::runplan::RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
+
+    let phase = plan
+        .phases
+        .iter_mut()
+        .find(|p| p.execution_id == execution_id && p.status == RunPhaseStatus::Parked)
+        .ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "phase \"{execution_id}\" is not parked or does not exist"
+            ))
+        })?;
+
+    // Pin each answer as a PinnedAnswer. Labels are joined with ", "; free-text
+    // "Other" answers use the raw text. Matches the answer format the existing
+    // `agent_answer_question` uses for live turns.
+    for (question, answer) in &answers {
+        let text = if !answer.other_text.as_deref().unwrap_or("").trim().is_empty() {
+            answer.other_text.clone().unwrap_or_default()
+        } else {
+            answer.labels.join(", ")
+        };
+        if !text.is_empty() {
+            phase.interview.push(crate::runplan::PinnedAnswer {
+                question: question.clone(),
+                answer: text,
+            });
+        }
+    }
+    phase.interview_status = InterviewStatus::Answered;
+    phase.status = RunPhaseStatus::Queued;
+    // Clear the park payload now that the question has been answered.
+    phase.park_payload = None;
+
+    runplan::save(&root, &plan)?;
+    Ok(plan)
+}
+
+/// Build the overnight audit slice from the project's tracing logs.
+/// Scans log lines within the run window for `permission decision` events
+/// emitted by the autonomous policy layer. Log-format dependent — best-effort.
+fn build_audit_slice(
+    _repo_path: &Path,
+    plan: &crate::runplan::RunPlan,
+) -> Result<crate::runplan::AuditSlice, AppError> {
+    let Some(log_dir) = crate::logging::log_dir() else {
+        return Ok(crate::runplan::AuditSlice::default());
+    };
+    let run_start = plan.created;
+    let run_end = if plan.wall_clock_secs > 0 {
+        run_start + chrono::Duration::seconds(plan.wall_clock_secs as i64)
+    } else {
+        chrono::Utc::now()
+    };
+
+    let mut auto_allow_count: u64 = 0;
+    let mut floor_denials: Vec<String> = Vec::new();
+
+    // Walk each date from run_start to run_end, reading that day's log file.
+    let mut day = run_start.date_naive();
+    let end_day = run_end.date_naive();
+    while day <= end_day {
+        let filename = format!("loopdeck.log.{}", day.format("%Y-%m-%d"));
+        let path = log_dir.join(&filename);
+        if path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                for line in contents.lines() {
+                    if !line.contains("permission decision") {
+                        continue;
+                    }
+                    // Parse the ISO timestamp at the start of the line to filter
+                    // by the run window. Format: "2026-08-04T01:23:45.678Z"
+                    if let Some(ts_end) = line.find("Z ") {
+                        let ts_str = &line[..=ts_end];
+                        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                            let ts = ts.with_timezone(&chrono::Utc);
+                            if ts < run_start || ts > run_end {
+                                continue;
+                            }
+                        }
+                    }
+                    // Count autonomous auto-allows.
+                    if line.contains("autonomous=true") {
+                        auto_allow_count += 1;
+                    }
+                    // Collect floor denials.
+                    if line.contains("behavior=deny") {
+                        // Extract tool name and reason for the itemized list.
+                        let tool = extract_field(line, "tool").unwrap_or_else(|| "unknown".into());
+                        let reason = extract_field(line, "reason").unwrap_or_else(|| "".into());
+                        let input = extract_field(line, "input").unwrap_or_else(|| "".into());
+                        let summary = if reason.is_empty() {
+                            format!("{tool}: {input}")
+                        } else {
+                            format!("{tool}: {input} — {reason}")
+                        };
+                        floor_denials.push(truncate(&summary, 200));
+                    }
+                }
+            }
+        }
+        day = day.succ_opt().unwrap_or(end_day);
+    }
+
+    Ok(crate::runplan::AuditSlice {
+        auto_allow_count,
+        floor_denials,
+    })
+}
+
+/// Extract a `key="value"` or `key=value` field from a tracing log line.
+fn extract_field(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    if let Some(inner) = rest.strip_prefix('"') {
+        let end = inner.find('"')?;
+        Some(inner[..end].to_string())
+    } else {
+        let end = rest.find(' ').unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
+    }
+}
+
 fn reconcile_inactive_execution(root: &Path, plan: &RunPlan) -> Result<(), AppError> {
     let loaded = execution::load(root)?;
     if let Some(next) = reconcile_inactive_execution_state(&loaded.state, plan, Utc::now())? {
@@ -881,6 +1059,12 @@ async fn execute_run(
             plan.phases[idx].park_payload = Some("total run wall-clock budget exceeded".into());
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
+            notify_run_terminal(
+                app,
+                root,
+                "LoopDeck run killed",
+                "Total run wall-clock budget exceeded",
+            );
             return Ok(());
         }
         if cancel.load(Ordering::SeqCst) {
@@ -888,6 +1072,7 @@ async fn execute_run(
             plan.phases[idx].park_payload = Some("run cancelled".into());
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
+            notify_run_terminal(app, root, "LoopDeck run killed", "Run was cancelled");
             return Ok(());
         }
 
@@ -1024,6 +1209,12 @@ async fn execute_run(
                         false,
                     )?;
                     execution::save(root, &abandoned, loaded.state.revision)?;
+                    notify_run_terminal(
+                        app,
+                        root,
+                        "LoopDeck run killed",
+                        "Phase token budget exceeded",
+                    );
                     return Ok(());
                 }
                 let verdict = extract_verdict(&response.result);
@@ -1075,9 +1266,18 @@ async fn execute_run(
                     continue;
                 }
             }
-            Err(AppError::TurnParked(detail)) => {
+            Err(AppError::TurnParked {
+                detail,
+                parked_questions_json,
+            }) => {
+                // Store the structured question payload when available, so the
+                // morning report can reconstruct AskUserQuestionCard components.
+                let payload = match parked_questions_json {
+                    Some(ref json) => format!("__QUESTIONS__{json}__END__ {detail}"),
+                    None => detail.clone(),
+                };
                 plan.phases[idx].status = RunPhaseStatus::Parked;
-                plan.phases[idx].park_payload = Some(detail.clone());
+                plan.phases[idx].park_payload = Some(payload);
                 plan.environment.worktree_kept = true;
                 park_blocked_dependents(&mut plan, &execution_id);
                 runplan::save(root, &plan)?;
@@ -1117,6 +1317,14 @@ async fn execute_run(
                         .state
                         .abandon_current(e.to_string(), chrono::Utc::now(), false)?;
                 execution::save(root, &abandoned, loaded.state.revision)?;
+                if killed_by_budget {
+                    notify_run_terminal(
+                        app,
+                        root,
+                        "LoopDeck run killed",
+                        "Phase wall-clock budget exceeded",
+                    );
+                }
                 return if killed_by_budget { Ok(()) } else { Err(e) };
             }
         }
@@ -1125,6 +1333,31 @@ async fn execute_run(
     plan.wall_clock_secs = run_started.elapsed().as_secs();
     finalize_worktree(root, &worktree, &mut plan);
     runplan::save(root, &plan)?;
+
+    let all_completed = plan
+        .phases
+        .iter()
+        .all(|p| p.status == RunPhaseStatus::Completed);
+    let any_parked = plan
+        .phases
+        .iter()
+        .any(|p| p.status == RunPhaseStatus::Parked);
+
+    if all_completed {
+        notify_run_terminal(
+            app,
+            &plan.project,
+            "LoopDeck run completed",
+            "All phases passed — morning report ready for review",
+        );
+    } else if any_parked {
+        notify_run_terminal(
+            app,
+            &plan.project,
+            "LoopDeck run parked",
+            "Phases need attention — open the morning report to review parked items",
+        );
+    }
 
     Ok(())
 }
