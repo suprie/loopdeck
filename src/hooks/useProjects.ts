@@ -19,6 +19,8 @@ export function useProjects() {
   const setDiscoveredRepos = useAppStore((s) => s.setDiscoveredRepos);
   const setError = useAppStore((s) => s.setError);
   const addProject = useAppStore((s) => s.addProject);
+  const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
+  const setDetailTab = useAppStore((s) => s.setDetailTab);
   const removeProjectByPath = useAppStore((s) => s.removeProjectByPath);
   const updateProjectInStore = useAppStore((s) => s.updateProject);
   const updateProjectDescription = useAppStore((s) => s.updateProjectDescription);
@@ -60,6 +62,33 @@ export function useProjects() {
       }
     },
     [setScanning, setError, setDiscoveredRepos, navigate],
+  );
+
+  /** Create a brand-new project from scratch: fresh dir + .loopdeck/ bootstrap,
+   *  then land on its Epics tab so the first epic can be authored. */
+  const createProject = useCallback(
+    async (parent: string, name: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const entry = await api.createProject(parent, name);
+        addProject(entry);
+        setSelectedProjectPath(entry.path);
+        setDetailTab("epics");
+        navigate({
+          to: "/project/$projectPath",
+          params: { projectPath: encodeURIComponent(entry.path) },
+        });
+        return entry;
+      } catch (err) {
+        const appErr = err as AppError;
+        setError(appErr.message ?? String(err));
+        return null;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [setLoading, setError, addProject, setSelectedProjectPath, setDetailTab, navigate],
   );
 
   /** Import a discovered repository into the registry. */
@@ -209,6 +238,7 @@ export function useProjects() {
     loadProjects,
     scanFolder,
     importRepo,
+    createProject,
     removeProject,
     updateDescription,
     regenerateDesc,

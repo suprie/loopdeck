@@ -57,6 +57,15 @@ export async function importProject(path: string): Promise<ProjectEntry> {
 }
 
 /**
+ * Create a brand-new project from scratch under `parent`: fresh directory,
+ * git init, .loopdeck/ bootstrap, register in global config.
+ * Rust: create_project(parent: String, name: String) -> Result<ProjectEntry, AppError>
+ */
+export async function createProject(parent: string, name: string): Promise<ProjectEntry> {
+  return invoke<ProjectEntry>("create_project", { parent, name });
+}
+
+/**
  * List all registered projects.
  * Rust: list_projects() -> Result<Vec<ProjectEntry>, AppError>
  */
