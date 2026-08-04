@@ -2,6 +2,12 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-04 — Run-queue reliability: verdict marker must survive to the final message; branch names are now descriptive
+
+- **Status**: accepted
+- **Context**: A live overnight run (`run-a3a5f38c-…`) parked all 6 batched phases with "no verify verdict found in the turn's final response" even though the agent's own activity log said "All 6 loops done, verified, shipped." `extract_verdict` (`run_executor.rs`) greps only `response.result` — the turn's *final* chat message — not the full transcript; the agent had stated `**Verdict:** PASS` earlier (inside the `loopdeck-prd-verifier` report) but its final wrap-up message was free-form prose that never repeated the marker line, so extraction found nothing. Considered and rejected: auto-marking a phase complete when no verdict is found — that would silently ship any turn that got cut off or forgot the marker, defeating the "nothing ships un-verified" gate this whole epic is built on (ADR-5). Separately, the run's git branch landed as the opaque `run/run-a39aa17d-…` — no indication of what work it covered.
+- **Consequences**: `build_combined_phase_prompt` (`run_executor.rs:174-186`) now explicitly instructs the agent that its own final chat message (not just the PR body) must end with the literal `**Verdict:** PASS`/`WARN`/`BLOCK` line, restated even if already stated earlier in the turn. `run_branch_name` (`run_queue.rs`) now derives the branch from the first queued phase's `execution_id` (already `<prd-slug>/<loop-slug>`) plus a short id suffix for uniqueness, e.g. `run/wake-up-notify-after-completed-922a0bfc6c7e`, with a `-plusN` suffix noting multi-phase batches — sanitized once at the end so no unsafe characters leak into the branch name regardless of slug/suffix shape. `extract_verdict`'s strict "missing marker → does not advance" behavior is unchanged; this only fixes the prompt so the marker reliably reaches the text it's graphed. 4 new Rust tests (1 prompt-content assertion, 3 branch-name cases: single-phase slug, multi-phase `-plusN`, unsafe-character sanitization). Gates green: fmt/clippy(lib, `-D warnings`)/test(589 passed, +4, 8 ignored). No frontend change. The 6 already-parked phases from the affected run need a manual "Retry unattended" — their prompt was built before this fix.
+
 ## 2026-08-04 — `prd-assign-loop-id` complete: real-file round-trip test added, frontend e2e stays an honest gap
 
 - **Status**: accepted
