@@ -13,32 +13,45 @@
 loopdeck/
 ├── src/                         # Vite + React frontend (TypeScript)
 │   ├── main.tsx                 # Entry point
-│   ├── App.tsx / App.css        # Root layout
+│   ├── App.tsx / router.tsx     # Root layout + TanStack Router routes
+│   ├── styles.css               # Design tokens (dark theme), shared button styles
 │   ├── types/index.ts           # TS types mirroring Rust structs
-│   ├── lib/tauri.ts             # Typed IPC wrappers
-│   ├── store/appStore.ts        # Zustand store
-│   ├── hooks/                   # Async IPC hooks
-│   └── components/              # UI components by domain
+│   ├── lib/                     # 7 files: tauri.ts (typed IPC wrappers), utils, time, markdown, theme, attachments, agent roster client
+│   ├── store/                   # 3 Zustand stores: appStore, pendingInteractions, streamingState
+│   ├── hooks/                   # 4 async IPC hooks: projects, activity, run queue, stuck sessions
+│   └── components/              # 68 components by domain (13 dirs: dashboard, import, detail, agent, activity, decisions, loops, epics, settings, spec, shared, ui, layout)
 ├── src-tauri/                   # Rust + Tauri backend
-│   ├── src/
+│   ├── src/                     # 32 top-level modules
 │   │   ├── main.rs              # Thin entry point
-│   │   ├── lib.rs               # Tauri builder, state, command reg
+│   │   ├── lib.rs               # Tauri builder, state, 81 command registration
 │   │   ├── error.rs             # AppError enum + Serialize
-│   │   ├── config.rs            # GlobalConfig, load/save
+│   │   ├── config.rs            # GlobalConfig, AgentConfig, load/save
 │   │   ├── scanner.rs           # Repo discovery by marker files
 │   │   ├── project.rs           # .loopdeck/ bootstrap + desc gen
 │   │   ├── memory.rs            # .loopdeck/ decisions & loops parser
-│   │   └── commands.rs          # Tauri IPC handlers (12 commands)
+│   │   ├── execution.rs         # .loopdeck/execution.yaml loop state + transitions
+│   │   ├── epic.rs              # Epic → PRD → Phase → Loop spec layer
+│   │   ├── agents.rs            # Agent runtime, config resolution
+│   │   ├── claude_session.rs    # Claude Code session adapter
+│   │   ├── codex_session.rs     # Codex CLI adapter
+│   │   ├── harness.rs           # Agent harness dispatch
+│   │   ├── multi_agent.rs       # Multi-agent concurrent runs
+│   │   ├── runplan.rs           # Run plan data model + persistence
+│   │   ├── run_executor.rs      # Unattended run execution + budgets
+│   │   ├── secret_scan.rs       # Staged-diff credential scan
+│   │   ├── skills.rs            # Skill discovery/indexing
+│   │   └── commands/            # 81 Tauri IPC handlers (9 files: project, agent, config_cmds, epics, execution, run_queue, composer, state)
 │   ├── capabilities/default.json
 │   └── tauri.conf.json
 ├── docs/
-│   └── PRD.md                   # Product requirements
-└── .claude/skills/              # Dev skills for LoopDeck
+│   ├── PRD.md                   # Product requirements (V1 historical + amendments)
+│   └── epics/                   # Epic → PRD spec layer
+└── .agents/skills/              # Dev skills for LoopDeck (loopdeck-*)
 ```
 
 ## Key Architecture Decisions
 
-- **State**: `Mutex<GlobalConfig>` managed by Tauri, serialized command execution
+- **State**: `AppState` (`commands/state.rs:37`) holding `Mutex<GlobalConfig>` config plus per-project agent-session, pending-question/permission/plan, and run-handle maps, managed by Tauri
 - **Scanner**: `walkdir` with marker-file detection (`.git`, `Cargo.toml`, `package.json`, etc.)
 - **Config paths**: `directories` crate for XDG cross-platform resolution
 - **Frontend state**: Zustand with selector subscriptions, typed IPC wrappers (never raw `invoke()`)
@@ -72,27 +85,34 @@ Use these skills when working on LoopDeck:
 
 | Skill | When to use |
 |---|---|
-| `/rust-expert` | Writing Rust backend code in `src-tauri/` |
-| `/rust-code-reviewer` | Reviewing Rust backend code |
-| `/tauri-expert` | Tauri v2 config, IPC, capabilities, plugins |
-| `/tauri-code-reviewer` | Reviewing Tauri setup, security, and integration |
-| `/vite-senior-engineer` | Writing frontend code in `src/` |
+| `loopdeck-orchestrator` | Build from a PRD: clarify, plan, build, review, verify, ship |
+| `loopdeck-loop-runner` | Execute a single queued loop end-to-end |
+| `loopdeck-prd-verifier` | Verify implemented code against a PRD's acceptance criteria |
+| `loopdeck-open-pr` | Ship the current branch as a reviewable (draft) PR |
+| `loopdeck-memory` | `.loopdeck/` write conventions (decisions.md, loops.md) |
+| `loopdeck-epic-author` | Author epics / PRDs under `docs/epics/` |
+| `loopdeck-vite-senior-engineer` | Writing frontend code in `src/` |
 
 ## PRD Reference
 
-See `docs/PRD.md` for full product requirements — V1 focuses on:
-1. Discover local repositories
-2. Create `.loopdeck/project.yaml` memory structure
-3. Generate project descriptions (README.md → description)
-4. Maintain local registry at `~/.config/loopdeck/config.yaml`
-
-V1 does NOT include agents, loops, cloud, or collaboration.
+See `docs/PRD.md` for the V1 product requirements (historical) and its
+Amendments section for the current scope. The app has grown beyond V1: it runs
+AI agents (Claude Code + Codex), executes engineering loops from a run queue,
+and tracks epics/PRDs/decisions. Cloud sync and team collaboration remain out
+of scope.
 
 ## Context Discipline (token cost)
 
-This repo has several large files (`commands.rs` ~30K tok, `claude_session.rs` ~24K,
-`conversation.rs` / `agents.rs` / `epic.rs` / `config.rs` each >12K). Re-reading
-them across iterations is the dominant token cost in long sessions.
+This repo has several large files. Re-reading them across iterations is the
+dominant token cost in long sessions. Current large files (line counts):
+
+- `claude_session.rs` ~2,844 lines
+- `epic.rs` ~2,449 lines
+- `conversation.rs` ~2,227 lines
+- `commands/agent.rs` ~2,221 lines
+- `commands/run_queue.rs` ~1,991 lines
+- `agents.rs` ~1,905 lines
+- `config.rs` ~1,480 lines
 
 - **Do not re-read a file you have already read this session.** The contents are
   in your context already; use `Grep`/offset-`Read` to locate a specific symbol
@@ -140,5 +160,5 @@ MUST update the `.loopdeck/` memory files after significant work.
 - **Completed**: YYYY-MM-DD
 ```
 
-The Stop hook in `.claude/settings.local.json` enforces this convention automatically.
+The Stop hook (`templates/hooks/loopdeck-stop-hook.py`) enforces this convention automatically.
 
