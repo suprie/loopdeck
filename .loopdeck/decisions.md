@@ -155,3 +155,9 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: `docs/PRD.md` froze at V1 and listed non-goals the shipped code violates (agents, Claude/Codex, loops, decisions); `CLAUDE.md` described a single `commands.rs` (now a `commands/` dir) with stale file-size callouts.
 - **Consequences**: New audit deliverable `docs/epics/optimization/docs-accuracy-audit.md` (contradictions D1–D8, C1–C5). Both docs rewritten — `docs/PRD.md` gained an Amendments section marking shipped non-goals historical with cross-links to the shipping epic (`multi-model-agents` for Claude/Codex integration, per the actual git history), `CLAUDE.md` tree + Context Discipline rewritten to the actual tree (32 modules + `commands/`, 81 commands, verified line counts). Re-audit zero contradictions; verifier PASS; PRD `status` flipped `proposed` → `accepted`, all phase boxes checked.
+
+## 2026-08-05 — Worktree cleanup script
+- **Status**: accepted
+- **Context**: 13 stale `git worktree`s had piled up under `.claude/worktrees/` from prior loop/agent sessions, all with branches already merged into `main`.
+- **Consequences**: Added `scripts/prune-worktrees.sh` — force-removes every worktree except the main tree and deletes each worktree's local branch. Ran it once this session, removing all 13 (3 had uncommitted code changes, discarded per user confirmation).
+
