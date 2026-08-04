@@ -132,6 +132,21 @@ pub async fn assign_loop_id(
     epic::assign_loop_id(&root, &epic_slug, &prd_filename, &loop_title)
 }
 
+/// Set a PRD's `status:` frontmatter field (`proposed` / `accepted` / `completed`).
+#[tauri::command]
+pub async fn set_prd_status(
+    path: String,
+    epic_slug: String,
+    prd_filename: String,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("set_prd_status called for path: {path}, epic: {epic_slug}, prd: {prd_filename}, status: {status}");
+
+    let root = resolve_root(&state, &path)?;
+    epic::set_prd_status(&root, &epic_slug, &prd_filename, &status)
+}
+
 /// Read a spec file (epic README or PRD) under `docs/epics/`.
 /// `rel_path` is relative to `docs/epics/` (e.g. `<slug>/prd-x.md`).
 #[tauri::command]

@@ -2,7 +2,7 @@
 prd: prd-epic-author
 epic: support-project-management
 milestone: "0.2.0"
-status: proposed
+status: completed
 description: >
   Specify the loopdeck-epic-author skill in detail: an on-demand drafting aid
   that elaborates a user's coarse intent into the docs/epics/ spec format via

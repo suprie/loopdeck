@@ -2,7 +2,7 @@
 prd: prd-docs-accuracy
 epic: optimization
 milestone: "0.4.0"
-status: accepted
+status: completed
 description: >
   Audit docs/PRD.md and CLAUDE.md against the code that actually ships, then
   rewrite both so neither states a non-goal the code violates or a file
