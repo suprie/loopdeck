@@ -1,13 +1,24 @@
 schema_version: 1
-revision: 7
+revision: 9
 current:
-  id: wake-up/add-tauri-plugin
+  id: optimization/diff-docs-prd-md-s-stated-non-goals-and-v1-scope-against-the
+  title: Diff `docs/PRD.md`'s stated non-goals and "V1" scope against the
+  origin:
+    epic: optimization
+    prd: prd-docs-accuracy
+    phase: Phase 1 — Audit
+  started_at: 2026-08-04T07:20:05.662053Z
+  attempt: 1
+queue: []
+history:
+- id: wake-up/add-tauri-plugin
   title: Add `tauri-plugin-notification` with its capability entry
   origin:
     epic: overnight-orchestration
     prd: prd-wake-up
     phase: Phase 1 — Notifications
+  outcome: completed
   started_at: 2026-08-03T23:24:52.464514Z
+  completed_at: 2026-08-03T23:33:06.459506Z
   attempt: 1
-queue: []
-history:
+  reason: reconciled inactive run phase "wake-up/add-tauri-plugin" in Parked state

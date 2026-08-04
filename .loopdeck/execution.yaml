@@ -1,5 +1,5 @@
 schema_version: 1
-revision: 8
+revision: 10
 queue: []
 history:
 - id: wake-up/add-tauri-plugin
@@ -13,3 +13,14 @@ history:
   completed_at: 2026-08-03T23:33:06.459506Z
   attempt: 1
   reason: reconciled inactive run phase "wake-up/add-tauri-plugin" in Parked state
+- id: optimization/diff-docs-prd-md-s-stated-non-goals-and-v1-scope-against-the
+  title: Diff `docs/PRD.md`'s stated non-goals and "V1" scope against the
+  origin:
+    epic: optimization
+    prd: prd-docs-accuracy
+    phase: Phase 1 — Audit
+  outcome: abandoned
+  started_at: 2026-08-04T07:20:05.662053Z
+  completed_at: 2026-08-04T07:31:25.942457Z
+  attempt: 1
+  reason: no verify verdict found in the turn's final response
