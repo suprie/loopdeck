@@ -423,6 +423,26 @@ export async function togglePrdLoop(
 }
 
 /**
+ * Generate a collision-free stable `epic-slug/title-slug` id for an id-less
+ * loop and rewrite its checklist line in the PRD file in place. Returns the
+ * newly assigned id. Rejects if the loop already has an id.
+ * Rust: assign_loop_id(path, epic_slug, prd_filename, loop_title) -> Result<String, AppError>
+ */
+export async function assignLoopId(
+  path: string,
+  epicSlug: string,
+  prdFilename: string,
+  loopTitle: string,
+): Promise<string> {
+  return invoke<string>("assign_loop_id", {
+    path,
+    epicSlug,
+    prdFilename,
+    loopTitle,
+  });
+}
+
+/**
  * Read a spec file (epic README or PRD) under docs/epics/.
  * relPath is relative to docs/epics/ (e.g. "<slug>/prd-x.md").
  * Rust: read_spec_file(path, rel_path) -> Result<String, AppError>

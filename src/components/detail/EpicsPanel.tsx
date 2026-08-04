@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   FileDown,
   GitCommitHorizontal,
+  Fingerprint,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
@@ -111,6 +112,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
@@ -290,6 +292,29 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
       toast.error("Failed to toggle", { description: String(err) });
     } finally {
       setToggling(null);
+    }
+  };
+
+  const handleAssignId = async (
+    epicSlug: string,
+    prdFile: string,
+    loop: PrdLoop,
+  ) => {
+    const key = `${epicSlug}/${prdFile}/${loop.title}`;
+    setAssigningId(key);
+    try {
+      const id = await api.assignLoopId(projectPath, epicSlug, prdFile, loop.title);
+      toast.success("ID assigned", { description: id });
+      // The loop's id is now set, so re-derive picker/promote enablement —
+      // refetch rather than patch, same as handlePromote.
+      await load();
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to assign ID", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setAssigningId(null);
     }
   };
 
@@ -526,6 +551,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                     hasActiveLoop && !isCurrent;
                                   const isPromoting = promoting === key;
                                   const isToggling = toggling === key;
+                                  const isAssigningId = assigningId === key;
                                   // Legacy ID-less items can't be promoted (Phase 1):
                                   // the stable ID is the spec→execution join key.
                                   const noId = !loop.id;
@@ -609,6 +635,29 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                                             <CheckSquare size={12} />
                                           ) : (
                                             <Square size={12} />
+                                          )}
+                                        </button>
+                                      )}
+
+                                      {/* Assign ID — the only path off the disabled picker checkbox
+                                          above for a legacy id-less loop; generates a stable
+                                          `epic-slug/title-slug` id and unlocks the picker on success. */}
+                                      {!done && noId && (
+                                        <button
+                                          onClick={() =>
+                                            handleAssignId(epic.slug, prd.file, loop)
+                                          }
+                                          disabled={isAssigningId}
+                                          title="Generate a stable ID for this loop so it can be queued for an overnight run"
+                                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                                        >
+                                          {isAssigningId ? (
+                                            <Loader2 size={10} className="animate-spin" />
+                                          ) : (
+                                            <span className="inline-flex items-center gap-1">
+                                              <Fingerprint size={10} />
+                                              Assign ID
+                                            </span>
                                           )}
                                         </button>
                                       )}

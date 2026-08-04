@@ -91,8 +91,8 @@ Directional; refine during implementation.
 
 ### Phase 2 — Frontend: picker action
 
-- [ ] `assign-loop-id/picker-action` "Assign ID" action next to the disabled picker checkbox for `noId`, not-done loops in `EpicsPanel.tsx`
-- [ ] `assign-loop-id/refresh-on-success` Successful assignment refreshes epics state and the picker checkbox enables without a manual reload
+- [x] `assign-loop-id/picker-action` "Assign ID" action next to the disabled picker checkbox for `noId`, not-done loops in `EpicsPanel.tsx`
+- [x] `assign-loop-id/refresh-on-success` Successful assignment refreshes epics state and the picker checkbox enables without a manual reload
 
 ### Phase 3 — Tests
 
