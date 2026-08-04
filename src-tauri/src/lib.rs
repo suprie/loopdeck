@@ -142,6 +142,7 @@ pub fn run() {
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             config: Mutex::new(config),
             claude_sessions: Mutex::new(HashMap::new()),
