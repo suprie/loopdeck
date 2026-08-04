@@ -2226,6 +2226,60 @@ description: >
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Round-trips `assign_loop_id` against this repo's own real PRD file
+    /// (not a synthetic fixture) — `docs/epics/optimization/prd-memory-hygiene.md`,
+    /// which has an id-less unchecked item ("Confirm both active files are
+    /// under the new budget.") sitting among wrapped list items, prose,
+    /// headers, and blank lines. Copies the real file into a temp repo (so
+    /// the actual tracked file is never mutated) and asserts every line
+    /// except the target is byte-for-byte identical, and the target line
+    /// only gains the id prefix with its checked state unchanged.
+    #[test]
+    fn test_assign_loop_id_round_trips_against_real_repo_prd() {
+        let real_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("docs")
+            .join("epics")
+            .join("optimization")
+            .join("prd-memory-hygiene.md");
+        let original = std::fs::read_to_string(&real_path)
+            .expect("this repo's own prd-memory-hygiene.md must exist");
+        assert!(
+            original.contains("- [ ] Confirm both active files are under the new budget."),
+            "fixture assumption drifted — target line no longer present verbatim"
+        );
+
+        let dir = create_temp_repo();
+        write_prd(&dir, "optimization", "prd-memory-hygiene.md", &original);
+
+        let assigned = assign_loop_id(
+            &dir,
+            "optimization",
+            "prd-memory-hygiene.md",
+            "Confirm both active files are under the new budget.",
+        )
+        .expect("should assign an id to the real, id-less checklist line");
+
+        let new_content = std::fs::read_to_string(
+            dir.join("docs")
+                .join("epics")
+                .join("optimization")
+                .join("prd-memory-hygiene.md"),
+        )
+        .unwrap();
+
+        let expected = original.replace(
+            "- [ ] Confirm both active files are under the new budget.",
+            &format!("- [ ] `{assigned}` Confirm both active files are under the new budget."),
+        );
+        assert_eq!(
+            new_content, expected,
+            "every line but the target must be byte-for-byte unchanged against the real file"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn test_parse_phase_loops_extracts_well_formed_id() {
         let loops = parse_phase_loops(

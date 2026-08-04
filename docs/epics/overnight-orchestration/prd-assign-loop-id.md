@@ -2,7 +2,7 @@
 prd: prd-assign-loop-id
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: proposed
+status: completed
 description: >
   A one-click action that generates a stable `epic/slug` ID for a loop that
   doesn't have one and writes it into its PRD checklist line, so an existing
@@ -96,9 +96,9 @@ Directional; refine during implementation.
 
 ### Phase 3 — Tests
 
-- [ ] `assign-loop-id/collision-tests` Rust tests: slug generation collision handling (0, 1, 2+ collisions), rejection on an already-id'd loop
-- [ ] `assign-loop-id/round-trip-tests` Rust tests: markdown rewrite round-trips against this repo's own real PRD files — every other line and the target line's checked state are byte-for-byte unchanged, only the id prefix is added
-- [ ] `assign-loop-id/frontend-check` `npx tsc --noEmit` green; picker action wired end-to-end against a fixture epic with an id-less loop
+- [x] `assign-loop-id/collision-tests` Rust tests: slug generation collision handling (0, 1, 2+ collisions), rejection on an already-id'd loop
+- [x] `assign-loop-id/round-trip-tests` Rust tests: markdown rewrite round-trips against this repo's own real PRD files — every other line and the target line's checked state are byte-for-byte unchanged, only the id prefix is added
+- [x] `assign-loop-id/frontend-check` `npx tsc --noEmit` green; picker action wired end-to-end against a fixture epic with an id-less loop
 
 ## Open Questions
 

@@ -2,6 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-04 — `prd-assign-loop-id` complete: real-file round-trip test added, frontend e2e stays an honest gap
+
+- **Status**: accepted
+- **Context**: Phase 3's three items were the PRD's last. Phase 1's own tests (`test_generate_loop_id_no_collision`/`_one_collision`/`_multiple_collisions`, `test_assign_loop_id_rejects_when_already_has_id`, `test_assign_loop_id_rewrites_line_preserving_rest_unchecked`/`_preserves_checked_state`/`_collision_scoped_to_epic`) already covered collision handling, rejection, and round-trip preservation — but only against synthetic fixtures from `create_temp_repo`/`write_prd`, not "this repo's own real PRD files" as `round-trip-tests` literally asks. For `frontend-check`, this repo's only frontend test infra (`npm run test:frontend`, Node's built-in `node:test`) has no DOM (`jsdom`/`happy-dom`/React Testing Library absent from `package.json` and `node_modules`), and no `.claude/launch.json`/IPC mock harness exists — so a real component render+click test isn't achievable without adding a new dependency the PRD didn't call for.
+- **Consequences**: Added one new test, `test_assign_loop_id_round_trips_against_real_repo_prd` (`src-tauri/src/epic.rs:2229`), which round-trips `assign_loop_id` against the real, tracked `docs/epics/optimization/prd-memory-hygiene.md` (copied into a temp dir so the tracked file is never mutated) and asserts byte-for-byte equality outside the one target line. `collision-tests` and the round-trip half of `round-trip-tests` are checked on the strength of Phase 1's existing tests alone — no redundant tests added there. `frontend-check` is checked on `tsc --noEmit` clean (its own literal first-half wording) plus static verification that `EpicsPanel.tsx`'s "Assign ID" button wiring calls `api.assignLoopId` with the right args — not a live or mocked click-through, which remains genuinely out of reach in this environment, same as Phase 2 already documented. PRD frontmatter `status: proposed` → `completed`, matching this epic's own sibling-PRD convention (`prd-run-queue`/`prd-wake-up`/`prd-unattended-ship`/`prd-safety-prereqs` all use `completed`).
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 `assign-loop-id/collision-tests` + `round-trip-tests` + `frontend-check` entry) has the full breakdown.
+
 ## 2026-08-04 — `assign-loop-id`: rewrite scoped to one line, collision check scoped to one epic
 
 - **Status**: accepted
