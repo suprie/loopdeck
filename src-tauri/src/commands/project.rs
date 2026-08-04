@@ -39,22 +39,16 @@ fn next_steps_counts(path: &Path) -> NextStepsCount {
     (steps.len(), done)
 }
 
-/// Import a repository: bootstrap `.loopdeck/project.yaml` and register in global config.
+/// Register an existing directory as a project: bootstrap `.loopdeck/project.yaml`
+/// and register in the global config.
 ///
-/// If the repo is already registered, returns the existing entry.
-/// If `.loopdeck/project.yaml` already exists, loads it instead of overwriting.
-#[tauri::command]
-pub async fn import_project(
-    path: String,
-    state: State<'_, AppState>,
+/// Shared by `import_project` and `create_project`. If already registered,
+/// returns the existing entry. If `.loopdeck/project.yaml` already exists,
+/// loads it instead of overwriting.
+async fn register_directory(
+    canonical: PathBuf,
+    state: &AppState,
 ) -> Result<ProjectEntry, AppError> {
-    debug!("import_project called with path: {path}");
-
-    // Canonicalize via the shared boundary helper (PRD FR3) so config lookups
-    // use the canonical form. This is the registration path, so no registered-
-    // root check — but the path must resolve to a real directory.
-    let canonical = paths::canonical_root(&path)?;
-
     // Check if already registered (use canonical path for lookup). Done under a
     // brief lock so we don't hold the config mutex across the heavy bootstrapping
     // below — and so the early "already imported" return short-circuits before
@@ -120,7 +114,92 @@ pub async fn import_project(
         config.save()?;
     }
 
+    Ok(entry)
+}
+
+/// Import a repository: bootstrap `.loopdeck/project.yaml` and register in global config.
+///
+/// If the repo is already registered, returns the existing entry.
+/// If `.loopdeck/project.yaml` already exists, loads it instead of overwriting.
+#[tauri::command]
+pub async fn import_project(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectEntry, AppError> {
+    debug!("import_project called with path: {path}");
+
+    // Canonicalize via the shared boundary helper (PRD FR3) so config lookups
+    // use the canonical form. This is the registration path, so no registered-
+    // root check — but the path must resolve to a real directory.
+    let canonical = paths::canonical_root(&path)?;
+    let entry = register_directory(canonical, &state).await?;
     info!("import_project complete: {entry:?}");
+    Ok(entry)
+}
+
+/// Validate a project name for `create_project`: a non-empty, path-safe,
+/// single-component directory name. Returns the trimmed name.
+fn validate_project_name(name: &str) -> Result<String, AppError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidPath(
+            "project name cannot be empty".into(),
+        ));
+    }
+    if trimmed.len() > 120 {
+        return Err(AppError::InvalidPath("project name too long".into()));
+    }
+    // A bare `.`/`..` would resolve `parent.join(name)` back to the parent or
+    // its parent; `/`, `\`, `:` are separators / Windows-reserved. Reject all
+    // so the name stays a single safe directory component.
+    if trimmed == "." || trimmed == ".." || trimmed.contains(['/', '\\', ':']) {
+        return Err(AppError::InvalidPath(format!(
+            "invalid project name: {trimmed}"
+        )));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(AppError::InvalidPath(
+            "project name cannot contain control characters".into(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Create a brand-new project from scratch: make a fresh directory under
+/// `parent`, best-effort `git init`, bootstrap `.loopdeck/project.yaml`, and
+/// register in the global config.
+///
+/// The target directory must not exist or be empty — this is the "new idea,
+/// not an existing repo" path. `register_directory`'s idempotency keeps a
+/// concurrent import of the same path returning its existing entry.
+#[tauri::command]
+pub async fn create_project(
+    parent: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectEntry, AppError> {
+    debug!("create_project called with parent: {parent}, name: {name}");
+
+    let name = validate_project_name(&name)?;
+    let dir = Path::new(&parent).join(&name);
+
+    // Refuse to adopt an already-populated folder as a fresh project —
+    // `register_directory` would silently bootstrap it as a new one.
+    std::fs::create_dir_all(&dir)?;
+    if std::fs::read_dir(&dir)?.next().is_some() {
+        return Err(AppError::InvalidPath(format!(
+            "target directory already exists and is not empty: {}",
+            dir.display()
+        )));
+    }
+
+    // Best-effort: the execution model is git-centric (PRs, commit evidence,
+    // dirty stats). A fresh dir isn't a repo; init so those paths work.
+    let _ = git::git_init(&dir);
+
+    let canonical = paths::canonical_root(&dir.to_string_lossy())?;
+    let entry = register_directory(canonical, &state).await?;
+    info!("create_project complete: {entry:?}");
     Ok(entry)
 }
 
@@ -642,4 +721,24 @@ pub async fn get_graphify_stats(
         .await
         .map_err(blocking_task_failed)?;
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_project_name;
+
+    #[test]
+    fn validates_project_names() {
+        assert_eq!(validate_project_name("  my-app  ").unwrap(), "my-app");
+        assert!(validate_project_name("").is_err());
+        assert!(validate_project_name("   ").is_err());
+        assert!(validate_project_name(".").is_err());
+        assert!(validate_project_name("..").is_err());
+        assert!(validate_project_name("../x").is_err());
+        assert!(validate_project_name("a/b").is_err());
+        assert!(validate_project_name("a\\b").is_err());
+        assert!(validate_project_name("a:b").is_err());
+        assert!(validate_project_name("a\nb").is_err());
+        assert!(validate_project_name("x").is_ok());
+    }
 }

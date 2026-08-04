@@ -13,6 +13,7 @@ import {
   FileDown,
   GitCommitHorizontal,
   Fingerprint,
+  Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
@@ -32,6 +33,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { Progress } from "../ui/progress";
 import { PrdContent } from "./PrdContent";
 import { RunQueuePanel } from "./RunQueuePanel";
+import { CreateSpecDialog } from "./CreateSpecDialog";
 
 // ── Derived progress helpers ─────────────────────────────────────────────────
 
@@ -120,6 +122,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   /** Stable execution IDs checked in the overnight-run phase picker, in
    * selection order (prd-run-queue Phase 5). */
   const [selectedForRun, setSelectedForRun] = useState<string[]>([]);
+  /** Which create-spec dialog is open: "epic" | "prd", or null when closed. */
+  const [createMode, setCreateMode] = useState<"epic" | "prd" | null>(null);
 
   const toggleSelectedForRun = (id: string) => {
     setSelectedForRun((prev) =>
@@ -336,6 +340,14 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
     }
   };
 
+  /** After a skeleton write, reload the list and jump into the spec editor so
+   *  the author can fill out the newly created epic/PRD. */
+  const handleCreated = (relPath: string) => {
+    setCreateMode(null);
+    void load();
+    navigate({ to: "/spec/$relPath", params: { relPath: encodeURIComponent(relPath) } });
+  };
+
   if (loading) {
     return <LoadingSpinner label="Loading epics..." />;
   }
@@ -361,6 +373,23 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
           as git-tracked spec files. Author a README plus PRDs to start planning
           with the Epic → PRD → Phase → Loop hierarchy.
         </p>
+        <button
+          onClick={() => setCreateMode("epic")}
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        >
+          <Plus className="size-3.5" />
+          Create Epic
+        </button>
+        {createMode && (
+          <CreateSpecDialog
+            projectPath={projectPath}
+            epics={epics}
+            mode={createMode}
+            open
+            onOpenChange={(open) => !open && setCreateMode(null)}
+            onCreated={handleCreated}
+          />
+        )}
       </div>
     );
   }
@@ -385,21 +414,39 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
         <span className="text-xs text-muted-foreground">
           {epics.length} epic{epics.length !== 1 ? "s" : ""}
         </span>
-        {progress && (
+        <div className="flex items-center gap-1">
           <button
-            onClick={handleExportSummary}
-            disabled={exporting}
-            title="Write a non-authoritative Markdown snapshot of derived execution progress to .loopdeck/execution-summary.md"
-            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            onClick={() => setCreateMode("epic")}
+            title="Create a new epic"
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
-            {exporting ? (
-              <Loader2 size={11} className="animate-spin" />
-            ) : (
-              <FileDown size={11} />
-            )}
-            Export summary
+            <Plus size={11} />
+            New epic
           </button>
-        )}
+          <button
+            onClick={() => setCreateMode("prd")}
+            title="Create a new PRD in an epic"
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <Plus size={11} />
+            New PRD
+          </button>
+          {progress && (
+            <button
+              onClick={handleExportSummary}
+              disabled={exporting}
+              title="Write a non-authoritative Markdown snapshot of derived execution progress to .loopdeck/execution-summary.md"
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            >
+              {exporting ? (
+                <Loader2 size={11} className="animate-spin" />
+              ) : (
+                <FileDown size={11} />
+              )}
+              Export summary
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Unmatched execution records: an execution.yaml ID with no current
@@ -761,6 +808,17 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
           );
         })}
       </div>
+
+      {createMode && (
+        <CreateSpecDialog
+          projectPath={projectPath}
+          epics={epics}
+          mode={createMode}
+          open
+          onOpenChange={(open) => !open && setCreateMode(null)}
+          onCreated={handleCreated}
+        />
+      )}
     </div>
   );
 }

@@ -162,6 +162,7 @@ pub fn run() {
             commands::composer::scan_directory,
             // Project management (project.rs)
             commands::project::import_project,
+            commands::project::create_project,
             commands::project::list_projects,
             commands::project::get_project,
             commands::project::update_description,
