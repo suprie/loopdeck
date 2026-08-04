@@ -141,6 +141,7 @@ pub fn run() {
 
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             config: Mutex::new(config),
@@ -198,6 +199,7 @@ pub fn run() {
             commands::run_queue::queue_run,
             commands::run_queue::cancel_run,
             commands::run_queue::get_run_status,
+            commands::run_queue::get_run_report,
             commands::run_queue::requeue_run_phase,
             // Run queue pre-flight interview — prd-run-queue Phase 3
             commands::run_queue::run_phase_interview,

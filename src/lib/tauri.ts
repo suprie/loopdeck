@@ -22,6 +22,7 @@ import type {
   ProgressSnapshot,
   RunBudgets,
   RunPlan,
+  RunReport,
   RunQueueStatus,
   StallPolicy,
   AgentResponse,
@@ -277,6 +278,15 @@ export async function cancelRun(path: string): Promise<void> {
  */
 export async function getRunStatus(path: string): Promise<RunQueueStatus> {
   return invoke<RunQueueStatus>("get_run_status", { path });
+}
+
+/**
+ * Morning report read model — joins the on-disk run plan with derived
+ * per-phase verdict labels and the overnight audit slice (prd-wake-up Phase 2).
+ * Rust: get_run_report(path) -> Result<RunReport, AppError>
+ */
+export async function getRunReport(path: string): Promise<RunReport> {
+  return invoke<RunReport>("get_run_report", { path });
 }
 
 /** Requeue a retryable terminal phase (plus dependents parked solely because of it). */

@@ -48,8 +48,16 @@ pub enum AppError {
     /// unattended runs (`prd-run-queue`'s executor) can tell "nobody was there
     /// to answer" apart from a genuine turn failure — the former parks the
     /// phase and moves on; the latter fails it.
-    #[error("Turn parked: {0}")]
-    TurnParked(String),
+    ///
+    /// `parked_questions_json`: when the park was on an `AskUserQuestion`, the
+    /// full `Vec<AskUserQuestionSpec>` serialized as JSON so the morning report
+    /// can reconstruct the question cards. `None` for manual approvals and plan
+    /// approvals (which carry their own detail text).
+    #[error("Turn parked: {detail}")]
+    TurnParked {
+        detail: String,
+        parked_questions_json: Option<String>,
+    },
 
     #[error("Background task failed: {0}")]
     BlockingTask(String),
@@ -82,7 +90,7 @@ impl Serialize for AppError {
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
                 AppError::Conflict(_) => "conflict",
                 AppError::Agent(_) => "agent",
-                AppError::TurnParked(_) => "turnParked",
+                AppError::TurnParked { .. } => "turnParked",
                 AppError::BlockingTask(_) => "blockingTask",
                 AppError::Limit(_) => "limit",
             },
