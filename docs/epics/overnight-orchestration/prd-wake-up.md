@@ -2,7 +2,7 @@
 prd: prd-wake-up
 epic: overnight-orchestration
 milestone: "0.4.0"
-status: accepted
+status: completed
 description: >
   The morning half of the accountability story: OS notifications when the run
   finishes, dies, or fully parks, and a morning report view with per-phase
@@ -72,7 +72,7 @@ Directional; refine during implementation.
 ### Phase 1 — Notifications
 
 - [x] `wake-up/add-tauri-plugin` Add `tauri-plugin-notification` with its capability entry
-- [x] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked (P2 notification click-to-focus deferred)
+- [x] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked; notification click focuses the report view
 
 ### Phase 2 — Morning report
 
