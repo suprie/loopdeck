@@ -114,6 +114,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [toggling, setToggling] = useState<string | null>(null);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [markingComplete, setMarkingComplete] = useState<string | null>(null);
   /** Relative path of the PRD expanded into Content/Checklist tabs, or null. */
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
   /** Stable execution IDs checked in the overnight-run phase picker, in
@@ -292,6 +293,23 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
       toast.error("Failed to toggle", { description: String(err) });
     } finally {
       setToggling(null);
+    }
+  };
+
+  const handleMarkComplete = async (epicSlug: string, prdFile: string) => {
+    const key = `${epicSlug}/${prdFile}`;
+    setMarkingComplete(key);
+    try {
+      await api.setPrdStatus(projectPath, epicSlug, prdFile, "completed");
+      toast.success("PRD marked completed", { description: prdFile });
+      await load();
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to update status", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setMarkingComplete(null);
     }
   };
 
@@ -475,6 +493,13 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                   prd.phases.some((p) => p.loops.some((l) => l.title === currentGoal));
                 const prdCount = progress?.prds[`${epic.slug}/${prd.slug}`];
                 const prdFraction = fraction(prdCount);
+                const allLoopsDone =
+                  loopCount > 0 &&
+                  prd.phases.every((p) =>
+                    p.loops.every((l) => l.checked || l.done_in_history),
+                  );
+                const prdKeyForComplete = `${epic.slug}/${prd.file}`;
+                const isMarkingComplete = markingComplete === prdKeyForComplete;
                 return (
                 <div key={prd.file} className="rounded-lg border border-border/60 p-3">
                   <div className="flex items-center justify-between">
@@ -514,6 +539,21 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                       <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
                         {prd.status}
                       </span>
+                      {allLoopsDone && prd.status !== "completed" && (
+                        <button
+                          onClick={() => handleMarkComplete(epic.slug, prd.file)}
+                          disabled={isMarkingComplete}
+                          title="All checklist items are done — set status to completed"
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--success)] transition-colors hover:bg-accent disabled:opacity-50"
+                        >
+                          {isMarkingComplete ? (
+                            <Loader2 size={10} className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 size={10} />
+                          )}
+                          Mark completed
+                        </button>
+                      )}
                     </div>
                   </div>
 

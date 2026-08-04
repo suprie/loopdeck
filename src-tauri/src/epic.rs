@@ -414,6 +414,68 @@ pub fn toggle_prd_loop(
     Ok(!currently_checked)
 }
 
+/// Set a PRD's `status:` frontmatter field, rewriting only that line.
+///
+/// Restricted to the [`PrdFrontmatter`] status vocabulary (`proposed`,
+/// `accepted`, `completed`) so a stray typo can't corrupt the field the
+/// epics view badges on. The `status:` search is bounded to the frontmatter
+/// fence (before the second `---`) so a PRD whose body happens to contain a
+/// `status:` line (e.g. in a code block) is never mistaken for the field.
+pub fn set_prd_status(
+    repo_path: &Path,
+    epic_slug: &str,
+    prd_filename: &str,
+    status: &str,
+) -> Result<(), AppError> {
+    if !matches!(status, "proposed" | "accepted" | "completed") {
+        return Err(AppError::Config(format!("invalid PRD status: {status}")));
+    }
+
+    let epics_root = repo_path
+        .join("docs")
+        .join("epics")
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("docs/epics not found: {e}")))?;
+    let prd_path =
+        paths::resolve_within(&epics_root, &format!("{epic_slug}/{prd_filename}"), false)?;
+
+    if !prd_path.exists() {
+        return Err(AppError::ProjectNotFound(format!(
+            "PRD file not found: {epic_slug}/{prd_filename}"
+        )));
+    }
+
+    let content = limits::read_bounded_to_string(&prd_path, limits::SPEC_MAX_BYTES)?;
+    let mut lines: Vec<String> = content.split('\n').map(String::from).collect();
+
+    let mut fence_count = 0;
+    let mut found = false;
+    for line in lines.iter_mut() {
+        if line.trim() == "---" {
+            fence_count += 1;
+            if fence_count >= 2 {
+                break;
+            }
+            continue;
+        }
+        if fence_count == 1 && line.starts_with("status:") {
+            *line = format!("status: {status}");
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(AppError::Config(format!(
+            "PRD frontmatter missing status field: {}",
+            prd_path.display()
+        )));
+    }
+
+    persist::atomic_write(&prd_path, &lines.join("\n"))?;
+    Ok(())
+}
+
 /// Assign a fresh stable ID to an id-less PRD checklist item, rewriting only
 /// that line in place. The write-side counterpart of [`find_loop_by_id`].
 ///

@@ -2,7 +2,7 @@
 prd: prd-epics-view
 epic: support-project-management
 milestone: "0.2.0"
-status: proposed
+status: completed
 description: >
   Surface the spec layer in the UI grouped by milestone, and build the single
   bridge action that connects a planned PRD checklist item to .loopdeck/loops.md

@@ -2,7 +2,7 @@
 prd: prd-skill-split
 epic: support-project-management
 milestone: "0.2.0"
-status: accepted
+status: completed
 description: >
   Split the single fat loopdeck-orchestrator skill into three focused skills
   (runner + author + memory) and add a version-aware refresh so the split

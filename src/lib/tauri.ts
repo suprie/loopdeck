@@ -443,6 +443,24 @@ export async function assignLoopId(
 }
 
 /**
+ * Set a PRD's status frontmatter field ("proposed" / "accepted" / "completed").
+ * Rust: set_prd_status(path, epic_slug, prd_filename, status) -> Result<(), AppError>
+ */
+export async function setPrdStatus(
+  path: string,
+  epicSlug: string,
+  prdFilename: string,
+  status: string,
+): Promise<void> {
+  return invoke<void>("set_prd_status", {
+    path,
+    epicSlug,
+    prdFilename,
+    status,
+  });
+}
+
+/**
  * Read a spec file (epic README or PRD) under docs/epics/.
  * relPath is relative to docs/epics/ (e.g. "<slug>/prd-x.md").
  * Rust: read_spec_file(path, rel_path) -> Result<String, AppError>
