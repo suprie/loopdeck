@@ -104,25 +104,14 @@ pub(crate) struct ResolvedBudgets {
     pub run_wall_clock_secs: u64,
 }
 
-/// Build the prompt for one queued phase's orchestrated turn.
-///
-/// Mirrors `commands::agent::build_next_loop_prompt`'s shape (same
-/// `loopdeck-orchestrator` framing a human-initiated "Start Loop" uses) but
-/// targets a specific phase by stable execution ID instead of the first
-/// unchecked `loops.md` step, and injects the pre-flight interview's pinned
-/// answers so the turn never re-asks a question the human already answered
-/// while present.
-pub(crate) fn build_phase_prompt(
-    execution_id: &str,
-    loc: &LoopLocation,
-    interview: &[PinnedAnswer],
-    draft_pr_authorized: bool,
-    budgets: ResolvedBudgets,
-) -> String {
-    let mut prompt = format!(
-        "You are working on this LoopDeck project as part of an unattended \
-         overnight run. Use the `loopdeck-orchestrator` skill conventions. \
-         Run loop `{execution_id}` — \"{title}\" (epic `{epic}`, PRD `{prd}`, \
+/// One loop's goal paragraph: id/title/epic/prd/phase plus any pinned
+/// pre-flight interview answers so the turn never re-asks a question the
+/// human already answered while present. Shared by the single-phase and
+/// combined prompt builders — a combined turn just stacks one of these per
+/// loop under a shared preamble/suffix.
+fn phase_goal_block(execution_id: &str, loc: &LoopLocation, interview: &[PinnedAnswer]) -> String {
+    let mut block = format!(
+        "Run loop `{execution_id}` — \"{title}\" (epic `{epic}`, PRD `{prd}`, \
          phase `{phase}`). Implement it per the PRD phase's acceptance \
          criteria.",
         title = loc.title,
@@ -132,26 +121,76 @@ pub(crate) fn build_phase_prompt(
     );
 
     if !interview.is_empty() {
-        prompt.push_str(
+        block.push_str(
             "\n\nThe following clarifying questions were already answered by the \
              user before this run started — do not ask them again, use these \
              answers:\n",
         );
         for answer in interview {
-            prompt.push_str(&format!(
+            block.push_str(&format!(
                 "- Q: {}\n  A: {}\n",
                 answer.question, answer.answer
             ));
         }
     }
 
+    block
+}
+
+/// Build the prompt for one orchestrated turn covering *every* phase in
+/// `phases` at once — the run queue always merges its currently-queued
+/// phases into a single LLM call rather than firing one turn per phase (an
+/// overnight run of N loops is one combined session, not N sequential ones).
+/// A single-element slice produces the same shape of prompt as running just
+/// that one phase always did.
+pub(crate) fn build_combined_phase_prompt(
+    phases: &[(String, LoopLocation, Vec<PinnedAnswer>)],
+    draft_pr_authorized: bool,
+    budgets: ResolvedBudgets,
+) -> String {
+    let mut prompt = if phases.len() == 1 {
+        "You are working on this LoopDeck project as part of an unattended \
+         overnight run. Use the `loopdeck-orchestrator` skill conventions."
+            .to_string()
+    } else {
+        format!(
+            "You are working on this LoopDeck project as part of an unattended \
+             overnight run. Use the `loopdeck-orchestrator` skill conventions. \
+             This single session covers {count} queued loops — implement all of \
+             them below, in order, one after another, before running \
+             verify→ship once at the end for the combined changes.",
+            count = phases.len(),
+        )
+    };
+
+    for (i, (execution_id, loc, interview)) in phases.iter().enumerate() {
+        prompt.push_str("\n\n");
+        if phases.len() > 1 {
+            prompt.push_str(&format!("### Loop {}/{}\n", i + 1, phases.len()));
+        }
+        prompt.push_str(&phase_goal_block(execution_id, loc, interview));
+    }
+
     prompt.push_str(
-        "\n\nWhen done, update `.loopdeck/loops.md` (mark the step `[x]`, refresh \
-         `## Current`) and append any architectural decisions to \
+        "\n\nWhen done, update `.loopdeck/loops.md` (mark every loop's step `[x]`, \
+         refresh `## Current`) and append any architectural decisions to \
          `.loopdeck/decisions.md` per the memory convention. Run the full \
-         verify→ship flow (Phases 6-7)",
+         verify→ship flow (Phases 6-7) once, covering all loops above",
     );
     if draft_pr_authorized {
+        let phase_lines = phases
+            .iter()
+            .map(|(execution_id, loc, _)| {
+                format!(
+                    "  - `{execution_id}` — \"{title}\" ({epic} / {prd} / {phase})",
+                    title = loc.title,
+                    epic = loc.epic,
+                    prd = loc.prd,
+                    phase = loc.phase,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         prompt.push_str(&format!(
             " — this run was pre-authorized at queue time to open a draft pull \
              request unattended (RunConsent.draft_pr_authorized = true). When you \
@@ -168,16 +207,12 @@ pub(crate) fn build_phase_prompt(
              `loopdeck-prd-verifier` report you already produced earlier in this \
              turn. The PR body's `## Run metadata` section must state this exact \
              run metadata (do not invent or recompute it):\n\
-             - Phase: `{execution_id}` — \"{title}\" ({epic} / {prd} / {phase})\n\
-             - Budgets: {token_cap} tokens/phase cap · {phase_secs}s/phase \
-             wall-clock cap · {run_secs}s total-run wall-clock cap\n\n\
+             - Phases:\n{phase_lines}\n\
+             - Budgets: {token_cap} tokens total · {phase_secs}s wall-clock cap for \
+             this turn · {run_secs}s total-run wall-clock cap\n\n\
              After a successful draft creation, end your final response with an \
              exact `**Draft PR:** https://github.com/<owner>/<repo>/pull/<number>` \
              line so the executor can retain the review artifact.",
-            title = loc.title,
-            epic = loc.epic,
-            prd = loc.prd,
-            phase = loc.phase,
             token_cap = budgets.phase_token_cap,
             phase_secs = budgets.phase_wall_clock_secs,
             run_secs = budgets.run_wall_clock_secs,
@@ -402,6 +437,22 @@ pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
 mod tests {
     use super::*;
 
+    /// Single-loop convenience wrapper over [`build_combined_phase_prompt`]
+    /// for tests that only care about one phase's prompt shape.
+    fn build_phase_prompt(
+        execution_id: &str,
+        loc: &LoopLocation,
+        interview: &[PinnedAnswer],
+        draft_pr_authorized: bool,
+        budgets: ResolvedBudgets,
+    ) -> String {
+        build_combined_phase_prompt(
+            &[(execution_id.to_string(), loc.clone(), interview.to_vec())],
+            draft_pr_authorized,
+            budgets,
+        )
+    }
+
     #[test]
     fn extract_verdict_reads_pass() {
         let text = "some report\n\n**Verdict:** PASS\n\nall good";
@@ -469,6 +520,57 @@ mod tests {
     }
 
     #[test]
+    fn build_combined_phase_prompt_covers_every_loop_in_one_turn() {
+        let loc_a = LoopLocation {
+            epic: "overnight-orchestration".into(),
+            prd: "prd-run-queue".into(),
+            phase: "Phase 2".into(),
+            title: "Queue executor".into(),
+        };
+        let loc_b = LoopLocation {
+            epic: "overnight-orchestration".into(),
+            prd: "prd-run-queue".into(),
+            phase: "Phase 3".into(),
+            title: "Pre-flight interview".into(),
+        };
+        let interview_b = vec![PinnedAnswer {
+            question: "Which stall policy?".into(),
+            answer: "halt".into(),
+        }];
+        let prompt = build_combined_phase_prompt(
+            &[
+                ("prd-run-queue/phase-2".into(), loc_a, vec![]),
+                ("prd-run-queue/phase-3".into(), loc_b, interview_b),
+            ],
+            false,
+            test_budgets(),
+        );
+
+        assert!(prompt.contains("2 queued loops"));
+        assert!(prompt.contains("prd-run-queue/phase-2"));
+        assert!(prompt.contains("Queue executor"));
+        assert!(prompt.contains("prd-run-queue/phase-3"));
+        assert!(prompt.contains("Pre-flight interview"));
+        assert!(prompt.contains("Which stall policy?"));
+        assert!(prompt.contains("halt"));
+        assert!(prompt.contains("verify→ship flow (Phases 6-7) once"));
+    }
+
+    #[test]
+    fn build_combined_phase_prompt_single_loop_omits_batch_framing() {
+        let loc = LoopLocation {
+            epic: "e".into(),
+            prd: "p".into(),
+            phase: "ph".into(),
+            title: "t".into(),
+        };
+        let prompt =
+            build_combined_phase_prompt(&[("e/p-1".into(), loc, vec![])], true, test_budgets());
+        assert!(!prompt.contains("queued loops"));
+        assert!(!prompt.contains("### Loop"));
+    }
+
+    #[test]
     fn build_phase_prompt_omits_interview_section_when_empty() {
         let loc = LoopLocation {
             epic: "e".into(),
@@ -530,8 +632,8 @@ mod tests {
         assert!(prompt.contains("## Verify Verdict"));
         assert!(prompt.contains("## Run metadata"));
         assert!(prompt.contains("prd-unattended-ship/phase-2"));
-        assert!(prompt.contains("500000 tokens/phase cap"));
-        assert!(prompt.contains("5400s/phase wall-clock cap"));
+        assert!(prompt.contains("500000 tokens total"));
+        assert!(prompt.contains("5400s wall-clock cap for this turn"));
         assert!(prompt.contains("28800s total-run wall-clock cap"));
     }
 

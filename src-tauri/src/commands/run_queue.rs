@@ -21,7 +21,7 @@ use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::limits;
 use crate::run_executor::{
-    self, build_interview_prompt, build_phase_prompt, extract_draft_pr_url,
+    self, build_combined_phase_prompt, build_interview_prompt, extract_draft_pr_url,
     extract_interview_answers, extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
 use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
@@ -825,6 +825,44 @@ fn requeue_terminal_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// Indices of every phase currently `Queued`, in plan order — the unit of
+/// work `execute_run` hands to one combined LLM turn. `None` once nothing is
+/// left to run.
+fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
+    let indices: Vec<usize> = plan
+        .phases
+        .iter()
+        .enumerate()
+        .filter(|(_, phase)| phase.status == RunPhaseStatus::Queued)
+        .map(|(i, _)| i)
+        .collect();
+    (!indices.is_empty()).then_some(indices)
+}
+
+/// Split a combined turn's total token usage evenly across every phase in
+/// the batch that produced it — there is no per-loop usage signal to divide
+/// on more precisely.
+fn set_batch_token_usage(plan: &mut RunPlan, batch: &[usize], total: u64, batch_len: u64) {
+    let per_phase = total / batch_len.max(1);
+    for &idx in batch {
+        plan.phases[idx].token_usage = per_phase;
+    }
+}
+
+fn kill_batch(plan: &mut RunPlan, batch: &[usize], reason: &str) {
+    for &idx in batch {
+        plan.phases[idx].status = RunPhaseStatus::Killed;
+        plan.phases[idx].park_payload = Some(reason.to_string());
+    }
+}
+
+fn park_batch(plan: &mut RunPlan, batch: &[usize], reason: &str) {
+    for &idx in batch {
+        plan.phases[idx].status = RunPhaseStatus::Parked;
+        plan.phases[idx].park_payload = Some(reason.to_string());
+    }
+}
+
 fn park_blocked_dependents(plan: &mut RunPlan, execution_id: &str) {
     for blocked_id in run_executor::phases_blocked_by_park(plan, execution_id, plan.stall_policy) {
         if let Some(phase) = plan
@@ -1049,14 +1087,10 @@ async fn execute_run(
         }
     }
 
-    for idx in 0..plan.phases.len() {
-        if plan.phases[idx].status != RunPhaseStatus::Queued {
-            continue;
-        }
+    while let Some(batch) = next_queued_batch(&plan) {
         plan.wall_clock_secs = run_started.elapsed().as_secs();
         if run_started.elapsed() >= resolved_run_timeout(&plan) {
-            plan.phases[idx].status = RunPhaseStatus::Killed;
-            plan.phases[idx].park_payload = Some("total run wall-clock budget exceeded".into());
+            kill_batch(&mut plan, &batch, "total run wall-clock budget exceeded");
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
             notify_run_terminal(
@@ -1068,56 +1102,63 @@ async fn execute_run(
             return Ok(());
         }
         if cancel.load(Ordering::SeqCst) {
-            plan.phases[idx].status = RunPhaseStatus::Killed;
-            plan.phases[idx].park_payload = Some("run cancelled".into());
+            kill_batch(&mut plan, &batch, "run cancelled");
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
             notify_run_terminal(app, root, "LoopDeck run killed", "Run was cancelled");
             return Ok(());
         }
 
-        let execution_id = plan.phases[idx].execution_id.clone();
-        let interview = plan.phases[idx].interview.clone();
-
-        let loc = match epic::find_loop_by_id(root, &execution_id) {
-            Some(loc) => loc,
-            None => {
-                plan.phases[idx].status = RunPhaseStatus::Failed;
-                plan.environment.worktree_kept = true;
-                runplan::save(root, &plan)?;
-                return Err(AppError::RunPlan(format!(
-                    "queued phase \"{execution_id}\" no longer exists in docs/epics/"
-                )));
+        let mut locs: Vec<(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)> =
+            Vec::with_capacity(batch.len());
+        for &idx in &batch {
+            let execution_id = plan.phases[idx].execution_id.clone();
+            match epic::find_loop_by_id(root, &execution_id) {
+                Some(loc) => locs.push((execution_id, loc, plan.phases[idx].interview.clone())),
+                None => {
+                    plan.phases[idx].status = RunPhaseStatus::Failed;
+                    plan.environment.worktree_kept = true;
+                    runplan::save(root, &plan)?;
+                    return Err(AppError::RunPlan(format!(
+                        "queued phase \"{execution_id}\" no longer exists in docs/epics/"
+                    )));
+                }
             }
-        };
+        }
 
         // Mark running in both the plan and execution.yaml before spawning
         // the turn, so a crash mid-turn leaves truthful on-disk state
         // (reconciled to Interrupted/back-to-current by the next read) rather
         // than a phase that silently never started.
-        plan.phases[idx].status = RunPhaseStatus::Running;
+        for &idx in &batch {
+            plan.phases[idx].status = RunPhaseStatus::Running;
+        }
         runplan::save(root, &plan)?;
 
+        // `execution.yaml` only tracks a single `current` loop — the first
+        // phase in the batch stands in as that UI-focus pointer while the
+        // combined turn covers all of them; `run-plan.yaml`'s per-phase
+        // `status` (below) remains the accurate per-loop record.
+        let (lead_execution_id, lead_loc, _) = &locs[0];
         let loaded = execution::load(root)?;
         let promoted = loaded.state.promote_loop_into_current(
-            &execution_id,
-            &loc.title,
+            lead_execution_id,
+            &lead_loc.title,
             LoopOrigin {
-                epic: loc.epic.clone(),
-                prd: loc.prd.clone(),
-                phase: loc.phase.clone(),
+                epic: lead_loc.epic.clone(),
+                prd: lead_loc.prd.clone(),
+                phase: lead_loc.phase.clone(),
             },
             chrono::Utc::now(),
         )?;
         execution::save(root, &promoted, loaded.state.revision)?;
 
-        let phase_token_cap = resolved_phase_token_cap(&plan);
-        let phase_timeout = resolved_phase_timeout(&plan);
+        let batch_len = batch.len() as u64;
+        let phase_token_cap = resolved_phase_token_cap(&plan).saturating_mul(batch_len);
+        let phase_timeout = resolved_phase_timeout(&plan) * batch.len() as u32;
         let run_timeout = resolved_run_timeout(&plan);
-        let prompt = build_phase_prompt(
-            &execution_id,
-            &loc,
-            &interview,
+        let prompt = build_combined_phase_prompt(
+            &locs,
             plan.consent.draft_pr_authorized,
             ResolvedBudgets {
                 phase_token_cap,
@@ -1127,7 +1168,11 @@ async fn execute_run(
         );
         let event_app = app.clone();
         let event_project_path = root.to_string_lossy().into_owned();
-        let event_execution_id = execution_id.clone();
+        let event_execution_id = locs
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
         let channel: Channel<ClaudeEvent> = Channel::new(move |event| {
             let event = match event.deserialize::<serde_json::Value>() {
                 Ok(event) => event,
@@ -1156,12 +1201,17 @@ async fn execute_run(
         } else {
             (phase_timeout, "phase wall-clock budget exceeded")
         };
+        let turn_title = if locs.len() == 1 {
+            lead_loc.title.clone()
+        } else {
+            format!("{} queued loops", locs.len())
+        };
         let turn = start_fresh_and_record_streaming_in_root(
             state,
             &worktree,
             root,
             &prompt,
-            Some(loc.title.clone()),
+            Some(turn_title),
             &channel,
             StreamingRunOptions {
                 token_budget: Some(&token_budget),
@@ -1184,9 +1234,12 @@ async fn execute_run(
                 Err(error)
             }
         };
-        plan.phases[idx].wall_clock_secs = phase_started.elapsed().as_secs();
+        let per_phase_secs = phase_started.elapsed().as_secs() / batch_len.max(1);
+        for &idx in &batch {
+            plan.phases[idx].wall_clock_secs = per_phase_secs;
+        }
         plan.wall_clock_secs = run_started.elapsed().as_secs();
-        plan.phases[idx].token_usage = token_budget.used();
+        set_batch_token_usage(&mut plan, &batch, token_budget.used(), batch_len);
 
         match outcome {
             Ok(response) => {
@@ -1196,10 +1249,9 @@ async fn execute_run(
                     .map(|usage| usage.input_tokens.saturating_add(usage.output_tokens))
                     .unwrap_or_default();
                 let exceeded = token_budget.observe_total(tokens);
-                plan.phases[idx].token_usage = token_budget.used();
+                set_batch_token_usage(&mut plan, &batch, token_budget.used(), batch_len);
                 if exceeded {
-                    plan.phases[idx].status = RunPhaseStatus::Killed;
-                    plan.phases[idx].park_payload = Some(token_budget.exceeded_message());
+                    kill_batch(&mut plan, &batch, &token_budget.exceeded_message());
                     plan.environment.worktree_kept = true;
                     runplan::save(root, &plan)?;
                     let loaded = execution::load(root)?;
@@ -1221,10 +1273,11 @@ async fn execute_run(
                 if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
                     let Some(url) = extract_draft_pr_url(&response.result) else {
                         let reason = "green verification passed, but no unattended draft PR URL was recorded";
-                        plan.phases[idx].status = RunPhaseStatus::Parked;
-                        plan.phases[idx].park_payload = Some(reason.into());
+                        park_batch(&mut plan, &batch, reason);
                         plan.environment.worktree_kept = true;
-                        park_blocked_dependents(&mut plan, &execution_id);
+                        for (execution_id, _, _) in &locs {
+                            park_blocked_dependents(&mut plan, execution_id);
+                        }
                         runplan::save(root, &plan)?;
                         let loaded = execution::load(root)?;
                         let abandoned =
@@ -1234,8 +1287,10 @@ async fn execute_run(
                         execution::save(root, &abandoned, loaded.state.revision)?;
                         continue;
                     };
-                    plan.phases[idx].status = RunPhaseStatus::Completed;
-                    plan.phases[idx].park_payload = Some(format!("draft PR: {url}"));
+                    for &idx in &batch {
+                        plan.phases[idx].status = RunPhaseStatus::Completed;
+                        plan.phases[idx].park_payload = Some(format!("draft PR: {url}"));
+                    }
                     runplan::save(root, &plan)?;
 
                     let loaded = execution::load(root)?;
@@ -1251,10 +1306,11 @@ async fn execute_run(
                         Some(RunVerdict::Block) => "verify verdict: BLOCK".to_string(),
                         _ => "no verify verdict found in the turn's final response".to_string(),
                     };
-                    plan.phases[idx].status = RunPhaseStatus::Parked;
-                    plan.phases[idx].park_payload = Some(reason.clone());
+                    park_batch(&mut plan, &batch, &reason);
                     plan.environment.worktree_kept = true;
-                    park_blocked_dependents(&mut plan, &execution_id);
+                    for (execution_id, _, _) in &locs {
+                        park_blocked_dependents(&mut plan, execution_id);
+                    }
                     runplan::save(root, &plan)?;
 
                     let loaded = execution::load(root)?;
@@ -1276,10 +1332,11 @@ async fn execute_run(
                     Some(ref json) => format!("__QUESTIONS__{json}__END__ {detail}"),
                     None => detail.clone(),
                 };
-                plan.phases[idx].status = RunPhaseStatus::Parked;
-                plan.phases[idx].park_payload = Some(payload);
+                park_batch(&mut plan, &batch, &payload);
                 plan.environment.worktree_kept = true;
-                park_blocked_dependents(&mut plan, &execution_id);
+                for (execution_id, _, _) in &locs {
+                    park_blocked_dependents(&mut plan, execution_id);
+                }
                 runplan::save(root, &plan)?;
 
                 let loaded = execution::load(root)?;
@@ -1298,12 +1355,15 @@ async fn execute_run(
             Err(e) => {
                 let killed_by_budget = e.to_string().contains("wall-clock budget exceeded")
                     || e.to_string().contains("token budget exceeded");
-                plan.phases[idx].status = if killed_by_budget {
+                let status = if killed_by_budget {
                     RunPhaseStatus::Killed
                 } else {
                     RunPhaseStatus::Failed
                 };
-                plan.phases[idx].park_payload = Some(e.to_string());
+                for &idx in &batch {
+                    plan.phases[idx].status = status;
+                    plan.phases[idx].park_payload = Some(e.to_string());
+                }
                 plan.environment.worktree_kept = true;
                 runplan::save(root, &plan)?;
 
@@ -1554,6 +1614,59 @@ mod unattended_tests {
             assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
             assert!(plan.phases[0].park_payload.is_none());
         }
+    }
+
+    #[test]
+    fn next_queued_batch_collects_every_queued_index_in_order() {
+        let mut plan = parked_chain();
+        plan.phases[1].status = RunPhaseStatus::Completed;
+
+        let batch = next_queued_batch(&plan).expect("two phases are still queued");
+
+        assert_eq!(batch, vec![0, 2]);
+    }
+
+    #[test]
+    fn next_queued_batch_is_none_once_nothing_is_queued() {
+        let mut plan = parked_chain();
+        for phase in &mut plan.phases {
+            phase.status = RunPhaseStatus::Completed;
+        }
+
+        assert_eq!(next_queued_batch(&plan), None);
+    }
+
+    #[test]
+    fn kill_batch_and_park_batch_apply_to_every_index_in_the_batch() {
+        let mut plan = parked_chain();
+
+        kill_batch(&mut plan, &[0, 2], "total run wall-clock budget exceeded");
+        assert_eq!(plan.phases[0].status, RunPhaseStatus::Killed);
+        assert_eq!(plan.phases[1].status, RunPhaseStatus::Queued);
+        assert_eq!(plan.phases[2].status, RunPhaseStatus::Killed);
+        assert_eq!(
+            plan.phases[0].park_payload.as_deref(),
+            Some("total run wall-clock budget exceeded")
+        );
+
+        park_batch(&mut plan, &[0, 1, 2], "verify verdict: WARN");
+        assert!(plan
+            .phases
+            .iter()
+            .all(|phase| phase.status == RunPhaseStatus::Parked));
+        assert!(plan
+            .phases
+            .iter()
+            .all(|phase| phase.park_payload.as_deref() == Some("verify verdict: WARN")));
+    }
+
+    #[test]
+    fn set_batch_token_usage_splits_the_total_evenly_across_the_batch() {
+        let mut plan = parked_chain();
+
+        set_batch_token_usage(&mut plan, &[0, 1, 2], 900, 3);
+
+        assert!(plan.phases.iter().all(|phase| phase.token_usage == 300));
     }
 
     #[test]
