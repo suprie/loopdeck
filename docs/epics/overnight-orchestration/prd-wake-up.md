@@ -71,7 +71,7 @@ Directional; refine during implementation.
 
 ### Phase 1 — Notifications
 
-- [ ] `wake-up/add-tauri-plugin` Add `tauri-plugin-notification` with its capability entry
+- [x] `wake-up/add-tauri-plugin` Add `tauri-plugin-notification` with its capability entry
 - [ ] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked; clicking focuses the report view
 
 ### Phase 2 — Morning report

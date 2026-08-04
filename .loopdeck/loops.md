@@ -208,7 +208,12 @@ the previous one completes.
   - [x] Phase 5 — Phase picker UI (2026-08-01, see `## Current`)
   - [x] Phase 6 — Tests (2026-08-01, see `## Current`) — 6 integration tests + gates green
 - [ ] **`prd-unattended-ship`** — not started. Depends on `prd-run-queue`.
-- [ ] **`prd-wake-up`** — not started. Depends on `prd-unattended-ship`.
+- [ ] **`prd-wake-up`** — in progress (2026-08-04, run `run-b460e76f`). Depends on `prd-unattended-ship` (done).
+  - [ ] Phase 1 — Notifications
+    - [x] `wake-up/add-tauri-plugin` Add `tauri-plugin-notification` with its capability entry (2026-08-04, see `## Current`)
+    - [ ] `wake-up/notify-after-completed` Notify on run completed, budget kill, and all-remaining-phases-parked; clicking focuses the report view
+  - [ ] Phase 2 — Morning report
+  - [ ] Phase 3 — Tests
 
 ### Release Gate A — Hardened private alpha
 
