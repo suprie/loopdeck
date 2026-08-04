@@ -897,6 +897,60 @@ pub fn validate_loop_ids(repo_path: &Path) -> Vec<LoopIdDiagnostic> {
     diags
 }
 
+// ── Loop-ID generation ────────────────────────────────────────────────
+
+/// Generate a collision-free stable loop ID for a new checklist item.
+///
+/// Kebab-cases `title` (lowercase, non-alphanumeric runs collapsed to a
+/// single hyphen, leading/trailing hyphens trimmed) and scopes it under
+/// `epic_slug` as `<epic_slug>/<title-slug>`. If that ID is already present
+/// in `existing_ids`, appends `-2`, `-3`, ... until unique.
+///
+/// Pure: no I/O — the caller supplies `existing_ids` (e.g. every ID already
+/// found across `docs/epics/` by `validate_loop_ids`/`parse_epics`).
+///
+/// No production caller yet — this is the `assign-loop-id/generate-collision-
+/// free-slug` slice only; the `assign_loop_id` IPC command that calls it is a
+/// separate, not-yet-implemented Phase 1 checklist item.
+#[allow(dead_code)]
+pub fn generate_loop_id(epic_slug: &str, title: &str, existing_ids: &[String]) -> String {
+    let slug = kebab_case(title);
+    let base = format!("{epic_slug}/{slug}");
+    if !existing_ids.iter().any(|id| id == &base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{epic_slug}/{slug}-{n}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Lowercase `title`, collapsing any run of non-alphanumeric characters into
+/// a single hyphen, and trim a leading/trailing hyphen left by punctuation at
+/// either end.
+#[allow(dead_code)]
+fn kebab_case(title: &str) -> String {
+    let mut result = String::with_capacity(title.len());
+    let mut prev_hyphen = false;
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen && !result.is_empty() {
+            result.push('-');
+            prev_hyphen = true;
+        }
+    }
+    if result.ends_with('-') {
+        result.pop();
+    }
+    result
+}
+
 /// Scan one PRD body's `## Phases` checklist items for loop-ID findings.
 ///
 /// State machine over lines: skip the YAML frontmatter, skip fenced blocks,
@@ -1865,6 +1919,42 @@ _No active loop._
                 "{invalid} should be invalid"
             );
         }
+    }
+
+    // ── Stable loop-ID generation tests ────────────────────────────
+
+    #[test]
+    fn test_generate_loop_id_no_collision() {
+        let id = generate_loop_id("overnight-orchestration", "Simple Title", &[]);
+        assert_eq!(id, "overnight-orchestration/simple-title");
+    }
+
+    #[test]
+    fn test_generate_loop_id_one_collision() {
+        let existing = vec!["assign-loop-id/simple-title".to_string()];
+        let id = generate_loop_id("assign-loop-id", "Simple Title", &existing);
+        assert_eq!(id, "assign-loop-id/simple-title-2");
+    }
+
+    #[test]
+    fn test_generate_loop_id_multiple_collisions() {
+        let existing = vec![
+            "assign-loop-id/simple-title".to_string(),
+            "assign-loop-id/simple-title-2".to_string(),
+            "assign-loop-id/simple-title-3".to_string(),
+        ];
+        let id = generate_loop_id("assign-loop-id", "Simple Title", &existing);
+        assert_eq!(id, "assign-loop-id/simple-title-4");
+    }
+
+    #[test]
+    fn test_generate_loop_id_kebab_cases_title() {
+        let id = generate_loop_id(
+            "assign-loop-id",
+            "  Rewrite the Checklist Line: (locate & fix!)  ",
+            &[],
+        );
+        assert_eq!(id, "assign-loop-id/rewrite-the-checklist-line-locate-fix");
     }
 
     #[test]

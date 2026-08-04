@@ -119,3 +119,9 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: proposed
 - **Context**: AI session active on LoopDeck development.
 
+## 2026-08-04 — `assign-loop-id/generate-collision-free-slug` promoted and implemented
+- **Status**: accepted
+- **Context**: First loop of the newly-drafted `docs/epics/overnight-orchestration/prd-assign-loop-id.md` (Phase 1), promoted into a background worktree session rather than worked inline in this conversation.
+- **Consequences**: New pure `epic::generate_loop_id(epic_slug, title, existing_ids) -> String` + private `kebab_case` helper (`src-tauri/src/epic.rs`) — kebab-cases a loop title, scopes it `<epic_slug>/<title-slug>`, appends `-2`/`-3`/... on collision against a caller-supplied id list. `#[allow(dead_code)]` on both — no production caller yet; the `assign_loop_id` IPC command that will call this is a separate, unpromoted Phase 1 item. 4 new tests (no collision, one collision, multiple collisions, real kebab-casing of punctuation/spaces/mixed case). The background session ran in an isolated worktree branched from git history, so it never saw this session's still-uncommitted PRD file and reconstructed a stub from the task prompt alone — its code changes were verified correct and reapplied here against the real, full PRD (which now has this one item checked `[x]`); its own worktree/PRD stub was left untouched, not merged.
+- **Detail**: Gates green in this worktree: fmt/clippy(lib, `-D warnings`)/test(580 passed, +4, 8 ignored). No frontend change.
+
