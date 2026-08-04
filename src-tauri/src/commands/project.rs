@@ -142,9 +142,7 @@ pub async fn import_project(
 fn validate_project_name(name: &str) -> Result<String, AppError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
-        return Err(AppError::InvalidPath(
-            "project name cannot be empty".into(),
-        ));
+        return Err(AppError::InvalidPath("project name cannot be empty".into()));
     }
     if trimmed.len() > 120 {
         return Err(AppError::InvalidPath("project name too long".into()));
