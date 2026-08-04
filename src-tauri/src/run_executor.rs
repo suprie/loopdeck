@@ -564,11 +564,8 @@ mod tests {
             phase: "ph".into(),
             title: "t".into(),
         };
-        let prompt = build_combined_phase_prompt(
-            &[("e/p-1".into(), loc, vec![])],
-            true,
-            test_budgets(),
-        );
+        let prompt =
+            build_combined_phase_prompt(&[("e/p-1".into(), loc, vec![])], true, test_budgets());
         assert!(!prompt.contains("queued loops"));
         assert!(!prompt.contains("### Loop"));
     }
