@@ -66,27 +66,27 @@ against real examples, not speculatively._
 
 ### Phase 1 — Audit
 
-- [x] Diff `docs/PRD.md`'s stated non-goals and "V1" scope against the
+- [x] `optimization/diff-docs-prd-md-s-stated-non-goals-and-v1-scope-against-the` Diff `docs/PRD.md`'s stated non-goals and "V1" scope against the
       current `src-tauri/src/` tree; list every contradiction with
       file:line evidence.
-- [x] Diff `CLAUDE.md`'s "Project Structure" and file-size callouts
+- [x] `optimization/diff-claude-md-s-project-structure-and-file-size-callouts` Diff `CLAUDE.md`'s "Project Structure" and file-size callouts
       (`commands.rs`, `claude_session.rs`, `conversation.rs`, `agents.rs`,
       `epic.rs`, `config.rs`) against the actual current file sizes and
       layout; list every contradiction.
 
 ### Phase 2 — Rewrite
 
-- [x] Rewrite `docs/PRD.md`'s status/non-goals section to reflect shipped
+- [x] `optimization/rewrite-docs-prd-md-s-status-non-goals-section-to-reflect-shipped` Rewrite `docs/PRD.md`'s status/non-goals section to reflect shipped
       reality, marking superseded items as historical with a date and a
       pointer to the epic that shipped them.
-- [x] Rewrite `CLAUDE.md`'s "Project Structure" section to match the actual
+- [x] `optimization/rewrite-claude-md-s-project-structure-section-to-match-the-actual` Rewrite `CLAUDE.md`'s "Project Structure" section to match the actual
       `commands/` directory and current large-file list.
 
 ### Phase 3 — Verification
 
-- [x] Re-run the Phase 1 diff against the rewritten docs; confirm zero
+- [x] `optimization/re-run-the-phase-1-diff-against-the-rewritten-docs-confirm-zero` Re-run the Phase 1 diff against the rewritten docs; confirm zero
       remaining contradictions.
-- [x] Have `loopdeck-prd-verifier` (or a manual pass) confirm the rewritten
+- [x] `optimization/have-loopdeck-prd-verifier-or-a-manual-pass-confirm-the-rewritten` Have `loopdeck-prd-verifier` (or a manual pass) confirm the rewritten
       `docs/PRD.md` accurately states current scope before this PRD is
       marked accepted.
 
