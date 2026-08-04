@@ -181,6 +181,7 @@ pub fn run() {
             commands::epics::promote_epic_loop,
             commands::epics::toggle_loop_step,
             commands::epics::toggle_prd_loop,
+            commands::epics::assign_loop_id,
             commands::epics::read_spec_file,
             commands::epics::write_spec_file,
             // Structured execution state (execution.rs) — 0.2.1

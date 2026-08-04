@@ -414,6 +414,113 @@ pub fn toggle_prd_loop(
     Ok(!currently_checked)
 }
 
+/// Assign a fresh stable ID to an id-less PRD checklist item, rewriting only
+/// that line in place. The write-side counterpart of [`find_loop_by_id`].
+///
+/// Locates the target line the same way [`toggle_prd_loop`] does — by its
+/// current display title, first match wins — then:
+/// - Rejects (`AppError::Conflict`) if that item already carries a stable ID.
+///   Assignment only; an existing ID is never overwritten (PRD Non-Goals).
+/// - Otherwise generates a collision-free `<epic_slug>/<title-slug>` ID via
+///   [`generate_loop_id`], scoped against every ID already parsed under this
+///   epic (matches the PRD's own Design section: same-epic scope, not
+///   repo-wide — ids are namespaced by epic already, so a repo-wide scan
+///   would just re-check IDs that already can't collide).
+/// - Rewrites only the checkbox line: inserts `` `id` `` immediately after
+///   the `- [ ]` / `- [x]` token and leaves the rest of that line — and every
+///   other line in the file — untouched byte-for-byte.
+///
+/// Returns the assigned ID.
+pub fn assign_loop_id(
+    repo_path: &Path,
+    epic_slug: &str,
+    prd_filename: &str,
+    loop_title: &str,
+) -> Result<String, AppError> {
+    let epics_root = repo_path
+        .join("docs")
+        .join("epics")
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("docs/epics not found: {e}")))?;
+    let prd_path =
+        paths::resolve_within(&epics_root, &format!("{epic_slug}/{prd_filename}"), false)?;
+
+    if !prd_path.exists() {
+        return Err(AppError::ProjectNotFound(format!(
+            "PRD file not found: {epic_slug}/{prd_filename}"
+        )));
+    }
+
+    let content = limits::read_bounded_to_string(&prd_path, limits::SPEC_MAX_BYTES)?;
+    let needle = loop_title.trim();
+
+    // Locate the target line: same checkbox-prefix detection as
+    // `parse_phase_loops`, keeping the exact matched prefix text (so
+    // "- [X] " casing round-trips) and the untouched remainder.
+    let mut found: Option<(usize, &'static str, Option<String>)> = None;
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let prefix = if trimmed.starts_with("- [ ] ") {
+            "- [ ] "
+        } else if trimmed.starts_with("- [x] ") {
+            "- [x] "
+        } else if trimmed.starts_with("- [X] ") {
+            "- [X] "
+        } else {
+            continue;
+        };
+        let rest = &trimmed[prefix.len()..];
+        let (id, title) = split_loop_id(rest);
+        if title.trim() == needle {
+            found = Some((i, prefix, id));
+            break;
+        }
+    }
+
+    let (line_idx, prefix, existing_id) = found.ok_or_else(|| {
+        AppError::ProjectNotFound(format!(
+            "checklist item not found in {}: {loop_title}",
+            prd_path.display()
+        ))
+    })?;
+
+    if let Some(id) = existing_id {
+        return Err(AppError::Conflict(format!(
+            "loop already has an id (`{id}`) — assign-loop-id never overwrites an existing id"
+        )));
+    }
+
+    // Collision scope: every ID already parsed under this loop's own epic.
+    let existing_ids: Vec<String> = parse_epics(repo_path)
+        .into_iter()
+        .find(|e| e.slug == epic_slug)
+        .map(|epic| {
+            epic.prds
+                .iter()
+                .flat_map(|prd| prd.phases.iter())
+                .flat_map(|phase| phase.loops.iter())
+                .filter_map(|l| l.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let new_id = generate_loop_id(epic_slug, loop_title, &existing_ids);
+
+    let lines: Vec<&str> = content.split('\n').collect();
+    let old_line = lines[line_idx];
+    let indent_len = old_line.len() - old_line.trim_start().len();
+    let indent = &old_line[..indent_len];
+    let rest = &old_line[indent_len + prefix.len()..];
+    let new_line = format!("{indent}{prefix}`{new_id}` {rest}");
+
+    let mut new_lines = lines;
+    let owned_new_line = new_line;
+    new_lines[line_idx] = &owned_new_line;
+    let new_content = new_lines.join("\n");
+
+    persist::atomic_write(&prd_path, &new_content)?;
+    Ok(new_id)
+}
+
 // ── Spec file read/write (sandboxed to docs/epics/) ──────────────────
 
 /// Resolve a relative path under `docs/epics/` to an absolute, sandbox-safe
@@ -907,12 +1014,8 @@ pub fn validate_loop_ids(repo_path: &Path) -> Vec<LoopIdDiagnostic> {
 /// in `existing_ids`, appends `-2`, `-3`, ... until unique.
 ///
 /// Pure: no I/O — the caller supplies `existing_ids` (e.g. every ID already
-/// found across `docs/epics/` by `validate_loop_ids`/`parse_epics`).
-///
-/// No production caller yet — this is the `assign-loop-id/generate-collision-
-/// free-slug` slice only; the `assign_loop_id` IPC command that calls it is a
-/// separate, not-yet-implemented Phase 1 checklist item.
-#[allow(dead_code)]
+/// found across `docs/epics/` by `validate_loop_ids`/`parse_epics`). Used by
+/// [`assign_loop_id`] to mint the ID it writes into the checklist line.
 pub fn generate_loop_id(epic_slug: &str, title: &str, existing_ids: &[String]) -> String {
     let slug = kebab_case(title);
     let base = format!("{epic_slug}/{slug}");
@@ -932,7 +1035,6 @@ pub fn generate_loop_id(epic_slug: &str, title: &str, existing_ids: &[String]) -
 /// Lowercase `title`, collapsing any run of non-alphanumeric characters into
 /// a single hyphen, and trim a leading/trailing hyphen left by punctuation at
 /// either end.
-#[allow(dead_code)]
 fn kebab_case(title: &str) -> String {
     let mut result = String::with_capacity(title.len());
     let mut prev_hyphen = false;
@@ -1955,6 +2057,173 @@ _No active loop._
             &[],
         );
         assert_eq!(id, "assign-loop-id/rewrite-the-checklist-line-locate-fix");
+    }
+
+    // ── assign_loop_id tests ────────────────────────────────────────
+
+    #[test]
+    fn test_assign_loop_id_rewrites_line_preserving_rest_unchecked() {
+        let dir = create_temp_repo();
+        let body = "\
+---
+prd: prd-a
+epic: e
+status: proposed
+description: >
+  d
+---
+
+# PRD — A
+
+## Phases
+
+### Phase 1 — P
+- [ ] `e/one` Already has an id
+- [ ] Legacy item needing an id
+- [x] Another checked item
+";
+        write_prd(&dir, "e", "prd-a.md", body);
+
+        let assigned = assign_loop_id(&dir, "e", "prd-a.md", "Legacy item needing an id")
+            .expect("should assign an id");
+        assert_eq!(assigned, "e/legacy-item-needing-an-id");
+
+        let new_content =
+            std::fs::read_to_string(dir.join("docs").join("epics").join("e").join("prd-a.md"))
+                .unwrap();
+        let expected = body.replace(
+            "- [ ] Legacy item needing an id",
+            "- [ ] `e/legacy-item-needing-an-id` Legacy item needing an id",
+        );
+        assert_eq!(
+            new_content, expected,
+            "only the target line should change; every other line stays byte-for-byte"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_assign_loop_id_preserves_checked_state() {
+        let dir = create_temp_repo();
+        let body = "\
+---
+prd: prd-a
+epic: e
+status: proposed
+description: >
+  d
+---
+
+## Phases
+
+### Phase 1 — P
+- [x] Legacy checked item
+";
+        write_prd(&dir, "e", "prd-a.md", body);
+
+        assign_loop_id(&dir, "e", "prd-a.md", "Legacy checked item").unwrap();
+
+        let new_content =
+            std::fs::read_to_string(dir.join("docs").join("epics").join("e").join("prd-a.md"))
+                .unwrap();
+        assert!(
+            new_content.contains("- [x] `e/legacy-checked-item` Legacy checked item"),
+            "checked state should be preserved, got: {new_content}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_assign_loop_id_rejects_when_already_has_id() {
+        let dir = create_temp_repo();
+        let body = "\
+---
+prd: prd-a
+epic: e
+status: proposed
+description: >
+  d
+---
+
+## Phases
+
+### Phase 1 — P
+- [ ] `e/one` Already has an id
+";
+        write_prd(&dir, "e", "prd-a.md", body);
+
+        let err = assign_loop_id(&dir, "e", "prd-a.md", "Already has an id")
+            .expect_err("should reject a loop that already has an id");
+        assert!(matches!(err, AppError::Conflict(_)));
+
+        // File must be untouched.
+        let new_content =
+            std::fs::read_to_string(dir.join("docs").join("epics").join("e").join("prd-a.md"))
+                .unwrap();
+        assert_eq!(new_content, body);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_assign_loop_id_loop_not_found_errors() {
+        let dir = create_temp_repo();
+        let body = "\
+---
+prd: prd-a
+epic: e
+status: proposed
+description: >
+  d
+---
+
+## Phases
+
+### Phase 1 — P
+- [ ] Some other item
+";
+        write_prd(&dir, "e", "prd-a.md", body);
+
+        let err = assign_loop_id(&dir, "e", "prd-a.md", "Does not exist")
+            .expect_err("should error when the loop title is not found");
+        assert!(matches!(err, AppError::ProjectNotFound(_)));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_assign_loop_id_collision_scoped_to_epic() {
+        let dir = create_temp_repo();
+        write_epic(
+            &dir,
+            "e",
+            &VALID_EPIC_README.replace("support-project-management", "e"),
+        );
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+             ## Phases\n\n### Phase 1 — P\n\
+             - [ ] `e/dup` Existing loop\n",
+        );
+        write_prd(
+            &dir,
+            "e",
+            "prd-b.md",
+            "---\nprd: prd-b\nepic: e\nstatus: proposed\ndescription: >\n  d\n---\n\n\
+             ## Phases\n\n### Phase 1 — P\n\
+             - [ ] Dup\n",
+        );
+
+        // "Dup" kebab-cases to the same base slug as the existing `e/dup` id
+        // in prd-a.md — the epic-scoped collision check must bump it to -2.
+        let assigned = assign_loop_id(&dir, "e", "prd-b.md", "Dup").unwrap();
+        assert_eq!(assigned, "e/dup-2");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

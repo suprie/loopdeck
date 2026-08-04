@@ -2,6 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-04 — `assign-loop-id`: rewrite scoped to one line, collision check scoped to one epic
+
+- **Status**: accepted
+- **Context**: `prd-assign-loop-id.md` Phase 1's remaining two items (`rewrite-checklist-line`, `reject-already-id-loops`) are two facets of the same `assign_loop_id` command, not independently buildable — implemented together. Two judgment calls the PRD left open: how wide to scope `generate_loop_id`'s collision check, and whether to normalize the checkbox token or preserve it byte-for-byte.
+- **Consequences**: Collision check scoped to the target loop's own epic (every id `parse_epics` finds under that `epic_slug`), not repo-wide — ids are already `<epic_slug>/<slug>`-namespaced, so cross-epic collisions can't happen and a repo-wide scan would just add cost with no new safety. The rewrite inserts the backtick id token immediately after the matched `- [ ] `/`- [x] `/`- [X] ` prefix and leaves everything else on that line untouched (no re-serialization of the checkbox or title), satisfying the PRD's "byte-for-byte" requirement by construction rather than by reconstructing the line.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 `assign-loop-id/rewrite-checklist-line` entry) has the full file/symbol breakdown.
+
 ## 2026-08-04 — `wake-up/add-tauri-plugin`: notification plugin scaffold, Rust-only
 
 - **Status**: accepted

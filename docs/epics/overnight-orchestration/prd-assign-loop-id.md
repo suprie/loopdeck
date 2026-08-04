@@ -86,8 +86,8 @@ Directional; refine during implementation.
 ### Phase 1 — Backend: ID generation + markdown rewrite
 
 - [x] `assign-loop-id/generate-collision-free-slug` Pure `generate_loop_id(epic_slug, title, existing_ids) -> String` helper: kebab-case from title, numeric-suffix on collision
-- [ ] `assign-loop-id/rewrite-checklist-line` `assign_loop_id` IPC command: locate the target checklist line (epic/prd/phase/loop identity from the caller), rewrite only that line with the generated id prefix, preserve checked state and every other line byte-for-byte
-- [ ] `assign-loop-id/reject-already-id-loops` Command rejects (or no-ops) when the target loop already has an id — assignment only, never overwrite
+- [x] `assign-loop-id/rewrite-checklist-line` `assign_loop_id` IPC command: locate the target checklist line (epic/prd/phase/loop identity from the caller), rewrite only that line with the generated id prefix, preserve checked state and every other line byte-for-byte
+- [x] `assign-loop-id/reject-already-id-loops` Command rejects (or no-ops) when the target loop already has an id — assignment only, never overwrite
 
 ### Phase 2 — Frontend: picker action
 
