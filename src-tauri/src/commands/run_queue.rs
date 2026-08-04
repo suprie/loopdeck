@@ -1332,8 +1332,7 @@ async fn execute_run(
                     Some(ref json) => format!("__QUESTIONS__{json}__END__ {detail}"),
                     None => detail.clone(),
                 };
-                plan.phases[idx].status = RunPhaseStatus::Parked;
-                plan.phases[idx].park_payload = Some(payload);
+                park_batch(&mut plan, &batch, &payload);
                 plan.environment.worktree_kept = true;
                 for (execution_id, _, _) in &locs {
                     park_blocked_dependents(&mut plan, execution_id);
