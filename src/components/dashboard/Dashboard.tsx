@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
+import { Plus, FolderOpen, FolderPlus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { ProjectList } from "./ProjectList";
@@ -9,6 +9,13 @@ import { TodayPanel } from "./TodayPanel";
 import { EmptyState } from "./EmptyState";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { PageHeader } from "../layout/AppShell";
+import { NewProjectDialog } from "../import/NewProjectDialog";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "../ui/dropdown-menu";
 
 function greeting(): string {
   const hour = new Date().getHours();
@@ -24,6 +31,7 @@ export function Dashboard() {
   const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
   const { scanFolder, loadProjects } = useProjects();
   const attentionCount = useAttentionItems().length;
+  const [showNewProject, setShowNewProject] = useState(false);
 
   // Loop/agent activity elsewhere (the Agent tab, another session editing
   // .loopdeck/loops.md) can change current_loop / next_steps_total /
@@ -79,7 +87,7 @@ export function Dashboard() {
       {showEmpty ? (
         <>
           <PageHeader title="Dashboard" />
-          <EmptyState onScan={handleScan} />
+          <EmptyState onScan={handleScan} onNewProject={() => setShowNewProject(true)} />
         </>
       ) : (
         <div className="mx-auto w-full max-w-[1240px] px-8 py-7">
@@ -88,14 +96,27 @@ export function Dashboard() {
               <h1 className="text-2xl font-bold tracking-tight">{greeting()}</h1>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{subtitle}</p>
             </div>
-            <button
-              type="button"
-              onClick={handleScan}
-              className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
-            >
-              <Plus className="size-4" />
-              Add project
-            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+                >
+                  <Plus className="size-4" />
+                  Add project
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuItem onClick={handleScan}>
+                  <FolderOpen className="size-3.5" />
+                  Import repo
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowNewProject(true)}>
+                  <FolderPlus className="size-3.5" />
+                  New project
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
           <AttentionPanel />
@@ -128,6 +149,8 @@ export function Dashboard() {
           </footer>
         </div>
       )}
+
+      <NewProjectDialog open={showNewProject} onOpenChange={setShowNewProject} />
     </div>
   );
 }

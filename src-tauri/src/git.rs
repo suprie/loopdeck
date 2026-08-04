@@ -36,6 +36,20 @@ fn git_command(repo_path: &Path) -> Option<Command> {
     Some(cmd)
 }
 
+/// Best-effort `git init` for a fresh project directory. Never fails the
+/// caller: a missing git binary or failed spawn returns `false`, and a
+/// project without git simply degrades (epics stay authorable; promote-with-
+/// evidence and PR flows need a real repo).
+pub fn git_init(repo_path: &Path) -> bool {
+    let Some(mut cmd) = git_command(repo_path) else {
+        return false;
+    };
+    cmd.arg("init")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Create a new branch-backed linked worktree from `repo_path`.
 ///
 /// The caller chooses a path outside the main worktree and a run-scoped branch
