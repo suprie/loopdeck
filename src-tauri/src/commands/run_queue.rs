@@ -691,9 +691,9 @@ fn extract_field(line: &str, key: &str) -> Option<String> {
     let needle = format!("{key}=");
     let start = line.find(&needle)? + needle.len();
     let rest = &line[start..];
-    if rest.starts_with('"') {
-        let end = rest[1..].find('"')?;
-        Some(rest[1..=end].to_string())
+    if let Some(inner) = rest.strip_prefix('"') {
+        let end = inner.find('"')?;
+        Some(inner[..end].to_string())
     } else {
         let end = rest.find(' ').unwrap_or(rest.len());
         Some(rest[..end].to_string())
