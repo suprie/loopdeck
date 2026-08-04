@@ -1,0 +1,21 @@
+id: run-a3a5f38c-9369-464e-acb4-922a0bfc6c7e
+project: /Users/supriyantop/Workspace/others/loopdeck
+created: 2026-08-03T23:35:08.058298Z
+consent:
+  draft_pr_authorized: true
+budgets:
+  per_phase_token_cap: 500000
+  per_phase_wall_clock_secs: 5400
+  total_run_wall_clock_secs: 28800
+environment:
+  worktree_kept: false
+wall_clock_secs: 0
+stall_policy: continue_independent
+phases:
+- execution_id: wake-up/notify-after-completed
+  status: queued
+  interview: []
+  interview_status: pending
+  depends_on: []
+  token_usage: 0
+  wall_clock_secs: 0

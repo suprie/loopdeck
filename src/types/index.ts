@@ -490,6 +490,44 @@ export interface RunQueueStatus {
   active: boolean;
 }
 
+// ── Morning report (prd-wake-up Phase 2) ────────────────────────────────────
+
+/** Derived per-phase verdict label. Mirrors Rust `PhaseVerdict` (lowercase). */
+export type PhaseVerdict =
+  | "pass"
+  | "warn"
+  | "block"
+  | "killed"
+  | "failed"
+  | "parked"
+  | "running";
+
+/** One row in the morning per-phase verdict table. Mirrors Rust `PhaseReportEntry`. */
+export interface PhaseReportEntry {
+  execution_id: string;
+  status: RunPhaseStatus;
+  verdict: PhaseVerdict;
+  /** Extracted from Completed phases that shipped a draft PR. */
+  draft_pr_url?: string;
+  /** Verbatim park/kill/fail reason from `park_payload`. */
+  reason?: string;
+  token_usage: number;
+  wall_clock_secs: number;
+}
+
+/** Audit summary for the overnight run window. Mirrors Rust `AuditSlice`. */
+export interface AuditSlice {
+  auto_allow_count: number;
+  floor_denials: string[];
+}
+
+/** Morning report read model. Mirrors Rust `RunReport`. */
+export interface RunReport {
+  plan: RunPlan;
+  phases: PhaseReportEntry[];
+  audit: AuditSlice;
+}
+
 /**
  * A parsed epic from docs/epics/<slug>/README.md, with its PRDs attached.
  * Mirrors Rust `Epic` in epic.rs.
