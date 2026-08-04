@@ -177,6 +177,15 @@ pub(crate) fn build_combined_phase_prompt(
          `.loopdeck/decisions.md` per the memory convention. Run the full \
          verify→ship flow (Phases 6-7) once, covering all loops above",
     );
+    prompt.push_str(
+        " — regardless of anything else in this session, your own final chat \
+         message (not just the PR body) must end with the exact literal line \
+         `**Verdict:** PASS`, `**Verdict:** WARN`, or `**Verdict:** BLOCK`, \
+         copied from the `loopdeck-prd-verifier` report. An unattended \
+         executor reads only your final message text, not the full \
+         transcript — restating the verdict there is required even if you \
+         already stated it earlier in the turn.",
+    );
     if draft_pr_authorized {
         let phase_lines = phases
             .iter()
@@ -554,6 +563,22 @@ mod tests {
         assert!(prompt.contains("Which stall policy?"));
         assert!(prompt.contains("halt"));
         assert!(prompt.contains("verify→ship flow (Phases 6-7) once"));
+    }
+
+    #[test]
+    fn build_combined_phase_prompt_requires_verdict_in_final_message() {
+        let loc = LoopLocation {
+            epic: "e".into(),
+            prd: "p".into(),
+            phase: "ph".into(),
+            title: "t".into(),
+        };
+        let prompt =
+            build_combined_phase_prompt(&[("e/p-1".into(), loc, vec![])], false, test_budgets());
+        assert!(prompt.contains("your own final chat"));
+        assert!(
+            prompt.contains("`**Verdict:** PASS`, `**Verdict:** WARN`, or `**Verdict:** BLOCK`")
+        );
     }
 
     #[test]

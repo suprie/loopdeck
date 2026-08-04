@@ -143,10 +143,29 @@ fn run_worktree_path(root: &Path, run_id: &str) -> PathBuf {
         .join(run_id)
 }
 
-fn run_branch_name(run_id: &str) -> String {
+/// Branch name for a run's worktree: derived from the first queued phase's
+/// execution ID (already `<prd-slug>/<loop-slug>`, e.g.
+/// `wake-up/notify-after-completed`) so `git branch`/GitHub show what the run
+/// is actually doing, not just an opaque `run-<uuid>`. A `-plusN` suffix
+/// notes when the run covers more than one phase. The plan id's trailing
+/// UUID segment is kept as a short suffix so two runs touching the same
+/// phase (e.g. a retry) never collide on branch name.
+fn run_branch_name(plan: &RunPlan) -> String {
+    let slug = plan
+        .phases
+        .first()
+        .map(|p| p.execution_id.as_str())
+        .unwrap_or(plan.id.as_str());
+    let extra = plan.phases.len().saturating_sub(1);
+    let suffix = plan.id.rsplit('-').next().unwrap_or(plan.id.as_str());
+    let name = if extra > 0 {
+        format!("{slug}-plus{extra}-{suffix}")
+    } else {
+        format!("{slug}-{suffix}")
+    };
     format!(
         "run/{}",
-        run_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+        name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
     )
 }
 
@@ -168,7 +187,7 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
         )));
     }
     let path = run_worktree_path(root, &plan.id);
-    let branch = run_branch_name(&plan.id);
+    let branch = run_branch_name(plan);
     let worktree = git::worktree_add(root, &path, &branch).map_err(AppError::RunPlan)?;
     plan.environment.worktree_path = Some(worktree.path.clone());
     plan.environment.worktree_branch = Some(worktree.branch);
@@ -1699,9 +1718,48 @@ mod unattended_tests {
         assert_eq!(resolved_run_timeout(&plan), Duration::from_secs(67));
     }
 
+    fn plan_with_id_and_phases(id: &str, execution_ids: &[String]) -> RunPlan {
+        run_executor::build_run_plan(
+            id.into(),
+            PathBuf::from("/repo"),
+            Utc::now(),
+            execution_ids,
+            StallPolicy::ContinueIndependent,
+            false,
+        )
+    }
+
     #[test]
-    fn run_branch_name_is_safe_and_scoped() {
-        assert_eq!(run_branch_name("run a/b"), "run/run-a-b");
+    fn run_branch_name_uses_first_phase_slug() {
+        let plan = plan_with_id_and_phases(
+            "run-a3a5f38c-9369-464e-acb4-922a0bfc6c7e",
+            &["wake-up/notify-after-completed".into()],
+        );
+        assert_eq!(
+            run_branch_name(&plan),
+            "run/wake-up-notify-after-completed-922a0bfc6c7e"
+        );
+    }
+
+    #[test]
+    fn run_branch_name_notes_multi_phase_runs() {
+        let plan = plan_with_id_and_phases(
+            "run-a3a5f38c-9369-464e-acb4-922a0bfc6c7e",
+            &[
+                "wake-up/notify-after-completed".into(),
+                "wake-up/report-per-phase-verdict".into(),
+            ],
+        );
+        assert_eq!(
+            run_branch_name(&plan),
+            "run/wake-up-notify-after-completed-plus1-922a0bfc6c7e"
+        );
+    }
+
+    #[test]
+    fn run_branch_name_sanitizes_unsafe_characters() {
+        let plan = plan_with_id_and_phases("run a/b", &[]);
+        assert_eq!(run_branch_name(&plan), "run/run-a-b-run-a-b");
     }
 
     #[tokio::test]
