@@ -69,6 +69,7 @@ export function RunQueuePanel({
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [answeringId, setAnsweringId] = useState<string | null>(null);
   const [runActive, setRunActive] = useState(false);
   const [report, setReport] = useState<RunReport | null>(null);
   const live = useStreamingState((s) => s.byPath[projectPath] ?? null);
@@ -169,6 +170,26 @@ export function RunQueuePanel({
       toast.error("Failed to retry phase", { description: appErr.message ?? String(err) });
     } finally {
       setRetryingId(null);
+    }
+  };
+
+  const handleAnswerParked = async (
+    executionId: string,
+    answers: Parameters<typeof api.agentAnswerQuestion>[2],
+  ) => {
+    setAnsweringId(executionId);
+    try {
+      const updated = await api.answerParkedQuestion(projectPath, executionId, answers);
+      setPlan(updated);
+      toast.success("Answers pinned — phase requeued");
+      await loadReport();
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to answer parked question", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setAnsweringId(null);
     }
   };
 
@@ -365,6 +386,8 @@ export function RunQueuePanel({
           idToTitle={idToTitle}
           onRetry={handleRetry}
           retryingId={retryingId}
+          onAnswerParked={handleAnswerParked}
+          answeringId={answeringId}
         />
       )}
     </>
@@ -398,11 +421,18 @@ function MorningReport({
   idToTitle,
   onRetry,
   retryingId,
+  onAnswerParked,
+  answeringId,
 }: {
   report: RunReport;
   idToTitle: Record<string, string>;
   onRetry: (executionId: string) => void;
   retryingId: string | null;
+  onAnswerParked: (
+    executionId: string,
+    answers: import("../../types").AskUserQuestionAnswers,
+  ) => void;
+  answeringId: string | null;
 }) {
   const parked = report.phases.filter((p) => p.verdict === "parked");
   const killed = report.phases.filter((p) => p.verdict === "killed");
@@ -522,8 +552,10 @@ function MorningReport({
                   {parsed.questions ? (
                     <AskUserQuestionCard
                       questions={parsed.questions}
-                      disabled
-                      onSubmit={() => {}}
+                      disabled={answeringId === phase.execution_id}
+                      onSubmit={(answers) =>
+                        onAnswerParked(phase.execution_id, answers)
+                      }
                     />
                   ) : phase.reason ? (
                     <p className="break-words text-[11px] text-muted-foreground">{phase.reason}</p>

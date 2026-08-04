@@ -289,6 +289,31 @@ export async function getRunReport(path: string): Promise<RunReport> {
   return invoke<RunReport>("get_run_report", { path });
 }
 
+/**
+ * Answer a parked phase's AskUserQuestion, pin the answers into its interview,
+ * and requeue it (prd-wake-up Phase 2). Returns the updated plan.
+ * Rust: answer_parked_question(path, execution_id, answers) -> Result<RunPlan, AppError>
+ */
+export async function answerParkedQuestion(
+  path: string,
+  executionId: string,
+  answers: AskUserQuestionAnswers,
+): Promise<RunPlan> {
+  // Convert camelCase `otherText` to snake_case `other_text`, same as agentAnswerQuestion.
+  const wire: Record<string, { labels: string[]; other_text?: string }> = {};
+  for (const [q, a] of Object.entries(answers)) {
+    wire[q] = { labels: a.labels ?? [] };
+    if (a.otherText != null && a.otherText.trim() !== "") {
+      wire[q].other_text = a.otherText;
+    }
+  }
+  return invoke<RunPlan>("answer_parked_question", {
+    path,
+    executionId,
+    answers: wire,
+  });
+}
+
 /** Requeue a retryable terminal phase (plus dependents parked solely because of it). */
 export async function requeueRunPhase(
   path: string,

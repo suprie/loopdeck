@@ -476,7 +476,9 @@ phases:
                 RunPhase {
                     execution_id: "epic/prd/phase-failed".into(),
                     status: RunPhaseStatus::Failed,
-                    park_payload: Some("no verify verdict found in the turn's final response".into()),
+                    park_payload: Some(
+                        "no verify verdict found in the turn's final response".into(),
+                    ),
                     token_usage: 200000,
                     wall_clock_secs: 900,
                     ..Default::default()
@@ -508,7 +510,11 @@ phases:
 
         // Killed → Killed
         assert_eq!(report.phases[3].verdict, PhaseVerdict::Killed);
-        assert!(report.phases[3].reason.as_deref().unwrap().contains("token budget"));
+        assert!(report.phases[3]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("token budget"));
 
         // Failed → Failed
         assert_eq!(report.phases[4].verdict, PhaseVerdict::Failed);

@@ -214,10 +214,7 @@ fn user_turn_json(text: &str, attachments: &[Attachment]) -> serde_json::Value {
     })
 }
 
-fn turn_deadline_expired_error(
-    pending_detail: &str,
-    questions_json: Option<String>,
-) -> AppError {
+fn turn_deadline_expired_error(pending_detail: &str, questions_json: Option<String>) -> AppError {
     const MAX_DETAIL_CHARS: usize = 200;
     let detail: String = if pending_detail.chars().count() > MAX_DETAIL_CHARS {
         format!(
@@ -1073,8 +1070,7 @@ impl ClaudeSession {
                         .collect::<Vec<_>>()
                         .join("; ")
                 );
-                let questions_json =
-                    serde_json::to_string(&questions).ok();
+                let questions_json = serde_json::to_string(&questions).ok();
                 return Err(turn_deadline_expired_error(&detail, questions_json));
             }
         };

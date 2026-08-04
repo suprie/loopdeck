@@ -84,19 +84,19 @@ fn emit_run_queue_terminal(app: &AppHandle, root: &Path, result: String, is_erro
 
 /// Send an OS notification for a terminal run transition (prd-wake-up Phase 1).
 /// Three call sites, per the PRD: run completed, budget kill, all phases parked.
+/// On click, the OS activates the app; we focus the main window so the morning
+/// report is the first thing the user sees.
 fn notify_run_terminal(app: &AppHandle, root: &Path, title: &str, body: &str) {
     let project_name = root
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    if let Err(e) = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-    {
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
         warn!("failed to send OS notification for run \"{project_name}\": {e}");
+    }
+    // Focus the main window so clicking the notification lands on the report.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_focus();
     }
 }
 
@@ -558,11 +558,60 @@ pub async fn get_run_report(
     state: State<'_, AppState>,
 ) -> Result<crate::runplan::RunReport, AppError> {
     let root = resolve_root(&state, &path)?;
-    let plan = runplan::load(&root)?.ok_or_else(|| {
-        AppError::RunPlan("no run plan is available for this project".into())
-    })?;
+    let plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
     let audit = build_audit_slice(&root, &plan).unwrap_or_default();
     Ok(crate::runplan::RunReport::from_plan(plan, audit))
+}
+
+/// Answer a parked phase's `AskUserQuestion`, pin the answers into its
+/// interview, and requeue it (prd-wake-up Phase 2). The phase must be `Parked`
+/// and its `park_payload` must carry a `__QUESTIONS__` marker (meaning the
+/// turn parked on an unanswered question, not a verify-verdict park).
+#[tauri::command]
+pub async fn answer_parked_question(
+    path: String,
+    execution_id: String,
+    answers: std::collections::HashMap<String, super::agent::AnswerWire>,
+    state: State<'_, AppState>,
+) -> Result<crate::runplan::RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
+
+    let phase = plan
+        .phases
+        .iter_mut()
+        .find(|p| p.execution_id == execution_id && p.status == RunPhaseStatus::Parked)
+        .ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "phase \"{execution_id}\" is not parked or does not exist"
+            ))
+        })?;
+
+    // Pin each answer as a PinnedAnswer. Labels are joined with ", "; free-text
+    // "Other" answers use the raw text. Matches the answer format the existing
+    // `agent_answer_question` uses for live turns.
+    for (question, answer) in &answers {
+        let text = if !answer.other_text.as_deref().unwrap_or("").trim().is_empty() {
+            answer.other_text.clone().unwrap_or_default()
+        } else {
+            answer.labels.join(", ")
+        };
+        if !text.is_empty() {
+            phase.interview.push(crate::runplan::PinnedAnswer {
+                question: question.clone(),
+                answer: text,
+            });
+        }
+    }
+    phase.interview_status = InterviewStatus::Answered;
+    phase.status = RunPhaseStatus::Queued;
+    // Clear the park payload now that the question has been answered.
+    phase.park_payload = None;
+
+    runplan::save(&root, &plan)?;
+    Ok(plan)
 }
 
 /// Build the overnight audit slice from the project's tracing logs.
@@ -615,12 +664,9 @@ fn build_audit_slice(
                     // Collect floor denials.
                     if line.contains("behavior=deny") {
                         // Extract tool name and reason for the itemized list.
-                        let tool = extract_field(line, "tool")
-                            .unwrap_or_else(|| "unknown".into());
-                        let reason = extract_field(line, "reason")
-                            .unwrap_or_else(|| "".into());
-                        let input = extract_field(line, "input")
-                            .unwrap_or_else(|| "".into());
+                        let tool = extract_field(line, "tool").unwrap_or_else(|| "unknown".into());
+                        let reason = extract_field(line, "reason").unwrap_or_else(|| "".into());
+                        let input = extract_field(line, "input").unwrap_or_else(|| "".into());
                         let summary = if reason.is_empty() {
                             format!("{tool}: {input}")
                         } else {
@@ -1026,12 +1072,7 @@ async fn execute_run(
             plan.phases[idx].park_payload = Some("run cancelled".into());
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
-            notify_run_terminal(
-                app,
-                root,
-                "LoopDeck run killed",
-                "Run was cancelled",
-            );
+            notify_run_terminal(app, root, "LoopDeck run killed", "Run was cancelled");
             return Ok(());
         }
 
