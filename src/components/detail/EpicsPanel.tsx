@@ -294,7 +294,8 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
       // refresh it so toggling doesn't leave a stale discrepancy warning.
       loadProgress();
     } catch (err) {
-      toast.error("Failed to toggle", { description: String(err) });
+        const appErr = err as AppError;
+      toast.error("Failed to toggle", { description: appErr.message ?? String(err) });
     } finally {
       setToggling(null);
     }

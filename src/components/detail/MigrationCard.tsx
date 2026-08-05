@@ -3,10 +3,10 @@ import {
   ArrowRightLeft,
   AlertTriangle,
   ChevronDown,
-  Loader2,
+   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { MigrationPreview } from "../../types";
+import type { MigrationPreview, AppError } from "../../types";
 import * as api from "../../lib/tauri";
 
 interface MigrationCardProps {
@@ -49,7 +49,8 @@ export function MigrationCard({
       });
       onMigrated();
     } catch (err) {
-      toast.error("Migration failed", { description: String(err) });
+      const appErr = err as AppError;
+      toast.error("Migration failed", { description: appErr.message ?? String(err) });
     } finally {
       setMigrating(false);
       setConfirming(false);
