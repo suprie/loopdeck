@@ -814,7 +814,10 @@ fn read_prds(epic_dir: &Path) -> Vec<Prd> {
 fn sort_prds(prds: &mut [Prd], readme_order: &[String]) {
     prds.sort_by(|a, b| {
         let key = |p: &Prd| {
-            let readme_pos = readme_order.iter().position(|f| f == &p.file).unwrap_or(usize::MAX);
+            let readme_pos = readme_order
+                .iter()
+                .position(|f| f == &p.file)
+                .unwrap_or(usize::MAX);
             (p.order.unwrap_or(u32::MAX), readme_pos, p.file.clone())
         };
         key(a).cmp(&key(b))
