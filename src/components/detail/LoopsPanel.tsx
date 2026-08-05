@@ -16,6 +16,7 @@ import type {
   HistoryLoop,
   QueuedLoop,
   MigrationPreview,
+  AppError,
 } from "../../types";
 import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
@@ -288,7 +289,8 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
             : prev,
         );
       } catch (err) {
-        toast.error("Failed to toggle step", { description: String(err) });
+          const appErr = err as AppError;
+        toast.error("Failed to toggle step", { description: appErr.message ?? String(err) });
       } finally {
         setToggling(null);
       }

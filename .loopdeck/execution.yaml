@@ -1,0 +1,14 @@
+schema_version: 1
+revision: 2
+queue: []
+history:
+- id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
+  title: Visual pass in light, dark, and system-auto against every existing
+  origin:
+    epic: selasar-revamp
+    prd: prd-rebrand-tokens
+    phase: Phase 3 — Verification
+  outcome: completed
+  started_at: 2026-08-05T11:12:34.730540Z
+  completed_at: 2026-08-05T11:23:24.646485Z
+  attempt: 1
