@@ -158,7 +158,7 @@ export function Settings() {
           <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-sm)]">
             <Field
               label="Agent Harness"
-              hint="Choose the local CLI LoopDeck uses for conversations, tools, approvals, and resume."
+              hint="Choose the local CLI Selasar uses for conversations, tools, approvals, and resume."
             >
               <Select
                 value={form.harness ?? "claude"}

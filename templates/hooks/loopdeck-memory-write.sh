@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# LoopDeck memory auto-write helper (Approach B — shell fallback).
+# Selasar memory auto-write helper (Approach B — shell fallback).
 # Called by the Stop hook to append a basic session summary to
 # .loopdeck/ files when the AI hasn't written them yet.
 #
-# Gated by .loopdeck/ directory (only active in LoopDeck-tracked projects)
+# Gated by .loopdeck/ directory (only active in Selasar-tracked projects)
 # and .claude/.session-dirty (only fires when file changes occurred).
 #
 # This is a mechanical fallback — the primary mechanism is
@@ -20,7 +20,7 @@ emit_stop_response() {
 }
 trap emit_stop_response EXIT
 
-# Gate: only fire in LoopDeck-tracked projects
+# Gate: only fire in Selasar-tracked projects
 LOOPDECK_DIR=".loopdeck"
 if [ ! -d "$LOOPDECK_DIR" ]; then
   exit 0
@@ -65,7 +65,7 @@ if ! grep -q "^## $TODAY" "$DECISIONS_FILE"; then
     echo ""
     echo "## $TODAY — Session heartbeat"
     echo "- **Status**: proposed"
-    echo "- **Context**: AI session active on LoopDeck development."
+    echo "- **Context**: AI session active on Selasar development."
     echo ""
   } >> "$DECISIONS_FILE"
 fi

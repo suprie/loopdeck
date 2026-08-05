@@ -549,7 +549,7 @@ pub async fn agent_answer_plan(
 /// Persist a permission allow-rule into the project's `.claude/settings.local.json`.
 ///
 /// "Always allow" affordance for the manual-approval card: alongside the
-/// per-call Allow/Deny verdict, the user can ask LoopDeck to remember the
+/// per-call Allow/Deny verdict, the user can ask Selasar to remember the
 /// decision for future calls of the same tool/command. This writes the rule
 /// into `permissions.allow[]` of the **local** settings file (gitignored by
 /// Claude Code convention — machine-specific, never shared), deduped against
@@ -997,7 +997,7 @@ pub(crate) fn build_next_loop_prompt(path: &Path) -> (String, Option<String>) {
     match next_step {
         Some(step) => (
             format!(
-                "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
+                "You are working on this Selasar project. Use the `loopdeck-orchestrator` \
                  skill conventions. Read `.loopdeck/loops.md` for full context. The next \
                  unchecked step is: \"{step}\". Implement it. When done, update \
                  `.loopdeck/loops.md` (mark the step `[x]`, refresh `## Current`) and \
@@ -1008,7 +1008,7 @@ pub(crate) fn build_next_loop_prompt(path: &Path) -> (String, Option<String>) {
         ),
         None => (
             String::from(
-                "You are working on this LoopDeck project. Use the `loopdeck-orchestrator` \
+                "You are working on this Selasar project. Use the `loopdeck-orchestrator` \
                  skill conventions. Review `.loopdeck/loops.md`, then propose and start \
                  the next loop. When done, update `.loopdeck/loops.md` (refresh \
                  `## Current`, add new steps under `## Next Steps`) and append any \

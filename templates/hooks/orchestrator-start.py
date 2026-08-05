@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-LoopDeck orchestrator-start hook — PreToolUse on Skill(loopdeck:orchestrator).
+Selasar orchestrator-start hook — PreToolUse on Skill(loopdeck:orchestrator).
 Writes .loopdeck/current-loop.md with a single task line (max 100 chars)
 before the orchestrator delegates to agents.
 
-Gated by .loopdeck/ directory (only fires in LoopDeck-tracked projects).
+Gated by .loopdeck/ directory (only fires in Selasar-tracked projects).
 """
 import json
 import os
@@ -30,7 +30,7 @@ def main():
         pass_through()
         return 0
 
-    # Gate: only fire in LoopDeck-tracked projects
+    # Gate: only fire in Selasar-tracked projects
     loopdeck_dir = ".loopdeck"
     if not os.path.isdir(loopdeck_dir):
         pass_through()
@@ -55,7 +55,7 @@ def main():
     with open(loopdeck_path, "w") as f:
         f.write(f"# Current Loop\n{task}\n")
 
-    additional_context = f"LoopDeck: .loopdeck/current-loop.md → {task}"
+    additional_context = f"Selasar: .loopdeck/current-loop.md → {task}"
 
     print(
         json.dumps({

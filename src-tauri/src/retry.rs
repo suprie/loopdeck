@@ -1,6 +1,6 @@
 //! Retry policy for transient gateway errors (e.g. `529 overloaded`).
 //!
-//! LoopDeck doesn't call the LLM gateway directly — it spawns the `claude` CLI
+//! Selasar doesn't call the LLM gateway directly — it spawns the `claude` CLI
 //! subprocess, and a gateway failure surfaces as an
 //! `AgentResponse { is_error: true, result: "<human-readable message>" }`. A
 //! `529` from `api.z.ai` (or any Anthropic-compatible gateway) arrives as text

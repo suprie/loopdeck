@@ -1,7 +1,7 @@
 //! Persistent Codex app-server adapter.
 //!
 //! The app-server protocol is newline-delimited JSON-RPC over stdio. One
-//! process owns one LoopDeck project thread; turns reuse that thread, while a
+//! process owns one Selasar project thread; turns reuse that thread, while a
 //! persisted `codex:<thread-id>` resumes it after an app restart.
 
 use crate::agents::{
@@ -647,12 +647,12 @@ impl CodexSession {
                 );
                 // Code Mode's host currently owns execution. This response is
                 // retained as a truthful fallback for client-declared dynamic
-                // tools that LoopDeck has not registered.
+                // tools that Selasar has not registered.
                 self.write_message(json!({
                     "id": id,
                     "error": {
                         "code": -32601,
-                        "message": "LoopDeck does not implement client-declared dynamic tools"
+                        "message": "Selasar does not implement client-declared dynamic tools"
                     }
                 }))
                 .await?;
@@ -742,7 +742,7 @@ impl CodexSession {
                     "id": id,
                     "error": {
                         "code": -32601,
-                        "message": format!("LoopDeck does not implement {method}")
+                        "message": format!("Selasar does not implement {method}")
                     }
                 }))
                 .await?;
@@ -1242,16 +1242,16 @@ fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     }
 }
 
-/// Build the app-server capability contract advertised by LoopDeck.
+/// Build the app-server capability contract advertised by Selasar.
 ///
-/// Code Mode's client-hosted dynamic tools are experimental. LoopDeck does
+/// Code Mode's client-hosted dynamic tools are experimental. Selasar does
 /// not provide their JavaScript runtime, so opting in can leave a turn waiting
 /// for a tool result that it cannot produce.
 fn initialize_params() -> Value {
     json!({
         "clientInfo": {
             "name": "loopdeck",
-            "title": "LoopDeck",
+            "title": "Selasar",
             "version": env!("CARGO_PKG_VERSION")
         },
         "capabilities": { "experimentalApi": false }
@@ -1261,7 +1261,7 @@ fn initialize_params() -> Value {
 /// Build the per-turn security boundary and optional model overrides.
 ///
 /// `readOnly` is intentional even for autonomous projects. It makes Codex
-/// request approval before commands or edits, allowing LoopDeck's
+/// request approval before commands or edits, allowing Selasar's
 /// `PermissionPolicy` to decide whether to park for the user or auto-allow,
 /// while always retaining the destructive-command floor.
 fn turn_start_params(
@@ -1339,7 +1339,7 @@ fn approval_tool_context(
 /// Return an immediate policy decision, or `None` when the user must decide.
 ///
 /// The destructive floor is evaluated before autonomous mode so autonomy can
-/// never bypass LoopDeck's hard-deny rules.
+/// never bypass Selasar's hard-deny rules.
 fn automatic_permission_decision(
     policy: &PermissionPolicy,
     tool_name: &str,

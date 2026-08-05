@@ -223,7 +223,7 @@ fn scan_directory_bounded(
 
         let has_loopdeck = dir_path.join(".loopdeck").join("project.yaml").exists();
 
-        // Graphify is an optional, externally-managed producer — LoopDeck only
+        // Graphify is an optional, externally-managed producer — Selasar only
         // reads its output. Check via the shared helper so the path layout
         // lives in one place (`graphify::is_present`).
         let has_graphify = crate::graphify::is_present(dir_path);

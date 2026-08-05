@@ -134,7 +134,7 @@ export interface ConfidenceBreakdown {
 
 /** Summary of a project's Graphify knowledge graph.
  *  `present: false` means no readable `graphify-out/graph.json` was found —
- *  the UI should hide the Graph tab rather than render empty stats. LoopDeck
+ *  the UI should hide the Graph tab rather than render empty stats. Selasar
  *  only reads Graphify's output and never runs it. */
 export interface GraphifyStats {
   /** `false` when `graphify-out/graph.json` is missing or unparseable. */
@@ -431,7 +431,7 @@ export interface PinnedAnswer {
  * queued phase is still `pending`. */
 export type InterviewStatus = "pending" | "answered" | "skipped";
 
-/** Queue-time consent for the whole run. LoopDeck never asks again once the
+/** Queue-time consent for the whole run. Selasar never asks again once the
  * run starts. */
 export interface RunConsent {
   draft_pr_authorized: boolean;
@@ -841,7 +841,7 @@ export type ContentBlock =
   | { type: "tool_use"; name: string; input: string };
 
 /**
- * A permission decision made by the LoopDeck policy layer in response to a
+ * A permission decision made by the Selasar policy layer in response to a
  * Claude `control_request`. Ephemeral narration — not part of the persisted
  * transcript.
  *
@@ -862,7 +862,7 @@ export interface PermissionDecision {
   input: string;
   /** `"pending"` (awaiting user), or an allow/deny verdict (resolved). */
   decision: "allow" | "auto-allow" | "deny" | "pending";
-  /** Why LoopDeck allowed/denied. Empty for pending and plain allows. */
+  /** Why Selasar allowed/denied. Empty for pending and plain allows. */
   reason: string;
 }
 

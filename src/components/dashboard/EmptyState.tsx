@@ -15,7 +15,7 @@ export function EmptyState({ onScan, onNewProject }: EmptyStateProps) {
         <h2 className="text-base font-semibold tracking-tight">No projects found</h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           Scan a folder to discover repositories and create project memory, or start a
-          brand-new project from scratch. LoopDeck stores context inside each repository.
+          brand-new project from scratch. Selasar stores context inside each repository.
         </p>
         <div className="mt-6 flex items-center gap-2">
           <button

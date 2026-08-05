@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# smoke-test-release.sh — verify the LoopDeck install/upgrade/reinstall/rollback
+# smoke-test-release.sh — verify the Selasar install/upgrade/reinstall/rollback
 # contract at the file-system level.
 #
 # This is the automated half of the release smoke test defined in
@@ -23,14 +23,14 @@
 #   # Runs anywhere; validates the file-system invariants. Fast pre-tag gate.
 #   scripts/smoke-test-release.sh
 #
-#   # Real artifact — copy a built LoopDeck.app and also assert its bundle
-#   # structure (Contents/MacOS/LoopDeck + Contents/Info.plist).
+#   # Real artifact — copy a built Selasar.app and also assert its bundle
+#   # structure (Contents/MacOS/Selasar + Contents/Info.plist).
 #   scripts/smoke-test-release.sh \
-#     --app src-tauri/target/release/bundle/macos/LoopDeck.app
+#     --app src-tauri/target/release/bundle/macos/Selasar.app
 #
-#   # Real .dmg — mount, copy LoopDeck.app out, unmount, then assert structure.
+#   # Real .dmg — mount, copy Selasar.app out, unmount, then assert structure.
 #   scripts/smoke-test-release.sh \
-#     --dmg src-tauri/target/release/bundle/dmg/LoopDeck_*_aarch64.dmg
+#     --dmg src-tauri/target/release/bundle/dmg/Selasar_*_aarch64.dmg
 #
 # SAFETY
 #   This script NEVER touches the real ~/Library/Application Support/...,
@@ -141,7 +141,7 @@ printf 'name: smoke-repo\ndescription: hermetic smoke repo\n' > "$REPO/.loopdeck
 printf '# Decisions\n\n## 2026-07-23 — smoke\n- Status: accepted\n' > "$REPO/.loopdeck/decisions.md"
 printf '# Loops\n\n## Current\n- Status: in_progress\n' > "$REPO/.loopdeck/loops.md"
 # A transcript with a final user turn (simulating an interrupted run) — the
-# contract says LoopDeck reconciles this on next launch; here we only assert it
+# contract says Selasar reconciles this on next launch; here we only assert it
 # is never mutated by an install/upgrade/rollback.
 printf '{"type":"user","text":"hi"}\n' > "$REPO/.loopdeck/sessions/active.jsonl"
 
@@ -173,9 +173,9 @@ make_skeleton() { # <dest_app_path> <version_label>
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>LoopDeck</string>
+  <string>Selasar</string>
   <key>CFBundleIdentifier</key>
-  <string>com.loopdeck.app</string>
+  <string>com.selasar.app</string>
   <key>CFBundleShortVersionString</key>
   <string>${label}</string>
   <key>CFBundleVersion</key>
@@ -183,17 +183,17 @@ make_skeleton() { # <dest_app_path> <version_label>
 </dict>
 </plist>
 EOF
-  printf '#!/bin/sh\n# LoopDeck stub binary (smoke skeleton) %s\nexit 0\n' "$label" \
-    > "$app/Contents/MacOS/LoopDeck"
-  chmod +x "$app/Contents/MacOS/LoopDeck"
+  printf '#!/bin/sh\n# Selasar stub binary (smoke skeleton) %s\nexit 0\n' "$label" \
+    > "$app/Contents/MacOS/Selasar"
+  chmod +x "$app/Contents/MacOS/Selasar"
 }
 
-# Assert the bundle internal structure a real LoopDeck.app must have.
+# Assert the bundle internal structure a real Selasar.app must have.
 assert_bundle_structure() { # <app_path>
   local app="$1"
   [ -f "$app/Contents/Info.plist" ] || die "missing $app/Contents/Info.plist"
-  [ -f "$app/Contents/MacOS/LoopDeck" ] || die "missing $app/Contents/MacOS/LoopDeck (main binary)"
-  [ -x "$app/Contents/MacOS/LoopDeck" ] || die "LoopDeck binary not executable"
+  [ -f "$app/Contents/MacOS/Selasar" ] || die "missing $app/Contents/MacOS/Selasar (main binary)"
+  [ -x "$app/Contents/MacOS/Selasar" ] || die "Selasar binary not executable"
   ok "bundle structure valid: $app"
 }
 
@@ -202,8 +202,8 @@ assert_bundle_structure() { # <app_path>
 install_app() { # <src_app>
   local src="$1"
   [ -d "$src" ] || die "source app not found: $src"
-  cp -R "$src" "$APPS/LoopDeck.app"
-  strip_quarantine "$APPS/LoopDeck.app"
+  cp -R "$src" "$APPS/Selasar.app"
+  strip_quarantine "$APPS/Selasar.app"
 }
 
 # Replace the installed .app with a (possibly different) source build. This is
@@ -212,9 +212,9 @@ install_app() { # <src_app>
 replace_app() { # <src_app>
   local src="$1"
   [ -d "$src" ] || die "source app not found: $src"
-  rm -rf "$APPS/LoopDeck.app"
-  cp -R "$src" "$APPS/LoopDeck.app"
-  strip_quarantine "$APPS/LoopDeck.app"
+  rm -rf "$APPS/Selasar.app"
+  cp -R "$src" "$APPS/Selasar.app"
+  strip_quarantine "$APPS/Selasar.app"
 }
 
 # ----------------------------------------------------------------------------
@@ -245,18 +245,18 @@ if [ -n "$DMG_REAL" ]; then
   [ "$(uname_s)" = "Darwin" ] || die "--dmg requires macOS (hdiutil)"
   command -v hdiutil >/dev/null || die "hdiutil not found"
   [ -f "$DMG_REAL" ] || die "dmg not found: $DMG_REAL"
-  REAL_APP_SRC="$BUILDS/LoopDeck.app"
+  REAL_APP_SRC="$BUILDS/Selasar.app"
   mnt="$WORK/mnt"
   mkdir -p "$mnt"
   printf 'mounting %s ...\n' "$DMG_REAL"
   hdiutil attach -nobrowse -mountpoint "$mnt" "$DMG_REAL" >/dev/null \
     || die "hdiutil attach failed for $DMG_REAL"
-  [ -d "$mnt/LoopDeck.app" ] || { hdiutil detach "$mnt" -quiet; die "no LoopDeck.app in dmg"; }
-  cp -R "$mnt/LoopDeck.app" "$REAL_APP_SRC"
+  [ -d "$mnt/Selasar.app" ] || { hdiutil detach "$mnt" -quiet; die "no Selasar.app in dmg"; }
+  cp -R "$mnt/Selasar.app" "$REAL_APP_SRC"
   hdiutil detach "$mnt" -quiet || true
 elif [ -n "$APP_REAL" ]; then
   [ -d "$APP_REAL" ] || die "app not found: $APP_REAL"
-  REAL_APP_SRC="$BUILDS/LoopDeck.app"
+  REAL_APP_SRC="$BUILDS/Selasar.app"
   cp -R "$APP_REAL" "$REAL_APP_SRC"
 fi
 
@@ -270,14 +270,14 @@ if [ -n "$REAL_APP_SRC" ]; then
   APP_NEW="$REAL_APP_SRC"
   MODE="real-artifact"
 else
-  make_skeleton "$BUILDS/LoopDeck-v1.app" "0.1.0"
-  make_skeleton "$BUILDS/LoopDeck-v2.app" "0.1.1"
-  APP_PRIOR="$BUILDS/LoopDeck-v1.app"
-  APP_NEW="$BUILDS/LoopDeck-v2.app"
+  make_skeleton "$BUILDS/Selasar-v1.app" "0.1.0"
+  make_skeleton "$BUILDS/Selasar-v2.app" "0.1.1"
+  APP_PRIOR="$BUILDS/Selasar-v1.app"
+  APP_NEW="$BUILDS/Selasar-v2.app"
   MODE="hermetic"
 fi
 
-printf '\n=== LoopDeck release smoke test [%s] ===\n' "$MODE"
+printf '\n=== Selasar release smoke test [%s] ===\n' "$MODE"
 printf 'workspace: %s\n\n' "$WORK"
 
 # Baseline invariants captured before any operation.
@@ -297,8 +297,8 @@ fi
 # ----------------------------------------------------------------------------
 printf '\n[1/4] install\n'
 install_app "$APP_PRIOR"
-[ -d "$APPS/LoopDeck.app" ] || die "install did not place LoopDeck.app"
-ok "LoopDeck.app present in Applications dir"
+[ -d "$APPS/Selasar.app" ] || die "install did not place Selasar.app"
+ok "Selasar.app present in Applications dir"
 [ "$(digest "${INVARIANT_PATHS[@]}")" = "$BASE_INVARIANT" ] \
   || die "install mutated user data (invariant paths changed)"
 [ "$(digest "$REGISTRY_PRIMARY")" = "$BASE_REGISTRY" ] \
@@ -310,8 +310,8 @@ ok "install left config dir, registry, agent_token, and .loopdeck/ untouched"
 # ----------------------------------------------------------------------------
 printf '\n[2/4] upgrade\n'
 replace_app "$APP_NEW"
-[ -d "$APPS/LoopDeck.app" ] || die "upgrade removed LoopDeck.app"
-ok "new LoopDeck.app in place after upgrade"
+[ -d "$APPS/Selasar.app" ] || die "upgrade removed Selasar.app"
+ok "new Selasar.app in place after upgrade"
 [ "$(digest "${INVARIANT_PATHS[@]}")" = "$BASE_INVARIANT" ] \
   || die "upgrade mutated user data"
 [ "$(digest "$REGISTRY_PRIMARY")" = "$BASE_REGISTRY" ] \
@@ -320,7 +320,7 @@ ok "upgrade left config dir, registry, agent_token, and .loopdeck/ byte-for-byte
 
 # In hermetic mode, additionally confirm the bundle actually changed.
 if [ "$MODE" = "hermetic" ]; then
-  NEW_VER="$(grep -A1 CFBundleShortVersionString "$APPS/LoopDeck.app/Contents/Info.plist" \
+  NEW_VER="$(grep -A1 CFBundleShortVersionString "$APPS/Selasar.app/Contents/Info.plist" \
     | grep string | sed -E 's/.*<string>(.*)<\/string>.*/\1/')"
   assert_eq "$NEW_VER" "0.1.1" "upgrade installed the newer bundle (CFBundleShortVersionString)"
 fi
@@ -372,7 +372,7 @@ printf 'workspace cleaned up: %s\n' "$WORK"
 if [ "$MODE" = "hermetic" ]; then
   printf '\nNOTE: hermetic mode validated file-system invariants only.\n'
   printf 'Before tagging, also run against a real build:\n'
-  printf '  scripts/smoke-test-release.sh --app src-tauri/target/release/bundle/macos/LoopDeck.app\n'
+  printf '  scripts/smoke-test-release.sh --app src-tauri/target/release/bundle/macos/Selasar.app\n'
   printf 'and complete the manual GUI sign-off (docs/release-pipeline.md §6b).\n'
 fi
 

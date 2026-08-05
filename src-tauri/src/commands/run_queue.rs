@@ -1115,7 +1115,7 @@ async fn execute_run(
             notify_run_terminal(
                 app,
                 root,
-                "LoopDeck run killed",
+                "Selasar run killed",
                 "Total run wall-clock budget exceeded",
             );
             return Ok(());
@@ -1124,7 +1124,7 @@ async fn execute_run(
             kill_batch(&mut plan, &batch, "run cancelled");
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
-            notify_run_terminal(app, root, "LoopDeck run killed", "Run was cancelled");
+            notify_run_terminal(app, root, "Selasar run killed", "Run was cancelled");
             return Ok(());
         }
 
@@ -1283,7 +1283,7 @@ async fn execute_run(
                     notify_run_terminal(
                         app,
                         root,
-                        "LoopDeck run killed",
+                        "Selasar run killed",
                         "Phase token budget exceeded",
                     );
                     return Ok(());
@@ -1400,7 +1400,7 @@ async fn execute_run(
                     notify_run_terminal(
                         app,
                         root,
-                        "LoopDeck run killed",
+                        "Selasar run killed",
                         "Phase wall-clock budget exceeded",
                     );
                 }
@@ -1426,14 +1426,14 @@ async fn execute_run(
         notify_run_terminal(
             app,
             &plan.project,
-            "LoopDeck run completed",
+            "Selasar run completed",
             "All phases passed — morning report ready for review",
         );
     } else if any_parked {
         notify_run_terminal(
             app,
             &plan.project,
-            "LoopDeck run parked",
+            "Selasar run parked",
             "Phases need attention — open the morning report to review parked items",
         );
     }

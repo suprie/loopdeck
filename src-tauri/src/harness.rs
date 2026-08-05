@@ -1,6 +1,6 @@
 //! Provider-neutral agent session used by the command layer.
 //!
-//! Claude and Codex expose different wire protocols, but LoopDeck's UI expects
+//! Claude and Codex expose different wire protocols, but Selasar's UI expects
 //! one stable stream (`ClaudeEvent`) and one stable terminal response
 //! (`AgentResponse`). This enum keeps that protocol detail behind a small
 //! delegation surface so commands, transcript persistence, retry handling, and
@@ -90,7 +90,7 @@ impl HarnessSession {
     ) -> Result<Self, AppError> {
         match config.harness {
             AgentHarness::Claude => {
-                // Codex ids are explicitly tagged in LoopDeck transcripts.
+                // Codex ids are explicitly tagged in Selasar transcripts.
                 // Never pass one to Claude's `--resume`.
                 let resume = resume_session_id.filter(|id| !id.starts_with("codex:"));
                 HarnessAdapter::spawn(cwd, config, resume, policy).map(Self::Claude)

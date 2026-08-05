@@ -1,7 +1,7 @@
-//! Tool-permission policy for the LoopDeck-spawned Claude agent.
+//! Tool-permission policy for the Selasar-spawned Claude agent.
 //!
 //! When Claude emits a `control_request` (because a tool call didn't match a
-//! `.claude/settings.json` allow rule), this module decides whether LoopDeck
+//! `.claude/settings.json` allow rule), this module decides whether Selasar
 //! answers `allow` or `deny`. The decision is the single source of truth that
 //! `ClaudeSession` writes back as a `control_response`.
 //!
@@ -142,7 +142,7 @@ impl PermissionPolicy {
         match self.mode {
             PermissionMode::ConfirmChanges | PermissionMode::Autonomous => Decision::Allow,
             PermissionMode::Deny => Decision::Deny(String::from(
-                "no matching allow rule and LoopDeck is deny-by-default",
+                "no matching allow rule and Selasar is deny-by-default",
             )),
         }
     }
@@ -175,7 +175,7 @@ const MANUAL_APPROVAL_TOOLS: &[&str] = &["Bash", "Edit", "Write", "NotebookEdit"
 /// how".
 ///
 /// **MCP tools** (`mcp__<server>__<tool>`) are always gated. Their capabilities
-/// are unknown to LoopDeck — a server can expose anything from a read-only
+/// are unknown to Selasar — a server can expose anything from a read-only
 /// lookup to a mutating GitHub `create_pull_request` — so the safe default is
 /// to ask. This also matches Claude Code's own posture, which prompts on every
 /// MCP call regardless of permission mode. Read-only MCP tools can be added to
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn mcp_tools_require_approval_regardless_of_capability() {
-        // MCP tool capabilities are opaque to LoopDeck — a server can expose
+        // MCP tool capabilities are opaque to Selasar — a server can expose
         // anything from a read-only lookup to a mutating create_pull_request.
         // The safe default is to gate every mcp__* call; read-only ones can be
         // allow-listed in .claude/settings.json to short-circuit the prompt.
@@ -1247,7 +1247,7 @@ mod tests {
 
         // MCP tools: always gated regardless of perceived capability — a server
         // can expose anything from a read-only lookup to a mutating
-        // create_pull_request, and LoopDeck can't tell from the tool name.
+        // create_pull_request, and Selasar can't tell from the tool name.
         for mcp in [
             "mcp__github__create_pull_request",
             "mcp__filesystem__read_file",

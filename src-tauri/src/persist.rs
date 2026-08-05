@@ -1,4 +1,4 @@
-//! Atomic file writes for critical LoopDeck state.
+//! Atomic file writes for critical Selasar state.
 //!
 //! `std::fs::write` is truncate-then-write: a crash, full disk, or OS-dropped
 //! write between the open and the final byte leaves a partial file. For

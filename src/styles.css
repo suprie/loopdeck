@@ -172,7 +172,7 @@
   }
 }
 
-/* ── LoopDeck custom utilities ───────────────────────────────────────────── */
+/* ── Selasar custom utilities ───────────────────────────────────────────── */
 
 @utility card-accent-top {
   position: relative;
@@ -210,7 +210,7 @@
 
 /* ── Syntax highlighting (rehype-highlight / highlight.js tokens) ─────────────
    Adaptive across light and dark mode using the OKLCH token palette — no
-   theme import needed, the colours below are tuned to feel native to LoopDeck
+   theme import needed, the colours below are tuned to feel native to Selasar
    in both schemes. Token names follow the highlight.js class convention. */
 
 :root {
