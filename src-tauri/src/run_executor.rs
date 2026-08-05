@@ -149,12 +149,12 @@ pub(crate) fn build_combined_phase_prompt(
     budgets: ResolvedBudgets,
 ) -> String {
     let mut prompt = if phases.len() == 1 {
-        "You are working on this LoopDeck project as part of an unattended \
+        "You are working on this Selasar project as part of an unattended \
          overnight run. Use the `loopdeck-orchestrator` skill conventions."
             .to_string()
     } else {
         format!(
-            "You are working on this LoopDeck project as part of an unattended \
+            "You are working on this Selasar project as part of an unattended \
              overnight run. Use the `loopdeck-orchestrator` skill conventions. \
              This single session covers {count} queued loops — implement all of \
              them below, in order, one after another, before running \

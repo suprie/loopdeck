@@ -136,7 +136,7 @@ export function ProjectDetail() {
         actions={<StatusBadge status={project.status} />}
       />
 
-      {/* Stuck-question callout: tab-agnostic. Shown whenever a LoopDeck-spawned
+      {/* Stuck-question callout: tab-agnostic. Shown whenever a Selasar-spawned
           agent has an AskUserQuestion parked for this project, regardless of
           which tab is active — so the user can answer it from anywhere in the
           detail view (not just the Agent tab). Mirrors the card the Agent tab

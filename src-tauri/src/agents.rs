@@ -177,7 +177,7 @@ pub enum ClaudeEvent {
         /// `conversation::TaskRecord` so the persisted and live shapes match.
         task: crate::conversation::TaskRecord,
     },
-    /// A permission decision made by the LoopDeck policy layer in response to a
+    /// A permission decision made by the Selasar policy layer in response to a
     /// Claude `control_request`. Ephemeral — not part of the persisted
     /// transcript.
     ///
@@ -202,7 +202,7 @@ pub enum ClaudeEvent {
         /// mutating tool without parking). The UI uses `"auto-allow"` to tag
         /// unattended approvals in the transcript for the morning review.
         decision: String,
-        /// Why LoopDeck allowed or denied. Empty for pending and plain allows.
+        /// Why Selasar allowed or denied. Empty for pending and plain allows.
         reason: String,
     },
     /// An `AskUserQuestion` tool call that needs the *human's* answer before
@@ -841,7 +841,7 @@ pub(crate) struct ResponseAccumulator {
 /// block/byte budget (PRD FR4). Visible in both the transcript and the streamed
 /// `ClaudeEvent::Result` so the user can tell the response was bounded.
 const ACCUMULATOR_TRUNCATION_MARKER: &str =
-    "\n\n[LoopDeck: response truncated — exceeded block or byte accumulation limit]";
+    "\n\n[Selasar: response truncated — exceeded block or byte accumulation limit]";
 
 impl ResponseAccumulator {
     pub(crate) fn new() -> Self {

@@ -215,7 +215,7 @@ function sanitise(text: string): string {
  * Extract the human-readable subject from an auto-built loop prompt.
  *
  * `build_next_loop_prompt` (commands.rs) wraps the actual step in heavy
- * boilerplate: `You are working on this LoopDeck project. … The next unchecked
+ * boilerplate: `You are working on this Selasar project. … The next unchecked
  * step is: "STEP HERE". Implement it. When done, update …`. Showing that
  * verbatim as a "system" row is no better than showing it as a user bubble.
  * This pulls out just the step text (the quoted span after `step is:`), or the

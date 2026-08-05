@@ -21,7 +21,7 @@ const STUCK_TOAST_DURATION = Infinity;
  * `AskUserQuestion` prompts, manual tool approvals, AND plan approvals
  * (`ExitPlanMode`).
  *
- * A LoopDeck-spawned agent parks one oneshot per pending prompt in
+ * A Selasar-spawned agent parks one oneshot per pending prompt in
  * `AppState.pending_answers` / `AppState.pending_permissions` /
  * `AppState.pending_plans`; the per-project cards (`AgentPanel`) only
  * reconcile their own project's slot when its tab mounts. So if the user is

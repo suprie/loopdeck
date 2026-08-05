@@ -12,7 +12,7 @@ import { Check, Copy } from "lucide-react";
  * paragraph and tables, lists, headings, and code blocks all become flat
  * text. This component pipes that content through `react-markdown` +
  * `remark-gfm` (tables, strikethrough, task lists) + `rehype-highlight`
- * (syntax highlighting), themed to match the LoopDeck token system so it
+ * (syntax highlighting), themed to match the Selasar token system so it
  * reads identically in light and dark mode.
  *
  * Custom component overrides:

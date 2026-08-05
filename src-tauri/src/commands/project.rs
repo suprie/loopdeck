@@ -356,7 +356,7 @@ pub async fn update_description(
 
 /// Set the per-project autonomous-mode flag in the config registry.
 ///
-/// When true, the project's LoopDeck-spawned agent self-approves
+/// When true, the project's Selasar-spawned agent self-approves
 /// floor-clearing tool calls (Edit/Write, safe Bash, MCP, WebFetch) so loops
 /// can run unattended — the user reviews the resulting PRs instead of each
 /// tool call. The destructive floor (`rm -rf`, force-push, `curl|sh`, `sudo`,
@@ -527,7 +527,7 @@ pub async fn open_in_terminal(path: String, state: State<'_, AppState>) -> Resul
             let mut cmd = std::process::Command::new(term);
             cmd.arg("--working-directory").arg(&path_str);
             // Detach the terminal into its own process group so it keeps running
-            // independently of LoopDeck (won't receive SIGHUP when we exit).
+            // independently of Selasar (won't receive SIGHUP when we exit).
             cmd.process_group(0);
             if cmd.spawn().is_ok() {
                 spawned = true;

@@ -64,7 +64,7 @@ export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) 
         <DialogHeader>
           <DialogTitle>Start a new project</DialogTitle>
           <DialogDescription>
-            Create a fresh folder with LoopDeck project memory — no existing repo
+            Create a fresh folder with Selasar project memory — no existing repo
             needed. You'll land on its Epics tab to author the first epic.
           </DialogDescription>
         </DialogHeader>

@@ -1,7 +1,7 @@
 import { ShieldCheck, ShieldAlert } from "lucide-react";
 
 /**
- * Persistent indicator of LoopDeck's effective agent permission mode, shown in
+ * Persistent indicator of Selasar's effective agent permission mode, shown in
  * agent headers so the user knows what gates what before they start a turn.
  *
  * Mode-aware: `confirm` (the default) renders a green "Confirm changes" label;

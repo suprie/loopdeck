@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Schema version this LoopDeck writes and reads. A file whose
+/// Schema version this Selasar writes and reads. A file whose
 /// `schema_version` differs is handled read-only — it is never rewritten.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -605,8 +605,8 @@ fn check_schema_version(version: u32, path: &Path) -> Result<(), AppError> {
     if version > CURRENT_SCHEMA_VERSION {
         Err(AppError::ExecutionState(format!(
             "execution state at {where_} uses schema_version {version}, newer than this \
-             LoopDeck supports ({CURRENT_SCHEMA_VERSION}). The file was not modified — \
-             upgrade LoopDeck to read it."
+             Selasar supports ({CURRENT_SCHEMA_VERSION}). The file was not modified — \
+             upgrade Selasar to read it."
         )))
     } else {
         Err(AppError::ExecutionState(format!(

@@ -140,7 +140,7 @@ pub struct ConversationTurn {
     /// - `"user"` (default): the human typed it into the composer.
     /// - `"loop"`: the backend auto-built it from `.loopdeck/loops.md` when the
     ///   user clicked "Start next loop". These prompts are long boilerplate
-    ///   ("You are working on this LoopDeck project… The next unchecked step
+    ///   ("You are working on this Selasar project… The next unchecked step
     ///   is: …") that the human never wrote — without a marker they're
     ///   indistinguishable from real messages and drown out typed ones.
     ///   Absent on assistant turns and on user turns written before this
