@@ -87,11 +87,17 @@ pub fn worktree_add(repo_path: &Path, path: &Path, branch: &str) -> Result<Workt
 }
 
 /// Remove a linked worktree after a successful unattended draft-PR run.
+///
+/// Forced: a successful run leaves the worktree dirty with incidental
+/// post-push writes (e.g. `.loopdeck/loops.md` loop-state updates), and git
+/// refuses to remove a dirty worktree without `--force`. The branch was
+/// already pushed for the draft PR, so the worktree holds no work worth
+/// preserving; anything still on disk is a run artifact.
 pub fn worktree_remove(repo_path: &Path, path: &Path) -> Result<(), String> {
     let mut command = git_command(repo_path)
         .ok_or_else(|| "git is unavailable; cannot prune isolated run worktree".to_string())?;
     let output = command
-        .args(["worktree", "remove"])
+        .args(["worktree", "remove", "--force"])
         .arg(path)
         .output()
         .map_err(|e| format!("failed to spawn git worktree remove: {e}"))?;
@@ -559,6 +565,55 @@ mod tests {
         assert_eq!(added.path, fs::canonicalize(&linked).unwrap());
         assert!(worktree_list(&dir).unwrap().contains(&added.path));
         worktree_remove(&dir, &added.path).unwrap();
+        assert!(!linked.exists());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Regression: a successful run leaves the worktree dirty (e.g. a
+    /// post-push `.loopdeck/loops.md` update), and plain `git worktree
+    /// remove` refuses dirty worktrees. Removal must be forced.
+    #[test]
+    fn worktree_remove_dirty_worktree() {
+        let dir = create_temp_dir();
+        let linked = dir.with_extension("dirty-linked-worktree");
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .arg("init")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["config", "user.email", "test@loopdeck.dev"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["config", "user.name", "LoopDeck Test"])
+            .output()
+            .unwrap();
+        fs::write(dir.join("README.md"), "# test\n").unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["commit", "-m", "initial"])
+            .output()
+            .unwrap();
+
+        let added = worktree_add(&dir, &linked, "run/dirty-worktree-test").unwrap();
+        // Dirty it the way a run does: untracked post-push write.
+        fs::write(linked.join("uncommitted.txt"), "dirty").unwrap();
+
+        worktree_remove(&dir, &added.path).expect("forced removal must succeed on dirty worktree");
         assert!(!linked.exists());
 
         fs::remove_dir_all(&dir).unwrap();
