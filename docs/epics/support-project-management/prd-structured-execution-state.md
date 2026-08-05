@@ -2,7 +2,7 @@
 prd: prd-structured-execution-state
 epic: support-project-management
 milestone: "0.2.1"
-status: accepted
+status: completed
 accepted: "2026-07-25"
 description: >
   Move mutable loop execution state out of Markdown into a schema-versioned

@@ -5,6 +5,9 @@ node_modules/
 /dist/
 /src-tauri/target/
 .loopdeck/sessions/*
+.loopdeck/run-plan.yml
+.loopdeck/execution.yml
+.loopdeck/*.bak
 # IDE / local tooling
 .vscode/
 .idea/
