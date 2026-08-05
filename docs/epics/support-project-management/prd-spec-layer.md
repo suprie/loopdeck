@@ -2,7 +2,7 @@
 prd: prd-spec-layer
 epic: support-project-management
 milestone: "0.2.0"
-status: proposed
+status: completed
 description: >
   Define the on-disk format for the spec layer (epics + PRDs under
   docs/epics/<slug>/) and build the Rust parser that reads it. Establishes the

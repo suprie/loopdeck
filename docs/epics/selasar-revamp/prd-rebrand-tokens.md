@@ -75,12 +75,12 @@ occurrence sites are Phase 1/Phase 2 outputs, not decided yet._
 
 ### Phase 2 — Rebrand copy audit
 
-- [ ] Grep the repo for user-visible "LoopDeck" occurrences (component
+- [ ] `selasar-revamp/grep-the-repo-for-user-visible-loopdeck-occurrences-component` Grep the repo for user-visible "LoopDeck" occurrences (component
       copy, `tauri.conf.json` window title/product name, Settings, empty
       states, error strings) and record the full list.
-- [ ] Update `src-tauri/tauri.conf.json`'s window title and product name to
+- [ ] `selasar-revamp/update-src-tauri-tauri-conf-json-s-window-title-and-product-name-to` Update `src-tauri/tauri.conf.json`'s window title and product name to
       "Selasar".
-- [ ] Update all in-app user-visible copy found in the audit to "Selasar",
+- [ ] `selasar-revamp/update-all-in-app-user-visible-copy-found-in-the-audit-to-selasar` Update all in-app user-visible copy found in the audit to "Selasar",
       leaving `.loopdeck/` directory name, `project.yaml` schema, and
       internal Rust/TS identifiers untouched.
 
