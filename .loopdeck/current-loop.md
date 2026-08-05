@@ -1,1 +1,1 @@
-Selasar revamp — prd-rebrand-tokens Phase 2 (rebrand copy audit) complete: full-repo audit recorded in PRD, tauri.conf.json/index.html renamed to Selasar, all in-app copy renamed; Phase 3 (visual pass) remains
+Selasar revamp — prd-rebrand-tokens complete (Phases 1-3): tokens, full rebrand to Selasar, and Phase-3 verification (visual pass fixed 6 WCAG contrast defects; tsc clean; Selasar title confirmed)
