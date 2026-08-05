@@ -135,8 +135,8 @@ export function AppShell({
             <Command className="size-4" />
           </div>
           <div className="flex flex-col leading-tight">
-            <span className="text-sm font-semibold tracking-tight">LoopDeck</span>
-            <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            <span className="font-display text-sm font-semibold tracking-tight">LoopDeck</span>
+            <span className="font-display text-[9px] uppercase tracking-wider text-muted-foreground">
               Engineering Cockpit
             </span>
           </div>

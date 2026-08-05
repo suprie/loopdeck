@@ -65,12 +65,12 @@ occurrence sites are Phase 1/Phase 2 outputs, not decided yet._
 
 ### Phase 1 — Design tokens
 
-- [ ] Replace `src/styles.css`'s light and dark token values with the
+- [x] Replace `src/styles.css`'s light and dark token values with the
       mockup's paper/ink/teak palette, keeping the existing `--color-*`
       variable names unchanged.
-- [ ] Add a `--font-display` token for the serif display font and apply it
+- [x] Add a `--font-display` token for the serif display font and apply it
       to the wordmark, rail mark, and project-name text treatments.
-- [ ] Verify the existing light/dark/system theme toggle renders correctly
+- [x] Verify the existing light/dark/system theme toggle renders correctly
       against the new values in all three modes.
 
 ### Phase 2 — Rebrand copy audit

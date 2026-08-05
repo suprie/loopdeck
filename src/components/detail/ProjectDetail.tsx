@@ -129,7 +129,7 @@ export function ProjectDetail() {
             >
               <ArrowLeft className="size-4" />
             </Link>
-            {project.name}
+            <span className="font-display">{project.name}</span>
           </span>
         }
         subtitle={<span className="font-mono text-[11px]">{project.path}</span>}
@@ -149,7 +149,7 @@ export function ProjectDetail() {
       <div className="flex flex-1 min-h-0">
         {/* Sidebar nav */}
         <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-border p-3">
-          <div className="mb-1 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="mb-1 px-3 py-1 font-display text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             {project.name}
           </div>
           {TABS.map((tab) => {

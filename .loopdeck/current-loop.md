@@ -1,1 +1,1 @@
-Docs accuracy PRD complete — audit + rewrite + verify, draft PR open
+Selasar revamp — prd-rebrand-tokens Phase 1 (design tokens) complete: paper/ink/teak palette + font-display token + toggle verified
