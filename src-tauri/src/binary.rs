@@ -5,7 +5,7 @@
 //! module closes:
 //!
 //! 1. **cwd hijack via a relative PATH entry.** An empty or `.` component in
-//!    `$PATH` means "the current directory". LoopDeck spawns `claude` with
+//!    `$PATH` means "the current directory". Selasar spawns `claude` with
 //!    `current_dir` set to a user-selected project and `git` against a scanned
 //!    repo — so a project shipping a `claude`/`git` script could otherwise run
 //!    that script, with the agent auth token in the child environment for the

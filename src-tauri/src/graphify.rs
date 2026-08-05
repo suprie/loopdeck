@@ -5,7 +5,7 @@
 //! project it writes `graphify-out/graph.json` (plus `graph.html` and
 //! `GRAPH_REPORT.md`) into the project root.
 //!
-//! LoopDeck does **not** run Graphify and takes no dependency on Python or the
+//! Selasar does **not** run Graphify and takes no dependency on Python or the
 //! Graphify CLI. This module only reads the JSON metadata that Graphify, if
 //! installed, has already produced — so the integration is detect-and-surface
 //! only. If the file is absent or unparseable, every accessor returns a

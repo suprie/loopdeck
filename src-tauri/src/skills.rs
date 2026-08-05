@@ -514,7 +514,7 @@ pub fn setup_hooks(repo_path: &Path) -> Result<(), AppError> {
     // list of known-safe read commands means the common dev-loop traffic
     // (ls, git status, file reads) short-circuits the control protocol
     // entirely — so it neither stalls nor clutters the permission log/UI.
-    // Anything not on this list routes through LoopDeck's policy
+    // Anything not on this list routes through Selasar's policy
     // (destructive floor -> MANUAL_APPROVAL_TOOLS interception -> auto-allow).
     //
     // **What is deliberately NOT here (Phase 1, PRD FR1):**
@@ -1153,7 +1153,7 @@ mod tests {
         assert!(has("Bash(git status:*)"), "vcs inspection missing");
 
         // Phase 1 (PRD FR1): broad mutation + build-runner rules must NOT be
-        // seeded — they bypass LoopDeck's manual-approval card at the Claude
+        // seeded — they bypass Selasar's manual-approval card at the Claude
         // layer. Users add narrow rules via the approval card's "Always allow"
         // button instead.
         assert!(!has("Edit(*)"), "broad Edit rule must NOT be seeded");
@@ -1246,12 +1246,12 @@ mod tests {
         let stop_py = hooks_dir.join("loopdeck-stop-hook.py");
         assert!(stop_py.exists());
         let stop_content = fs::read_to_string(&stop_py).unwrap();
-        assert!(stop_content.contains("LoopDeck Stop hook"));
+        assert!(stop_content.contains("Selasar Stop hook"));
 
         let mem_sh = hooks_dir.join("loopdeck-memory-write.sh");
         assert!(mem_sh.exists());
         let mem_content = fs::read_to_string(&mem_sh).unwrap();
-        assert!(mem_content.contains("LoopDeck memory auto-write"));
+        assert!(mem_content.contains("Selasar memory auto-write"));
 
         let orch_py = hooks_dir.join("orchestrator-start.py");
         assert!(orch_py.exists());

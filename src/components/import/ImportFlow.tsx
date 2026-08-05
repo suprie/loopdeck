@@ -104,7 +104,7 @@ export function ImportFlow() {
           <ImportCard
             icon={FolderOpen}
             title="Scan local folder"
-            body="Pick a folder on disk. LoopDeck discovers repositories and writes project memory in .loopdeck/."
+            body="Pick a folder on disk. Selasar discovers repositories and writes project memory in .loopdeck/."
             cta="Choose folder"
             onClick={handleScanClick}
           />

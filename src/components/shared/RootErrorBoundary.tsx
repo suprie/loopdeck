@@ -23,7 +23,7 @@ interface RootErrorBoundaryState {
  * failures it can't reach.
  *
  * Recovery is best-effort:
- * - **Reload app** — `window.location.reload()`; guaranteed recovery. LoopDeck
+ * - **Reload app** — `window.location.reload()`; guaranteed recovery. Selasar
  *   is offline-first, so on-disk data (`.loopdeck/`, `config.yaml`, the
  *   local `agent_token` file) survives a full reload untouched.
  * - **Try again** — clears the boundary and remounts the subtree (the bumped
@@ -103,7 +103,7 @@ function ErrorFallback({
             <AlertTriangle className="size-6" />
           </div>
           <h1 className="mt-5 text-xl font-semibold tracking-tight">
-            LoopDeck ran into a problem
+            Selasar ran into a problem
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
             Something crashed while rendering the app. Your data is safe on disk —

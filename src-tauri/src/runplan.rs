@@ -75,7 +75,7 @@ pub enum InterviewStatus {
     Skipped,
 }
 
-/// Queue-time consent for the whole run (ADR-1). LoopDeck never asks again
+/// Queue-time consent for the whole run (ADR-1). Selasar never asks again
 /// once the run starts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RunConsent {

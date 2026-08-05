@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/refs/heads/main/schema.json",
-  "productName": "LoopDeck",
+  "productName": "Selasar",
   "version": "0.4.0",
-  "identifier": "com.loopdeck.app",
+  "identifier": "com.selasar.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "LoopDeck",
+        "title": "Selasar",
         "width": 1500,
         "height": 1000,
         "resizable": true,

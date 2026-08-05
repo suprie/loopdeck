@@ -528,7 +528,7 @@ impl ClaudeSession {
             "stream-json",
             "--verbose",
             // Route permission prompts over stdio as `control_request` lines
-            // so LoopDeck can answer them via `control_response`. Without this,
+            // so Selasar can answer them via `control_response`. Without this,
             // un-approved tools would prompt the (absent) TTY and stall.
             "--permission-prompt-tool",
             "stdio",
@@ -538,7 +538,7 @@ impl ClaudeSession {
         }
         // `default` permission mode: every tool call that doesn't match an
         // allow rule in `.claude/settings.json` emits a `control_request`
-        // that LoopDeck decides (floor → manual approval → auto-policy).
+        // that Selasar decides (floor → manual approval → auto-policy).
         // This is the honest single-source-of-truth: nothing is silently
         // auto-approved by Claude itself. Earlier iterations used
         // `acceptEdits`, which auto-approves Edit/Write/NotebookEdit inside
@@ -1383,7 +1383,7 @@ impl ClaudeSession {
     /// `plan_mode` mirrors Claude Code's own shift-tab toggle: when true, the
     /// CLI restricts the model to read-only tools plus `ExitPlanMode` (which
     /// `answer_plan_approval` intercepts) for the duration of plan mode —
-    /// entirely client-enforced, not something LoopDeck's permission layer has
+    /// entirely client-enforced, not something Selasar's permission layer has
     /// to police.
     ///
     /// Tracks the last mode we asked for in `plan_mode_active` so this is a

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""LoopDeck PostToolUse hook — enforces the decisions.md live-entry cap.
+"""Selasar PostToolUse hook — enforces the decisions.md live-entry cap.
 
 templates/skills/loopdeck-memory/SKILL.md documents a 15-live-entry cap on
 `.loopdeck/decisions.md` (overflow moves to `decisions-archive.md`), but that
 convention is "enforced by you, the writer, not by a parser" — it only works
 if every session remembers to archive on the write that crosses 15. This hook
-makes it unconditional: after any Edit/Write/MultiEdit in a LoopDeck-tracked
+makes it unconditional: after any Edit/Write/MultiEdit in a Selasar-tracked
 project, if decisions.md has grown past the cap, the oldest entries are moved
 to the archive automatically, no model turn required.
 
@@ -69,7 +69,7 @@ def main():
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "additionalContext": (
-                        f"LoopDeck: auto-archived {overflow_count} decision(s) "
+                        f"Selasar: auto-archived {overflow_count} decision(s) "
                         f"to decisions-archive.md ({LIVE_CAP} live entries kept)."
                     ),
                 }

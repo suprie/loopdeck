@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""LoopDeck PreToolUse hook — marks the session as dirty on file changes.
+"""Selasar PreToolUse hook — marks the session as dirty on file changes.
 
 Creates `.claude/.session-dirty` when an Edit / Write / MultiEdit / NotebookEdit
-fires inside a LoopDeck-tracked project. The Stop hook
+fires inside a Selasar-tracked project. The Stop hook
 (loopdeck-stop-hook.py) reads this flag to decide whether to emit the
 memory-update nudge, and loopdeck-memory-write.sh consumes (deletes) it.
 
@@ -20,7 +20,7 @@ DIRTY_FILE = ".claude/.session-dirty"
 
 
 def main():
-    # Only fire in LoopDeck-tracked projects.
+    # Only fire in Selasar-tracked projects.
     if not os.path.isdir(LOOPDECK_DIR):
         return 0
 

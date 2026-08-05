@@ -97,7 +97,7 @@ export function KnowledgeGraphPanel({ projectPath }: KnowledgeGraphPanelProps) {
               Graphify
             </a>{" "}
             turns a codebase into a queryable knowledge graph. Run it in this
-            repo and the stats will appear here — LoopDeck only reads the
+            repo and the stats will appear here — Selasar only reads the
             output, it doesn&apos;t install or run Graphify for you.
           </p>
           <code className="font-mono text-[11px] bg-muted px-2 py-1 rounded text-muted-foreground">
