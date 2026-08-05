@@ -557,6 +557,8 @@ export interface Prd {
   milestone?: string;
   /** Filename of the PRD file (back-reference for the promote action). */
   file: string;
+  /** Explicit delivery-order rank (lower first). Absent until backfilled — see `migratePrdOrder`. */
+  order?: number;
   phases: PrdPhase[];
 }
 

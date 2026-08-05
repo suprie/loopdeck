@@ -147,6 +147,37 @@ pub async fn set_prd_status(
     epic::set_prd_status(&root, &epic_slug, &prd_filename, &status)
 }
 
+/// Backfill `order:` frontmatter onto any PRD in `epic_slug` that's missing
+/// one, derived from the current README/filename-fallback order. Explicit,
+/// user-triggered — idempotent, safe to call repeatedly. Returns the count
+/// of PRDs updated.
+#[tauri::command]
+pub async fn migrate_prd_order(
+    path: String,
+    epic_slug: String,
+    state: State<'_, AppState>,
+) -> Result<usize, AppError> {
+    debug!("migrate_prd_order called for path: {path}, epic: {epic_slug}");
+
+    let root = resolve_root(&state, &path)?;
+    epic::migrate_prd_order(&root, &epic_slug)
+}
+
+/// Explicitly reorder every PRD in an epic (drag-to-reorder). `orderedFiles`
+/// must be exactly the epic's current PRD filenames, in the desired order.
+#[tauri::command]
+pub async fn set_prd_order(
+    path: String,
+    epic_slug: String,
+    ordered_files: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("set_prd_order called for path: {path}, epic: {epic_slug}");
+
+    let root = resolve_root(&state, &path)?;
+    epic::set_prd_order(&root, &epic_slug, &ordered_files)
+}
+
 /// Read a spec file (epic README or PRD) under `docs/epics/`.
 /// `rel_path` is relative to `docs/epics/` (e.g. `<slug>/prd-x.md`).
 #[tauri::command]

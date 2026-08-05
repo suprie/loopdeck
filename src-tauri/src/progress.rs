@@ -364,6 +364,7 @@ mod tests {
                 description: String::new(),
                 milestone: Some("0.2.1".into()),
                 file: "prd.md".into(),
+                order: None,
                 phases: vec![PrdPhase {
                     name: "Phase 1".into(),
                     loops: vec![PrdLoop {
