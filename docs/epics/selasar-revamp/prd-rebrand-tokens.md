@@ -86,11 +86,11 @@ occurrence sites are Phase 1/Phase 2 outputs, not decided yet._
 
 ### Phase 3 — Verification
 
-- [ ] Visual pass in light, dark, and system-auto against every existing
+- [x] Visual pass in light, dark, and system-auto against every existing
       screen (Dashboard, ProjectDetail tabs, Settings, Activity, Loops,
       Decisions, Epics), confirming no contrast regression on destructive,
       warning, or focus states.
-- [ ] `npx tsc --noEmit` clean; manual smoke confirming "Selasar" appears in
+- [x] `npx tsc --noEmit` clean; manual smoke confirming "Selasar" appears in
       the window title bar.
 
 ## Open Questions
