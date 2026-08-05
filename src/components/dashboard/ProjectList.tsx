@@ -110,7 +110,7 @@ export function ProjectList({ projects, onSelect }: ProjectListProps) {
                 {monogram}
               </div>
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold leading-tight">{project.name}</div>
+                <div className="truncate font-display text-sm font-semibold leading-tight">{project.name}</div>
                 <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
                   {project.path}
                 </div>
