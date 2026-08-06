@@ -331,7 +331,7 @@ Based on the Phase 6 verify verdict and the Phase 5 integration results:
 
 | Verdict / Outcome | Action |
 |---------|--------|
-| Verify **PASS** + integration green | Report completion (files created, test coverage, deferred warnings). **Invoke `loopdeck:open-pr`** to ship the verified work as a reviewable PR. |
+| Verify **PASS** + integration green | Record completion in `.loopdeck/` first, **then** invoke `loopdeck:open-pr` to ship the verified work as a reviewable PR (see "Record completion, then open PR" below). |
 | Verify **WARN** (one or more PARTIAL) | Spawn targeted fix agents for the PARTIAL criteria, re-verify. Do **not** ship until WARN clears or the user explicitly accepts the partial. |
 | Verify **BLOCK** (one or more FAIL) | Return to Phase 3 for the failing scope; re-spawn agents with corrected prompts. Do **not** ship. |
 | Integration issues (minor) | Spawn targeted fix agents, re-run affected checks. |
@@ -339,17 +339,30 @@ Based on the Phase 6 verify verdict and the Phase 5 integration results:
 | PRD gap discovered | Flag to user — the PRD may need an amendment. Do not guess. |
 | Non-goals scope creep flagged | Surface to the user; let the user retract the scope or amend the PRD. |
 
-### Open PR (green verdict only)
+### Record completion, then open PR (green verdict only)
 
-When the Phase 6 verdict is **PASS** and Phase 5's integration check is green:
+When the Phase 6 verdict is **PASS** and Phase 5's integration check is green,
+record completion **before** shipping. `open-pr`'s commit step only commits
+whatever is uncommitted *at the moment it runs* — so the completion writes
+have to already be on disk before step 2, not added after step 3's push:
 
-1. Call `loopdeck:open-pr`. The skill runs pre-flight checks, gathers
+1. **Record completion in `.loopdeck/` first.** Per `loopdeck:memory`: mark the
+   loop complete (structured mode: `loopdeck state complete [--commit <sha>]`;
+   legacy mode: move `## Current` → `## History` in `loops.md`), check the
+   origin PRD's `- [ ]` box for the delivered item, and append any unrecorded
+   architectural decisions to `decisions.md`. Doing this after the PR is
+   already pushed leaves these edits uncommitted with nothing left to carry
+   them — a dirty working tree post-ship.
+2. Call `loopdeck:open-pr`. The skill runs pre-flight checks, gathers
    `.loopdeck/` context, drafts a PR body (Summary / What changed / PRD /
    Decisions / Test plan), and shows it to the user for confirmation.
-2. After the user confirms the body, `open-pr` commits any uncommitted work
-   (message authored from the verified scope), pushes, and runs
-   `gh pr create --web`. Report the returned PR URL.
-3. `open-pr` records the PR URL in `.loopdeck/loops.md ## Next Steps` itself.
+3. After the user confirms the body, `open-pr` commits any uncommitted work —
+   the code **and** step 1's memory updates, together — (message authored from
+   the verified scope), pushes, and runs `gh pr create --web`. Report the
+   returned PR URL.
+4. `open-pr` records the PR URL in `.loopdeck/loops.md ## Next Steps` itself.
+   This one write happens after push by necessity (the URL doesn't exist
+   until the PR is created); it rides along in the *next* shipped commit.
 
 Do **not** call `open-pr` on a WARN or BLOCK verdict. Ship only green work. The
 verify verdict is the gate: `open-pr` is independently invocable, but the
@@ -368,10 +381,12 @@ or invoke it when you need to record a decision or update `loops.md`). The
 single-loop executor (`loopdeck:loop-runner`) delegates to the same conventions.
 
 At each phase boundary: if you made an architectural decision, append it to
-`decisions.md`; update `loops.md` Next Steps. At the end of the loop (Phase 7),
-update `loops.md` Current status, append unrecorded decisions, move any
-completed loop to History (checking its origin PRD box if it carried
-`**Epic**`/`**PRD**`), and set the next loop's goal — all per `loopdeck:memory`.
+`decisions.md`; update `loops.md` Next Steps. At the end of the loop, **before
+invoking `open-pr`** (Phase 7, step 1), update `loops.md` Current status,
+append unrecorded decisions, move any completed loop to History (checking its
+origin PRD box if it carried `**Epic**`/`**PRD**`), and set the next loop's
+goal — all per `loopdeck:memory`. Recording completion after the ship commit
+instead of before it leaves those edits dirty and uncommitted.
 
 ## Important Rules
 
@@ -383,3 +398,4 @@ completed loop to History (checking its origin PRD box if it carried
 - **User approves the plan.** Present the phase decomposition. Don't spawn agents until the user says go.
 - **Keep agents focused.** One agent = one cohesive unit of work (a single file or tightly-related small group).
 - **Preserve prior output.** Later-phase agents must read (not recreate) files from earlier phases. Include file paths in prompts.
+- **Record before you ship.** Mark the loop/PRD/decisions complete in `.loopdeck/` *before* calling `open-pr` — its commit step sweeps up whatever is uncommitted at that moment, so completion records ride the same commit instead of being left dirty after push.
