@@ -8,6 +8,7 @@ description: >
   and decisions.md, lower the archive trigger below the 90KB threshold that
   already proved insufficient once, and compact current content to fit —
   without deleting anything, only archiving it.
+order: 40
 ---
 
 # PRD — Memory Hygiene

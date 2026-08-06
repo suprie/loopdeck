@@ -9,6 +9,7 @@ description: >
   amendments about amendments — after a review found this pattern in recent
   loop history plus a near-miss where an agent almost deleted the
   orchestrator by misreading its own memory.
+order: 50
 ---
 
 # PRD — Process Discipline

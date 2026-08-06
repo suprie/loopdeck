@@ -7,6 +7,7 @@ description: >
   Audit docs/PRD.md and CLAUDE.md against the code that actually ships, then
   rewrite both so neither states a non-goal the code violates or a file
   structure that no longer exists. No code changes — documentation only.
+order: 10
 ---
 
 # PRD — Docs Accuracy
