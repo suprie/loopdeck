@@ -8,6 +8,7 @@ description: >
   Vite + React 19 stack) and close the three coverage gaps a review flagged
   as highest-risk: streaming channels, migration cards, and permission-
   approval flows. Not a general coverage mandate — closes named gaps only.
+order: 30
 ---
 
 # PRD — Frontend Test Coverage

@@ -2,7 +2,7 @@
 prd: prd-rebrand-tokens
 epic: selasar-revamp
 milestone: "0.5.0"
-status: proposed
+status: completed
 description: >
   Replace the app's Tailwind-v4 design tokens with the mockup's paper/ink/
   teak palette and serif display font (light default, full dark pair), and
@@ -86,7 +86,7 @@ occurrence sites are Phase 1/Phase 2 outputs, not decided yet._
 
 ### Phase 3 — Verification
 
-- [x] Visual pass in light, dark, and system-auto against every existing
+- [x] `selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing` Visual pass in light, dark, and system-auto against every existing
       screen (Dashboard, ProjectDetail tabs, Settings, Activity, Loops,
       Decisions, Epics), confirming no contrast regression on destructive,
       warning, or focus states.

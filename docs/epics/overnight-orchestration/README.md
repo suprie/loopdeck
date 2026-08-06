@@ -2,7 +2,7 @@
 title: Overnight Orchestration
 slug: overnight-orchestration
 milestone: "0.4.0"
-status: in_progress
+status: completed
 started: 2026-07-27
 owner: Suprie
 description: >

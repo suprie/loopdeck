@@ -9,6 +9,7 @@ description: >
   commands/agent.rs (1731 lines) if it's still oversized once the maps are
   unified. The most concurrency-sensitive surface in the app, so this opens
   with a spike phase before any code moves.
+order: 20
 ---
 
 # PRD — Session State Consolidation
