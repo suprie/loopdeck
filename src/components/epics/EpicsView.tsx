@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { Epic, Prd, PrdLoop, ProgressCount } from "../../types";
 import * as api from "../../lib/tauri";
+import { EPIC_STATUS_LABEL, EPIC_STATUS_RANK, sortEpics } from "../../lib/utils";
 import { useAppStore } from "../../store/appStore";
 import { PageHeader } from "../layout/AppShell";
 import { Progress } from "../ui/progress";
@@ -70,18 +71,19 @@ export function EpicsView() {
   const projects = useAppStore((s) => s.projects);
 
   // ── Data ──
-  const [byMilestone, setByMilestone] = useState<[string, EnrichedEpic[]][]>([]);
+  const [byStatus, setByStatus] = useState<[string, EnrichedEpic[]][]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // ── Expanded detail ──
   const [expandedEpic, setExpandedEpic] = useState<string | null>(null);
   const [expandedPrd, setExpandedPrd] = useState<string | null>(null);
-  const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
+  const [collapsedStatuses, setCollapsedStatuses] = useState<Set<string>>(
     new Set(),
   );
 
-  // ── Load all epics from all projects, grouped by milestone ─────────────
+  // ── Load all epics from all projects, grouped by status (primary sort),
+  // milestone within each status group (secondary sort) ──────────────────
 
   useEffect(() => {
     let cancelled = false;
@@ -90,9 +92,7 @@ export function EpicsView() {
       setLoading(true);
       setError(null);
 
-      // Map milestone → list of enriched epics. Insertion order preserved by
-      // iterating the backend's BTreeMap (already milestone-sorted).
-      const map = new Map<string, EnrichedEpic[]>();
+      const allEpics: EnrichedEpic[] = [];
 
       for (const p of projects) {
         if (cancelled) break;
@@ -101,17 +101,16 @@ export function EpicsView() {
           // Best-effort: legacy/empty-mode projects have no execution.yaml,
           // so this stays undefined and epicProgress() falls back to checkboxes.
           const snapshot = await api.getProgressSnapshot(p.path).catch(() => null);
-          for (const [milestone, epics] of Object.entries(grouped)) {
-            const enriched = epics.map((e) => ({
-              ...e,
-              projectName: p.name,
-              projectPath: p.path,
-              derivedProgress:
-                snapshot?.execution_file_present ? snapshot.epics[e.slug] : undefined,
-            }));
-            const existing = map.get(milestone);
-            if (existing) existing.push(...enriched);
-            else map.set(milestone, enriched);
+          for (const epics of Object.values(grouped)) {
+            for (const e of epics) {
+              allEpics.push({
+                ...e,
+                projectName: p.name,
+                projectPath: p.path,
+                derivedProgress:
+                  snapshot?.execution_file_present ? snapshot.epics[e.slug] : undefined,
+              });
+            }
           }
         } catch {
           // No docs/epics/ — skip.
@@ -119,15 +118,22 @@ export function EpicsView() {
       }
 
       if (!cancelled) {
-        // Sort within each milestone by project name then epic slug.
-        for (const list of map.values()) {
-          list.sort(
-            (a, b) =>
-              a.projectName.localeCompare(b.projectName) ||
-              a.slug.localeCompare(b.slug),
-          );
+        // Group by status.
+        const map = new Map<string, EnrichedEpic[]>();
+        for (const epic of allEpics) {
+          const existing = map.get(epic.status);
+          if (existing) existing.push(epic);
+          else map.set(epic.status, [epic]);
         }
-        setByMilestone([...map.entries()]);
+        // Sort within each status group: milestone ascending (0.4.0 above
+        // 0.5.0), then project name, then epic slug.
+        // Every epic in a group shares the same status, so sortEpics reduces
+        // to milestone-ascending then slug here — same rule the per-project
+        // EpicsPanel uses, kept in one place.
+        const sorted: [string, EnrichedEpic[]][] = [...map.entries()]
+          .sort(([a], [b]) => (EPIC_STATUS_RANK[a] ?? 1) - (EPIC_STATUS_RANK[b] ?? 1))
+          .map(([status, list]) => [status, sortEpics(list)]);
+        setByStatus(sorted);
         setLoading(false);
       }
     }
@@ -136,7 +142,7 @@ export function EpicsView() {
       load();
     } else {
       setLoading(false);
-      setByMilestone([]);
+      setByStatus([]);
     }
 
     return () => {
@@ -145,15 +151,15 @@ export function EpicsView() {
   }, [projects]);
 
   const totalEpics = useMemo(
-    () => byMilestone.reduce((n, [, es]) => n + es.length, 0),
-    [byMilestone],
+    () => byStatus.reduce((n, [, es]) => n + es.length, 0),
+    [byStatus],
   );
 
-  const toggleMilestone = (m: string) => {
-    setCollapsedMilestones((prev) => {
+  const toggleStatus = (status: string) => {
+    setCollapsedStatuses((prev) => {
       const next = new Set(prev);
-      if (next.has(m)) next.delete(m);
-      else next.add(m);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
       return next;
     });
   };
@@ -212,21 +218,21 @@ export function EpicsView() {
           </div>
         )}
 
-        {/* Milestone sections */}
+        {/* Status sections */}
         {!loading && !error && totalEpics > 0 && (
           <div className="mx-auto w-full max-w-3xl space-y-6 px-8 py-8">
-            {byMilestone.map(([milestone, epics]) => {
-              const collapsed = collapsedMilestones.has(milestone);
+            {byStatus.map(([status, epics]) => {
+              const collapsed = collapsedStatuses.has(status);
               return (
-                <section key={milestone}>
+                <section key={status}>
                   <button
-                    onClick={() => toggleMilestone(milestone)}
+                    onClick={() => toggleStatus(status)}
                     className="mb-3 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <ChevronDown
                       className={`size-3 transition-transform ${collapsed ? "-rotate-90" : ""}`}
                     />
-                    {milestone}
+                    {EPIC_STATUS_LABEL[status] ?? status}
                     <span className="font-normal text-muted-foreground/60">
                       · {epics.length}
                     </span>
@@ -282,6 +288,16 @@ function EpicCard({
   const { done, total } = epicProgress(epic);
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
+  // Lazily backfill `order:` on any PRD missing it, once, the first time the
+  // epic is expanded. The list is already shown correctly via the backend's
+  // README/filename fallback sort — this only persists that order onto disk
+  // so it becomes explicit and user-editable. Idempotent; fire-and-forget.
+  useEffect(() => {
+    if (!expanded) return;
+    if (epic.prds.every((prd) => prd.order != null)) return;
+    api.migratePrdOrder(epic.projectPath, epic.slug).catch(() => {});
+  }, [expanded, epic.projectPath, epic.slug, epic.prds]);
+
   return (
     <div
       className={`rounded-xl border bg-card p-5 shadow-[var(--shadow-sm)] transition-colors ${
@@ -295,6 +311,11 @@ function EpicCard({
             <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               <GitBranch className="size-3" />
               {epic.projectName}
+              {epic.milestone && (
+                <span className="font-normal normal-case text-muted-foreground/60">
+                  · {epic.milestone}
+                </span>
+              )}
             </div>
 
             {/* Title */}

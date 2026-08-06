@@ -470,6 +470,32 @@ export async function setPrdStatus(
 }
 
 /**
+ * Backfill `order:` frontmatter onto any PRD in epicSlug missing one,
+ * derived from the current README/filename-fallback order. Idempotent —
+ * safe to call repeatedly. Returns the count of PRDs updated.
+ * Rust: migrate_prd_order(path, epic_slug) -> Result<usize, AppError>
+ */
+export async function migratePrdOrder(
+  path: string,
+  epicSlug: string,
+): Promise<number> {
+  return invoke<number>("migrate_prd_order", { path, epicSlug });
+}
+
+/**
+ * Explicitly reorder every PRD in an epic (drag-to-reorder). orderedFiles
+ * must be exactly the epic's current PRD filenames, in the desired order.
+ * Rust: set_prd_order(path, epic_slug, ordered_files) -> Result<(), AppError>
+ */
+export async function setPrdOrder(
+  path: string,
+  epicSlug: string,
+  orderedFiles: string[],
+): Promise<void> {
+  return invoke<void>("set_prd_order", { path, epicSlug, orderedFiles });
+}
+
+/**
  * Read a spec file (epic README or PRD) under docs/epics/.
  * relPath is relative to docs/epics/ (e.g. "<slug>/prd-x.md").
  * Rust: read_spec_file(path, rel_path) -> Result<String, AppError>

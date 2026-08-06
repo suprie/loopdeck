@@ -14,6 +14,7 @@ import {
   GitCommitHorizontal,
   Fingerprint,
   Plus,
+  ArrowUpDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
@@ -28,12 +29,14 @@ import type {
   DeliveryStatus,
 } from "../../types";
 import * as api from "../../lib/tauri";
+import { sortEpics } from "../../lib/utils";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { Progress } from "../ui/progress";
 import { PrdContent } from "./PrdContent";
 import { RunQueuePanel } from "./RunQueuePanel";
 import { CreateSpecDialog } from "./CreateSpecDialog";
+import { PrdReorderDialog } from "./PrdReorderDialog";
 
 // ── Derived progress helpers ─────────────────────────────────────────────────
 
@@ -124,12 +127,17 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
   const [selectedForRun, setSelectedForRun] = useState<string[]>([]);
   /** Which create-spec dialog is open: "epic" | "prd", or null when closed. */
   const [createMode, setCreateMode] = useState<"epic" | "prd" | null>(null);
+  /** Slug of the epic whose reorder dialog is open, or null when closed. */
+  const [reorderingEpic, setReorderingEpic] = useState<string | null>(null);
 
   const toggleSelectedForRun = (id: string) => {
     setSelectedForRun((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   };
+
+  // Active status first, completed last; milestone ascending within status.
+  const sortedEpics = useMemo(() => sortEpics(epics), [epics]);
 
   // Stable ID -> title, so the run-queue view can show human-readable phase
   // names instead of raw execution IDs.
@@ -483,7 +491,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
       />
 
       <div className="space-y-4">
-        {epics.map((epic) => {
+        {sortedEpics.map((epic) => {
           const epicCount = progress?.epics[epic.slug];
           const epicFraction = fraction(epicCount);
           return (
@@ -503,16 +511,38 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
                   <span>milestone {epic.milestone}</span>
                 </div>
               </div>
-              <button
+              <div className="flex shrink-0 items-center gap-1">
+                {epic.prds.length > 1 && (
+                  <button
+                    onClick={() => setReorderingEpic(epic.slug)}
+                    title="Reorder PRDs"
+                    className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <ArrowUpDown className="size-3.5" />
+                  </button>
+                )}
+                <button
                 onClick={() =>
                   navigate({ to: "/spec/$relPath", params: { relPath: encodeURIComponent(`${epic.slug}/README.md`) } })
                 }
-                title="Edit epic README"
-                className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <Pencil className="size-3.5" />
-              </button>
+                  title="Edit epic README"
+                  className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <Pencil className="size-3.5" />
+                </button>
+              </div>
             </div>
+
+            {reorderingEpic === epic.slug && (
+              <PrdReorderDialog
+                projectPath={projectPath}
+                epicSlug={epic.slug}
+                prds={epic.prds}
+                open
+                onOpenChange={(open) => !open && setReorderingEpic(null)}
+                onReordered={() => void load()}
+              />
+            )}
 
             {/* Derived epic progress — from execution.yaml, not checkbox state */}
             {epicCount && epicFraction && (

@@ -58,6 +58,11 @@ pub struct PrdFrontmatter {
     pub description: String,
     #[serde(default)]
     pub milestone: Option<String>,
+    /// Explicit delivery-order rank (lower first). Absent on PRDs authored
+    /// before this field existed — `read_prds` backfills it once, derived
+    /// from the epic README's `## PRD Index` table order.
+    #[serde(default)]
+    pub order: Option<u32>,
 }
 
 // ── Public structs (returned to the UI) ─────────────────────────────
@@ -95,6 +100,9 @@ pub struct Prd {
     pub milestone: Option<String>,
     /// Filename of the PRD file (back-reference for the promote action).
     pub file: String,
+    /// Explicit delivery-order rank (lower first). See [`PrdFrontmatter::order`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
     #[serde(default)]
     pub phases: Vec<PrdPhase>,
 }
@@ -761,13 +769,19 @@ fn parse_prd(path: &Path) -> Result<Prd, AppError> {
         description: fm.description,
         milestone: fm.milestone,
         file,
+        order: fm.order,
         phases: parse_prd_phases(body),
     })
 }
 
 /// Read and parse every `prd-*.md` co-located with an epic README.
 ///
-/// Malformed PRDs are logged and skipped. Returns PRDs sorted by filename.
+/// Malformed PRDs are logged and skipped. Returns PRDs ordered by their
+/// `order:` frontmatter field (lower first); PRDs without one fall back to
+/// their position in the README's `## PRD Index` table, then filename. This
+/// is read-only — it never writes `order:` back. Use
+/// [`migrate_prd_order`] (an explicit, user-triggered command) to persist
+/// the derived order once so it becomes editable.
 fn read_prds(epic_dir: &Path) -> Vec<Prd> {
     let mut prds: Vec<Prd> = Vec::new();
     let entries = match std::fs::read_dir(epic_dir) {
@@ -790,8 +804,183 @@ fn read_prds(epic_dir: &Path) -> Vec<Prd> {
             Err(e) => tracing::warn!("failed to parse PRD {}: {e}", path.display()),
         }
     }
-    prds.sort_by(|a, b| a.file.cmp(&b.file));
+    let readme_order = read_prd_index_order(&epic_dir.join("README.md"));
+    sort_prds(&mut prds, &readme_order);
     prds
+}
+
+/// Sort PRDs by `order:` (lower first), falling back to README PRD Index
+/// position, then filename, for any PRD without an explicit `order:`.
+fn sort_prds(prds: &mut [Prd], readme_order: &[String]) {
+    prds.sort_by(|a, b| {
+        let key = |p: &Prd| {
+            let readme_pos = readme_order
+                .iter()
+                .position(|f| f == &p.file)
+                .unwrap_or(usize::MAX);
+            (p.order.unwrap_or(u32::MAX), readme_pos, p.file.clone())
+        };
+        key(a).cmp(&key(b))
+    });
+}
+
+/// Backfill `order:` onto every PRD in `epic_slug` that's missing one,
+/// deriving each value from the current README/filename-fallback order so
+/// the persisted result matches what the UI already shows. Explicit,
+/// user-triggered migration — never runs as a side effect of a read (a
+/// `parse_epics` call, a test, a background scan) mutating files on disk
+/// unexpectedly.
+///
+/// New values start after the highest explicit `order:` already present in
+/// the epic (0 if none), so PRDs that already opted in keep their rank.
+/// Idempotent: a PRD that already has `order:` is left untouched, and once
+/// every PRD has one this is a no-op. Returns the number of PRDs updated.
+pub fn migrate_prd_order(repo_path: &Path, epic_slug: &str) -> Result<usize, AppError> {
+    let epics_root = repo_path
+        .join("docs")
+        .join("epics")
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("docs/epics not found: {e}")))?;
+    let epic_dir = paths::resolve_within(&epics_root, epic_slug, true)?;
+    if !epic_dir.is_dir() {
+        return Err(AppError::ProjectNotFound(format!(
+            "epic not found: {epic_slug}"
+        )));
+    }
+
+    let mut prds = read_prds(&epic_dir);
+    let mut next = prds.iter().filter_map(|p| p.order).max().unwrap_or(0);
+    let mut updated = 0;
+    for prd in prds.iter_mut() {
+        if prd.order.is_some() {
+            continue;
+        }
+        next += 10;
+        write_prd_order(&epic_dir, &prd.file, next)?;
+        prd.order = Some(next);
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+/// Write an `order: N` line into a PRD's frontmatter — replaces an existing
+/// `order:` line in place, or inserts one just before the closing `---`
+/// fence when absent.
+fn write_prd_order(epic_dir: &Path, filename: &str, order: u32) -> Result<(), AppError> {
+    let path = epic_dir.join(filename);
+    let content = limits::read_bounded_to_string(&path, limits::SPEC_MAX_BYTES)?;
+    let mut lines: Vec<String> = content.split('\n').map(String::from).collect();
+
+    let mut fence_count = 0;
+    let mut existing_at = None;
+    let mut close_at = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "---" {
+            fence_count += 1;
+            if fence_count >= 2 {
+                close_at = Some(i);
+                break;
+            }
+            continue;
+        }
+        if fence_count == 1 && line.starts_with("order:") {
+            existing_at = Some(i);
+        }
+    }
+
+    let order_line = format!("order: {order}");
+    if let Some(i) = existing_at {
+        lines[i] = order_line;
+    } else {
+        let Some(i) = close_at else {
+            return Err(AppError::Config(format!(
+                "PRD frontmatter missing closing fence: {}",
+                path.display()
+            )));
+        };
+        lines.insert(i, order_line);
+    }
+    persist::atomic_write(&path, &lines.join("\n"))?;
+    Ok(())
+}
+
+/// Explicitly reorder every PRD in `epic_slug`, writing `order: 10, 20,
+/// 30…` per `ordered_files`' position — overwrites any existing `order:`.
+/// The user-triggered drag-to-reorder counterpart of [`migrate_prd_order`].
+///
+/// `ordered_files` must be exactly the epic's current PRD filenames, in the
+/// desired order (a permutation) — a full reorder, not a partial patch, so
+/// a stale client can't silently drop a PRD out of the sequence. This check
+/// also doubles as path-traversal protection: every element must
+/// byte-match a filename already listed from disk, so an arbitrary string
+/// (e.g. containing `..`) simply fails validation before any write happens.
+pub fn set_prd_order(
+    repo_path: &Path,
+    epic_slug: &str,
+    ordered_files: &[String],
+) -> Result<(), AppError> {
+    let epics_root = repo_path
+        .join("docs")
+        .join("epics")
+        .canonicalize()
+        .map_err(|e| AppError::InvalidPath(format!("docs/epics not found: {e}")))?;
+    let epic_dir = paths::resolve_within(&epics_root, epic_slug, true)?;
+    if !epic_dir.is_dir() {
+        return Err(AppError::ProjectNotFound(format!(
+            "epic not found: {epic_slug}"
+        )));
+    }
+
+    let current = read_prds(&epic_dir);
+    let mut current_files: Vec<&str> = current.iter().map(|p| p.file.as_str()).collect();
+    current_files.sort_unstable();
+    let mut wanted_files: Vec<&str> = ordered_files.iter().map(|s| s.as_str()).collect();
+    wanted_files.sort_unstable();
+    if current_files != wanted_files {
+        return Err(AppError::Config(format!(
+            "ordered_files must be exactly the epic's current PRD set: {epic_slug}"
+        )));
+    }
+
+    for (i, filename) in ordered_files.iter().enumerate() {
+        write_prd_order(&epic_dir, filename, (i as u32 + 1) * 10)?;
+    }
+    Ok(())
+}
+
+/// Extract PRD filenames in the order they're linked inside the README's
+/// `## PRD Index` section (a markdown table linking to each `prd-*.md`).
+///
+/// Only scans between that heading and the next `## ` heading, so links
+/// elsewhere in the README (Risks, etc.) don't pollute the order. Returns
+/// an empty list if the README is missing or has no such section.
+fn read_prd_index_order(readme_path: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(readme_path) else {
+        return Vec::new();
+    };
+    let mut order = Vec::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            in_section = line.trim().eq_ignore_ascii_case("## PRD Index");
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let mut rest = line;
+        while let Some(start) = rest.find("](") {
+            rest = &rest[start + 2..];
+            let Some(end) = rest.find(')') else { break };
+            let link = &rest[..end];
+            let name = link.rsplit('/').next().unwrap_or(link);
+            if name.starts_with("prd-") && name.ends_with(".md") {
+                order.push(name.to_string());
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    order
 }
 
 // ── Body parsing internals ───────────────────────────────────────────
@@ -1541,6 +1730,177 @@ description: d
         // Sorted by filename.
         assert_eq!(epic.prds[0].file, "prd-epics-view.md");
         assert_eq!(epic.prds[1].file, "prd-spec-layer.md");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_parse_epics_orders_prds_by_readme_index_not_filename() {
+        let dir = create_temp_repo();
+        // "prd-epics-view" is alphabetically first, but the README's PRD
+        // Index table lists prd-spec-layer first — that order must win.
+        let readme = format!(
+            "{VALID_EPIC_README}\n## PRD Index\n\n\
+             | PRD | Covers |\n|-----|--------|\n\
+             | [prd-spec-layer.md](./prd-spec-layer.md) | Spec layer |\n\
+             | [prd-epics-view.md](./prd-epics-view.md) | Epics view |\n"
+        );
+        write_epic(&dir, "support-project-management", &readme);
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-epics-view.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-epics-view"),
+        );
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-spec-layer.md",
+            VALID_PRD,
+        );
+
+        let epics = parse_epics(&dir);
+        let epic = &epics[0];
+        assert_eq!(epic.prds[0].file, "prd-spec-layer.md");
+        assert_eq!(epic.prds[1].file, "prd-epics-view.md");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_read_prds_never_writes_order_on_its_own() {
+        // read_prds (and therefore parse_epics) must stay read-only: a
+        // caller as innocuous as a repeated dashboard refresh, or a test
+        // that dogfoods the real repo, must never mutate PRD files on disk.
+        let dir = create_temp_repo();
+        write_epic(&dir, "e", VALID_EPIC_README);
+        write_prd(&dir, "e", "prd-a.md", VALID_PRD);
+
+        let _ = parse_epics(&dir);
+        let _ = parse_epics(&dir);
+
+        let content =
+            std::fs::read_to_string(dir.join("docs").join("epics").join("e").join("prd-a.md"))
+                .unwrap();
+        assert!(!content.contains("order:"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_migrate_prd_order_backfills_missing_and_is_idempotent() {
+        let dir = create_temp_repo();
+        // README order: prd-b before prd-a (opposite of filename order), so
+        // the backfilled values must follow the README, not the alphabet.
+        let readme = format!(
+            "{VALID_EPIC_README}\n## PRD Index\n\n\
+             | PRD | Covers |\n|-----|--------|\n\
+             | [prd-b.md](./prd-b.md) | B |\n\
+             | [prd-a.md](./prd-a.md) | A |\n"
+        );
+        write_epic(&dir, "support-project-management", &readme);
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-a.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-a"),
+        );
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-b.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-b"),
+        );
+
+        let updated = migrate_prd_order(&dir, "support-project-management").unwrap();
+        assert_eq!(updated, 2);
+
+        let epics = parse_epics(&dir);
+        let epic = &epics[0];
+        assert_eq!(epic.prds[0].file, "prd-b.md");
+        assert_eq!(epic.prds[0].order, Some(10));
+        assert_eq!(epic.prds[1].file, "prd-a.md");
+        assert_eq!(epic.prds[1].order, Some(20));
+
+        // Idempotent: nothing left to backfill on a second run.
+        let updated_again = migrate_prd_order(&dir, "support-project-management").unwrap();
+        assert_eq!(updated_again, 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_set_prd_order_overwrites_existing_and_reorders() {
+        let dir = create_temp_repo();
+        write_epic(&dir, "support-project-management", VALID_EPIC_README);
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-a.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-a"),
+        );
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-b.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-b"),
+        );
+
+        // Backfill first so both PRDs already carry an `order:` value...
+        migrate_prd_order(&dir, "support-project-management").unwrap();
+        let before = parse_epics(&dir);
+        assert_eq!(before[0].prds[0].file, "prd-a.md"); // alphabetical fallback
+
+        // ...then explicitly reorder b before a — must overwrite, not skip.
+        set_prd_order(
+            &dir,
+            "support-project-management",
+            &["prd-b.md".to_string(), "prd-a.md".to_string()],
+        )
+        .unwrap();
+
+        let after = parse_epics(&dir);
+        let epic = &after[0];
+        assert_eq!(epic.prds[0].file, "prd-b.md");
+        assert_eq!(epic.prds[0].order, Some(10));
+        assert_eq!(epic.prds[1].file, "prd-a.md");
+        assert_eq!(epic.prds[1].order, Some(20));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_set_prd_order_rejects_non_matching_file_set() {
+        let dir = create_temp_repo();
+        write_epic(&dir, "support-project-management", VALID_EPIC_README);
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-a.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-a"),
+        );
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-b.md",
+            &VALID_PRD.replace("prd-spec-layer", "prd-b"),
+        );
+
+        // Missing "prd-b.md" — not a permutation of the epic's actual PRDs.
+        let err = set_prd_order(
+            &dir,
+            "support-project-management",
+            &["prd-a.md".to_string()],
+        );
+        assert!(matches!(err, Err(AppError::Config(_))));
+
+        // A traversal attempt fails the same way — never matches a real filename.
+        let err = set_prd_order(
+            &dir,
+            "support-project-management",
+            &["../../etc/passwd".to_string(), "prd-a.md".to_string()],
+        );
+        assert!(matches!(err, Err(AppError::Config(_))));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
