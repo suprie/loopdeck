@@ -2,6 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-12 — Rail pin state is a plain per-machine bool; night-run badge is a run-plan-derived placeholder
+
+- **Status**: accepted
+- **Context**: `prd-rail-corridor-shell` Phase 1's two open questions (pin trigger UI, pin storage) and its dependency on `prd-detail-drawer`'s not-yet-run night-run spike were pre-answered at run queue time, not left for this loop to guess.
+- **Consequences**: Pin/unpin lives on the door itself as a right-click context menu (no room card exists until Phase 2) — a plain `pinned: bool` on `ProjectEntry` (`config.rs`), mirroring the existing `autonomous` flag exactly, no new storage design. The night-run badge derives from whether the project has an active/queued `.loopdeck/run-plan.yaml` (`hasActiveOrQueuedRun` in `src/lib/rail.ts`) — an explicit placeholder, not the real `RunState` variant `prd-night-run-surfaces` may eventually add once its drawer spike lands.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-12 entry) has the full file/symbol breakdown.
+
 ## 2026-08-04 — Run-queue reliability: verdict marker must survive to the final message; branch names are now descriptive
 
 - **Status**: accepted

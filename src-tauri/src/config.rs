@@ -228,6 +228,12 @@ pub struct ProjectEntry {
     /// `skip_serializing_if` keeps the registry tidy for the common case.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autonomous: bool,
+    /// Pinned to the rail (`prd-rail-corridor-shell` Phase 1): past 5
+    /// registered projects, only pinned projects (plus a fixed overflow door)
+    /// show in the 72px rail. Per-machine, stored in the global registry —
+    /// not synced. Older configs without this field deserialize to `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// Total `## Next Steps` checklist items parsed from `.loopdeck/loops.md`.
     /// Re-read at every `list_projects`/`import_project` call (same treatment
     /// as `current_loop`: doesn't gate whether a save happens, but is always
@@ -272,6 +278,7 @@ impl Default for ProjectEntry {
             uncommitted: UncommittedStats::default(),
             run_state: RunState::Idle,
             autonomous: false,
+            pinned: false,
             next_steps_total: 0,
             next_steps_done: 0,
         }

@@ -11,7 +11,6 @@ import {
   Link,
 } from "@tanstack/react-router";
 import { useAppStore } from "./store/appStore";
-import { useProjects } from "./hooks/useProjects";
 import { AppShell } from "./components/layout/AppShell";
 
 // ── View imports ─────────────────────────────────────────────────────────────
@@ -32,32 +31,9 @@ import { SpecEditorPage } from "./components/spec/SpecEditorPage";
 function AppShellLayout() {
   const error = useAppStore((s) => s.error);
   const setError = useAppStore((s) => s.setError);
-  const { scanFolder } = useProjects();
-
-  /** The "Import Repo" nav item triggers a native folder dialog instead of
-   *  routing to /import directly. The shared AppShell owns the link markup; we
-   *  pass a handler keyed by destination so this Tauri-only behaviour stays
-   *  out of the design-system shell. */
-  const handleNavClick = async (to: string, e: React.MouseEvent) => {
-    if (to !== "/import") return;
-    e.preventDefault();
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "Select Folder to Scan",
-      });
-      if (selected && typeof selected === "string") {
-        await scanFolder(selected);
-      }
-    } catch {
-      // User cancelled or dialog failed.
-    }
-  };
 
   return (
-    <AppShell onNavClick={handleNavClick}>
+    <AppShell>
       {/* Error banner — kept from the previous shell */}
       {error && (
         <div className="flex items-center justify-between px-4 py-2 bg-[color-mix(in_oklab,var(--destructive)_12%,transparent)] text-destructive text-xs flex-shrink-0">

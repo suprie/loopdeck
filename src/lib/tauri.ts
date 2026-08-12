@@ -106,6 +106,15 @@ export async function setProjectAutonomous(
 }
 
 /**
+ * Toggle a project's rail pin. Past 5 registered projects, only pinned
+ * projects show as rail doors.
+ * Rust: set_project_pinned(path: String, pinned: bool) -> Result<(), AppError>
+ */
+export async function setProjectPinned(path: string, pinned: boolean): Promise<void> {
+  return invoke<void>("set_project_pinned", { path, pinned });
+}
+
+/**
  * Remove a project from the registry (does NOT delete files).
  * Rust: remove_project(path: String) -> Result<(), AppError>
  */

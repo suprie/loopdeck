@@ -221,6 +221,24 @@ export function useProjects() {
     [setError, updateProjectInStore],
   );
 
+  /** Toggle a project's rail pin and reflect it in the store. */
+  const setPinned = useCallback(
+    async (path: string, pinned: boolean) => {
+      setError(null);
+      try {
+        await api.setProjectPinned(path, pinned);
+        const existing = useAppStore.getState().projects.find((p) => p.path === path);
+        if (existing) {
+          updateProjectInStore({ ...existing, pinned });
+        }
+      } catch (err) {
+        const appErr = err as AppError;
+        setError(appErr.message ?? String(err));
+      }
+    },
+    [setError, updateProjectInStore],
+  );
+
   /** Open a path in the system terminal. */
   const openInTerminal = useCallback(
     async (path: string) => {
@@ -244,6 +262,7 @@ export function useProjects() {
     regenerateDesc,
     rescanProject,
     setAutonomous,
+    setPinned,
     openInFinder,
     openInTerminal,
   };
