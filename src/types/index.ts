@@ -105,6 +105,13 @@ export interface ProjectEntry {
    */
   autonomous?: boolean;
   /**
+   * Pinned to the rail (`prd-rail-corridor-shell` Phase 1): past 5 registered
+   * projects, only pinned projects (plus a fixed overflow door) show in the
+   * 72px rail. Per-machine, not synced. Optional on the wire because the
+   * backend `skip_serializing_if`s it when false.
+   */
+  pinned?: boolean;
+  /**
    * Total `## Next Steps` checklist items parsed from `.loopdeck/loops.md`,
    * refreshed on every `list_projects` call. Ephemeral — not persisted when
    * zero, so older/quiet projects load as `0`.

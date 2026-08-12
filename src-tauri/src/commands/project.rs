@@ -97,6 +97,7 @@ async fn register_directory(
         uncommitted: git_info.uncommitted.into(),
         run_state: RunState::Idle,
         autonomous: false,
+        pinned: false,
         next_steps_total,
         next_steps_done,
     };
@@ -382,6 +383,33 @@ pub async fn set_project_autonomous(
         }
     }
     info!("set_project_autonomous complete for: {path} → {autonomous}");
+    Ok(())
+}
+
+/// Set the per-project rail-pin flag in the config registry.
+///
+/// Past 5 registered projects, the 72px rail shows pinned projects only (plus
+/// a fixed overflow door back to the corridor) — see `prd-rail-corridor-shell`
+/// Phase 1.
+#[tauri::command]
+pub async fn set_project_pinned(
+    path: String,
+    pinned: bool,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    debug!("set_project_pinned called for path: {path}, pinned: {pinned}");
+    let root = {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        paths::resolve_registered_root(&config, &path)?
+    };
+    {
+        let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+        if let Some(entry) = config.find_by_path_mut(&root) {
+            entry.pinned = pinned;
+            config.save()?;
+        }
+    }
+    info!("set_project_pinned complete for: {path} → {pinned}");
     Ok(())
 }
 

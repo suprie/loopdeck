@@ -167,6 +167,7 @@ pub fn run() {
             commands::project::get_project,
             commands::project::update_description,
             commands::project::set_project_autonomous,
+            commands::project::set_project_pinned,
             commands::project::remove_project,
             commands::project::open_in_finder,
             commands::project::open_in_terminal,

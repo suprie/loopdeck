@@ -62,24 +62,29 @@ on the existing routed `ProjectDetail` page as an interim target.
 
 ## Design
 
-_Stub — pin/unpin trigger placement and the default rail state for an
-existing install crossing 5 projects with zero pins are Phase 1 decisions,
-not made yet._
+Phase 1 decisions resolved during implementation (2026-08-12): pin/unpin is a
+right-click context menu on the door itself (no room card exists yet this
+phase); an existing install crossing 5 projects with zero pins shows the 5
+most recently active as a fallback rather than an empty rail; pin state is a
+plain `bool` on the global registry's `ProjectEntry` (per-machine, not
+synced). The night-run indicator is a placeholder — derived from whether the
+project has an active/queued `RunPlan` (existing run-queue data), pending
+`prd-detail-drawer`'s spike settling the real `RunState` representation.
 
 ## Phases
 
 ### Phase 1 — Project rail
 
-- [ ] Build a `Rail` component (72px icon strip, one door per project, 2-letter
+- [x] Build a `Rail` component (72px icon strip, one door per project, 2-letter
       initials) replacing `AppShell.tsx`'s current sidebar markup.
-- [ ] Wire each door's glow color to that project's `RunState`
+- [x] Wire each door's glow color to that project's `RunState`
       (working/waiting/done/idle) plus a distinct night-run indicator,
       reusing the state derivation already in `AttentionPanel.tsx` /
       `useAttentionItems`.
-- [ ] Add a pin/unpin affordance per project, and rail logic that shows all
+- [x] Add a pin/unpin affordance per project, and rail logic that shows all
       projects at 5 or fewer, or pinned-only plus one overflow door (back to
       the corridor) past 5.
-- [ ] Move the settings entry point to a gear icon at the rail's foot,
+- [x] Move the settings entry point to a gear icon at the rail's foot,
       preserving the existing `/settings` route.
 
 ### Phase 2 — Corridor room-card list
