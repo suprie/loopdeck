@@ -70,16 +70,16 @@ not made yet._
 
 ### Phase 1 — Project rail
 
-- [ ] Build a `Rail` component (72px icon strip, one door per project, 2-letter
+- [ ] `selasar-revamp/build-a-rail-component-72px-icon-strip-one-door-per-project-2-letter` Build a `Rail` component (72px icon strip, one door per project, 2-letter
       initials) replacing `AppShell.tsx`'s current sidebar markup.
-- [ ] Wire each door's glow color to that project's `RunState`
+- [ ] `selasar-revamp/wire-each-door-s-glow-color-to-that-project-s-runstate` Wire each door's glow color to that project's `RunState`
       (working/waiting/done/idle) plus a distinct night-run indicator,
       reusing the state derivation already in `AttentionPanel.tsx` /
       `useAttentionItems`.
-- [ ] Add a pin/unpin affordance per project, and rail logic that shows all
+- [ ] `selasar-revamp/add-a-pin-unpin-affordance-per-project-and-rail-logic-that-shows-all` Add a pin/unpin affordance per project, and rail logic that shows all
       projects at 5 or fewer, or pinned-only plus one overflow door (back to
       the corridor) past 5.
-- [ ] Move the settings entry point to a gear icon at the rail's foot,
+- [ ] `selasar-revamp/move-the-settings-entry-point-to-a-gear-icon-at-the-rail-s-foot` Move the settings entry point to a gear icon at the rail's foot,
       preserving the existing `/settings` route.
 
 ### Phase 2 — Corridor room-card list

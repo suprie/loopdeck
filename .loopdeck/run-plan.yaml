@@ -1,6 +1,6 @@
-id: run-e40096a5-5f97-4a58-a061-d188d566b577
+id: run-15cb3a04-f83c-44b0-b2e2-17da9665fd0c
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-05T10:56:59.735262Z
+created: 2026-08-11T07:01:33.841450Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -9,35 +9,55 @@ budgets:
   total_run_wall_clock_secs: 28800
 environment:
   worktree_kept: false
-wall_clock_secs: 652
+wall_clock_secs: 1094
 stall_policy: continue_independent
 phases:
-- execution_id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
+- execution_id: selasar-revamp/build-a-rail-component-72px-icon-strip-one-door-per-project-2-letter
   status: completed
   interview:
-  - question: How should the system-auto theme mode be tested? In "auto", the app follows the real OS appearance via window.matchMedia, so verifying auto requires changing macOS's actual appearance setting — a system-wide side effect on your machine that may not restore if the run dies mid-way.
-    answer: Emulate, don't touch OS
-  - question: If the visual pass finds a contrast regression or visual defect, what should the run do? This loop is Phase 3 verification — it's unclear whether the agent should fix or just report when something fails.
-    answer: Fix and re-verify
-  - question: How should "no contrast regression" be judged with no human present? You can't eyeball the screenshots overnight, so the pass needs a defined verdict mechanism.
-    answer: Skip this, let me validate manually
-  - question: How deep should "every existing screen" go? Destructive/warning/focus states (delete-confirm dialogs, error banners, keyboard focus rings) only appear after driving the UI — the run must decide how much interaction to perform.
-    answer: skipp this as well, let human verify
+  - question: '2-letter door initials: how derive from project name (e.g. "loopdeck", "my-cool-app")?'
+    answer: First 2 chars of name
+  - question: Door order in the rail — what order do project doors render in?
+    answer: Last-active first
+  - question: AppShell's current aside also has a brand mark (Selasar logo) and a "Local only vX" footer badge, on top of the feature nav. This loop replaces the feature nav with project doors — what happens to the brand mark / version footer?
+    answer: Drop both
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/79'
-  token_usage: 205057
-  wall_clock_secs: 324
-- execution_id: selasar-revamp/npx-tsc-noemit-clean-manual-smoke-confirming-selasar-appears-in
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/84'
+  token_usage: 19706
+  wall_clock_secs: 271
+- execution_id: selasar-revamp/wire-each-door-s-glow-color-to-that-project-s-runstate
   status: completed
   interview:
-  - question: The acceptance criteria say 'manual smoke confirming "Selasar" appears in the window title bar,' but the run is unattended — no human present to do the manual part. What should the run do for the smoke step?
-    answer: Static check, defer eyeball
-  - question: If `npx tsc --noEmit` is not clean, or the "Selasar" title check fails, what should the run do?
-    answer: Fix and re-verify
+  - question: prd-night-run-surfaces Phase 1 explicitly owns "wire the rail door's night-run indicator," gated on prd-detail-drawer's spike (not yet run) deciding whether "night run" becomes a real RunState variant. This loop's own task text also says "plus a distinct night-run indicator." What should this loop actually build tonight?
+    answer: Build placeholder now — derive "night run" from whether the project has an active/queued RunPlan (existing run-queue data) and add a distinct visual marker on the door now, accepting it may need rework once the drawer spike settles the real representation.
   interview_status: answered
   depends_on:
-  - selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/79'
-  token_usage: 205057
-  wall_clock_secs: 324
+  - selasar-revamp/build-a-rail-component-72px-icon-strip-one-door-per-project-2-letter
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/84'
+  token_usage: 19706
+  wall_clock_secs: 271
+- execution_id: selasar-revamp/add-a-pin-unpin-affordance-per-project-and-rail-logic-that-shows-all
+  status: completed
+  interview:
+  - question: 'Pin/unpin control: room card doesn''t exist yet this phase (Phase 2 builds it) — so it has to live on the rail door itself. What interaction triggers it?'
+    answer: Right-click context menu
+  - question: Existing install already has >5 projects, zero pins set. What does the rail show on first load after this ships?
+    answer: 5 most recently active
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/wire-each-door-s-glow-color-to-that-project-s-runstate
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/84'
+  token_usage: 19706
+  wall_clock_secs: 271
+- execution_id: selasar-revamp/move-the-settings-entry-point-to-a-gear-icon-at-the-rail-s-foot
+  status: completed
+  interview:
+  - question: AppShell.tsx's current sidebar footer has Settings NavLink directly above a "Local only / v0.2.0" status strip (no other copy exists elsewhere). PRD only says move Settings to a gear icon at rail's foot — silent on this strip. What should happen to it in this loop?
+    answer: Move to corridor/header instead
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/add-a-pin-unpin-affordance-per-project-and-rail-logic-that-shows-all
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/84'
+  token_usage: 19706
+  wall_clock_secs: 271

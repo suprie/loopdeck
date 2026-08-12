@@ -1,5 +1,5 @@
 schema_version: 1
-revision: 2
+revision: 4
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -11,4 +11,14 @@ history:
   outcome: completed
   started_at: 2026-08-05T11:12:34.730540Z
   completed_at: 2026-08-05T11:23:24.646485Z
+  attempt: 1
+- id: selasar-revamp/build-a-rail-component-72px-icon-strip-one-door-per-project-2-letter
+  title: Build a `Rail` component (72px icon strip, one door per project, 2-letter
+  origin:
+    epic: selasar-revamp
+    prd: prd-rail-corridor-shell
+    phase: Phase 1 — Project rail
+  outcome: completed
+  started_at: 2026-08-12T02:53:10.162660Z
+  completed_at: 2026-08-12T03:11:14.907239Z
   attempt: 1
