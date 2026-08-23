@@ -1,5 +1,14 @@
 schema_version: 1
-revision: 2
+revision: 5
+current:
+  id: selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
+  title: Decide whether the drawer stays URL-backed (route or query-param
+  origin:
+    epic: selasar-revamp
+    prd: prd-detail-drawer
+    phase: 'Phase 1 — Spike: drawer routing model + tab relocation'
+  started_at: 2026-08-23T10:54:32.189413Z
+  attempt: 1
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -12,3 +21,14 @@ history:
   started_at: 2026-08-05T11:12:34.730540Z
   completed_at: 2026-08-05T11:23:24.646485Z
   attempt: 1
+- id: selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
+  title: Decide whether the drawer stays URL-backed (route or query-param
+  origin:
+    epic: selasar-revamp
+    prd: prd-detail-drawer
+    phase: 'Phase 1 — Spike: drawer routing model + tab relocation'
+  outcome: abandoned
+  started_at: 2026-08-21T03:25:02.478322Z
+  completed_at: 2026-08-21T06:16:06.455730Z
+  attempt: 1
+  reason: no verify verdict found in the turn's final response

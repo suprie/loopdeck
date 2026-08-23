@@ -1,6 +1,6 @@
-id: run-e40096a5-5f97-4a58-a061-d188d566b577
+id: run-5db04327-baf6-4e3c-b3fb-a4d4360b23fc
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-05T10:56:59.735262Z
+created: 2026-08-16T01:20:46.575347Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -8,36 +8,108 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
-  worktree_kept: false
-wall_clock_secs: 652
+  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-5db04327-baf6-4e3c-b3fb-a4d4360b23fc
+  worktree_branch: run/selasar-revamp-decide-whether-the-drawer-stays-url-backed-route-or-query-param-plus7-a4d4360b23fc
+  worktree_kept: true
+wall_clock_secs: 408
 stall_policy: continue_independent
 phases:
-- execution_id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
+- execution_id: selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
   status: completed
   interview:
-  - question: How should the system-auto theme mode be tested? In "auto", the app follows the real OS appearance via window.matchMedia, so verifying auto requires changing macOS's actual appearance setting — a system-wide side effect on your machine that may not restore if the run dies mid-way.
-    answer: Emulate, don't touch OS
-  - question: If the visual pass finds a contrast regression or visual defect, what should the run do? This loop is Phase 3 verification — it's unclear whether the agent should fix or just report when something fails.
-    answer: Fix and re-verify
-  - question: How should "no contrast regression" be judged with no human present? You can't eyeball the screenshots overnight, so the pass needs a defined verdict mechanism.
-    answer: Skip this, let me validate manually
-  - question: How deep should "every existing screen" go? Destructive/warning/focus states (delete-confirm dialogs, error banners, keyboard focus rings) only appear after driving the UI — the run must decide how much interaction to perform.
-    answer: skipp this as well, let human verify
+  - question: 'Drawer routing model: how much weight should bookmark/deep-link/browser-back behavior get vs matching the mockup''s plain show/hide state?'
+    answer: Let spike decide freely
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/79'
-  token_usage: 205057
-  wall_clock_secs: 324
-- execution_id: selasar-revamp/npx-tsc-noemit-clean-manual-smoke-confirming-selasar-appears-in
-  status: completed
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/85'
+  token_usage: 25062
+  wall_clock_secs: 408
+- execution_id: selasar-revamp/decide-where-the-epics-tab-epicspanel-tsx-including
+  status: parked
   interview:
-  - question: The acceptance criteria say 'manual smoke confirming "Selasar" appears in the window title bar,' but the run is unattended — no human present to do the manual part. What should the run do for the smoke step?
-    answer: Static check, defer eyeball
-  - question: If `npx tsc --noEmit` is not clean, or the "Selasar" title check fails, what should the run do?
-    answer: Fix and re-verify
+  - question: 'Epics tab (EpicsPanel.tsx: epic/PRD/phase tree + RunQueuePanel, 855 lines) relocates where?'
+    answer: Fold into existing tab
+  - question: Graph tab (KnowledgeGraphPanel.tsx) relocates where?
+    answer: Fold into existing tab
   interview_status: answered
   depends_on:
-  - selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/79'
-  token_usage: 205057
-  wall_clock_secs: 324
+  - selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87
+- execution_id: selasar-revamp/confirm-with-whoever-owns-prd-night-run-surfaces-sequencing-whether
+  status: parked
+  interview:
+  - question: This loop's task text says "confirm with whoever owns prd-night-run-surfaces" — but this is a solo repo, unattended, no separate owner to ping overnight. How should the run resolve this checklist item?
+    answer: Self-decide, record ADR
+  - question: 'If the agent self-decides (or you want a default answer captured either way): should "night run" need a real new RunState enum variant, or a derived flag, by the time the drawer''s variant-selection logic is built?'
+    answer: Real new enum variant (Recommended)
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/decide-where-the-epics-tab-epicspanel-tsx-including
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87
+- execution_id: selasar-revamp/build-the-drawer-s-standard-variant-scrim-slide-over-panel-header
+  status: parked
+  interview:
+  - question: 'PRD''s own Open Questions flags this unresolved for Phase 2 build: while drawer open, should corridor behind it stay interactive (scrollable) or freeze?'
+    answer: Freeze corridor (Recommended)
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/confirm-with-whoever-owns-prd-night-run-surfaces-sequencing-whether
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87
+- execution_id: selasar-revamp/wire-rail-door-clicks-from-prd-rail-corridor-shell-and
+  status: parked
+  interview:
+  - question: 'AttentionPanel.tsx and CommandPalette.tsx also call navigate({to: "/project/$projectPath"}) today, same as Rail.tsx and Dashboard.tsx. The PRD checklist item only names rail-door and corridor-card clicks. Should this loop also repoint those two other entry points to open the drawer, for consistency?'
+    answer: Yes, repoint all four
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/build-the-drawer-s-standard-variant-scrim-slide-over-panel-header
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87
+- execution_id: selasar-revamp/relocate-epics-and-graph-tab-content-per-the-spike-s-decision
+  status: parked
+  interview:
+  - question: 'The spike''s recorded interview answer says Epics tab content (EpicsPanel.tsx: epic/PRD/phase tree + RunQueuePanel, 855 lines) should ''fold into existing tab'' but doesn''t name which of the 4 remaining tabs (Overview/Agent/Loops/Decisions). Which tab should it fold into?'
+    answer: Loops
+  - question: Same question for Graph tab content (KnowledgeGraphPanel.tsx — graphify stats + links to indexed docs). Which tab should it fold into?
+    answer: Decisions
+  - question: EpicsPanel is 855 lines (tree + RunQueuePanel) and won't fit as a simple inline section in a narrower drawer without restructuring. How should it integrate into its target tab?
+    answer: Nested sub-tabs (Recommended)
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/wire-rail-door-clicks-from-prd-rail-corridor-shell-and
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87
+- execution_id: selasar-revamp/manual-smoke-test-open-close-the-drawer-from-both-rail-and-corridor
+  status: parked
+  interview:
+  - question: This loop is a "manual smoke test" (open/close drawer from rail+corridor, tab switching, URL-backed load/back). No human, no Playwright/e2e harness exists. How should the unattended agent verify this?
+    answer: Code-level trace verification (Recommended)
+  - question: If the verification step finds an actual bug (e.g. a tab-switch handler wired wrong), what should the unattended run do?
+    answer: Fix in scope, then re-verify (Recommended)
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/relocate-epics-and-graph-tab-content-per-the-spike-s-decision
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87
+- execution_id: selasar-revamp/npx-tsc-noemit-clean-confirm-no-regression-in-existing-per-tab
+  status: parked
+  interview:
+  - question: This loop's PRD checklist item is 'npx tsc --noEmit clean; confirm no regression in existing per-tab functionality (Agent chat, starting a loop, decisions list, epics list, knowledge graph)'. No human and no Playwright/e2e harness exists (same gap already documented for the preceding manual-smoke-test loop). How should the unattended agent confirm 'no regression'?
+    answer: Code-level trace verification (Recommended)
+  - question: If tsc --noEmit surfaces a real type error, or the regression check finds an actual functional bug (e.g. a dropped prop or broken handler from the Phase 2 relocation), what should the unattended run do?
+    answer: Stop and flag for human review
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/manual-smoke-test-open-close-the-drawer-from-both-rail-and-corridor
+  park_payload: no verify verdict found in the turn's final response
+  token_usage: 7248
+  wall_clock_secs: 87

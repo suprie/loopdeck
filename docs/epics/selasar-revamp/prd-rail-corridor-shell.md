@@ -89,14 +89,14 @@ project has an active/queued `RunPlan` (existing run-queue data), pending
 
 ### Phase 2 — Corridor room-card list
 
-- [ ] Build a `RoomCard` component (name, path, description, status line +
+- [ ] `selasar-revamp/build-a-roomcard-component-name-path-description-status-line` Build a `RoomCard` component (name, path, description, status line +
       progress bar or phase-tick strip, last commit + relative time + dirty
       badge) replacing `ProjectList.tsx`'s row rendering, reusing its
       existing per-project data shape.
-- [ ] Rebuild `Dashboard.tsx`'s page head/toolbar (title, filter chips,
+- [ ] `selasar-revamp/rebuild-dashboard-tsx-s-page-head-toolbar-title-filter-chips` Rebuild `Dashboard.tsx`'s page head/toolbar (title, filter chips,
       "Scan for repos") around the corridor layout, carrying over the
       existing `scanFolder`/`loadProjects` wiring.
-- [ ] Decide and implement whether `AttentionPanel.tsx` and `TodayPanel.tsx`
+- [ ] `selasar-revamp/decide-and-implement-whether-attentionpanel-tsx-and-todaypanel-tsx` Decide and implement whether `AttentionPanel.tsx` and `TodayPanel.tsx`
       fold into room-card status lines/badges or remain a separate corridor
       section.
 
