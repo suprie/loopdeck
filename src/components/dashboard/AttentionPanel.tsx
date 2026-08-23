@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { ShieldAlert, MessageCircleQuestion, FileCheck2, Loader2 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { usePendingInteractions } from "../../store/pendingInteractions";
@@ -99,15 +98,13 @@ export function useAttentionItems(): AttentionItem[] {
  * genuinely nothing to flag — no empty-state filler card.
  */
 export function AttentionPanel() {
-  const navigate = useNavigate();
   const items = useAttentionItems().slice(0, 3);
 
   if (items.length === 0) return null;
 
   const openAgentTab = (path: string) => {
-    useAppStore.getState().setSelectedProjectPath(path);
     useAppStore.getState().setDetailTab("agent");
-    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
+    useAppStore.getState().openDrawer(path);
   };
 
   return (

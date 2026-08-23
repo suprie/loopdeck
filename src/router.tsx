@@ -22,7 +22,6 @@ import { DecisionsView } from "./components/decisions/DecisionsView";
 import { LoopsView } from "./components/loops/LoopsView";
 import { EpicsView } from "./components/epics/EpicsView";
 import { ImportFlow } from "./components/import/ImportFlow";
-import { ProjectDetail } from "./components/detail/ProjectDetail";
 import { Settings } from "./components/settings/Settings";
 import { SpecEditorPage } from "./components/spec/SpecEditorPage";
 
@@ -158,19 +157,6 @@ const importRoute = createRoute({
 });
 
 /**
- * Project detail route.
- *
- * The project's filesystem path is passed as a URL-encoded path segment so
- * slashes don't break routing (e.g. `/Users/foo` → `/project/%2FUsers%2Ffoo`).
- * The component decodes it back via `decodeURIComponent`.
- */
-const projectRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/project/$projectPath",
-  component: ProjectDetail,
-});
-
-/**
  * Spec editor route.
  *
  * Full-screen editor for epic README and PRD files. The relative path
@@ -195,7 +181,6 @@ const routeTree = rootRoute.addChildren([
   epicsRoute,
   settingsRoute,
   importRoute,
-  projectRoute,
   specEditorRoute,
 ]);
 

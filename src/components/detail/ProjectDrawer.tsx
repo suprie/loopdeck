@@ -1,7 +1,5 @@
-import { useState, useEffect } from "react";
-import { useParams, useNavigate, Link } from "@tanstack/react-router";
+import { useState } from "react";
 import {
-  ArrowLeft,
   Pencil,
   Sparkles,
   RefreshCw,
@@ -34,8 +32,9 @@ import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { StatusBadge } from "../shared/StatusBadge";
 import { PermissionModeBadge } from "../shared/PermissionModeBadge";
-import { PageHeader } from "../layout/AppShell";
 import { Section, IconButton, ActionButton } from "./Section";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "../ui/sheet";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { cn } from "../../lib/utils";
 import type {
   AskUserQuestionAnswers,
@@ -45,21 +44,45 @@ import type {
   ProjectEntry,
 } from "../../types";
 
-const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
+/** The drawer's 4 top-level tabs, per `prd-detail-drawer` Phase 2. Epics and
+ *  Graph (both former top-level tabs) fold into Loops and Decisions
+ *  respectively as nested sub-tabs — see the Phase 1 spike ADR in
+ *  `docs/epics/selasar-revamp/README.md`. */
+type TopTab = "overview" | "agent" | "loops" | "decisions";
+
+const TABS: { id: TopTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
-  { id: "decisions", label: "Decisions", icon: <Lightbulb size={14} /> },
-  { id: "loops", label: "Loops", icon: <Repeat size={14} /> },
-  { id: "epics", label: "Epics", icon: <Layers size={14} /> },
-  { id: "graph", label: "Graph", icon: <Network size={14} /> },
   { id: "agent", label: "Agent", icon: <Bot size={14} /> },
+  { id: "loops", label: "Loops", icon: <Repeat size={14} /> },
+  { id: "decisions", label: "Decisions", icon: <Lightbulb size={14} /> },
 ];
 
-export function ProjectDetail() {
-  const navigate = useNavigate();
-  const { projectPath: encodedPath } = useParams({ strict: false }) as { projectPath: string };
-  const projectPath = decodeURIComponent(encodedPath);
+/** Maps the persisted `DetailTab` (which still carries the legacy `"epics"`/
+ *  `"graph"` values for deep-selecting a sub-tab, e.g. from
+ *  `useProjects.createProject`) onto one of the drawer's 4 top-level tabs. */
+function topLevelTab(tab: DetailTab): TopTab {
+  if (tab === "epics") return "loops";
+  if (tab === "graph") return "decisions";
+  return tab;
+}
 
-  const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
+/**
+ * Right-side overlay drawer — the project detail surface. Replaces the old
+ * routed, full-page `/project/$projectPath` view. Per the `prd-detail-drawer`
+ * Phase 1 spike ADR, this is pure UI state (`appStore.drawerOpen` +
+ * `selectedProjectPath`), not URL/route-backed: this app's router runs on
+ * in-memory history with no visible address bar, so route-backing bought no
+ * real bookmark/deep-link/back-button benefit, and `selectedProjectPath` was
+ * already a store field decoupled from routing before this change.
+ *
+ * Built on the (previously unused) shadcn `Sheet` primitive
+ * (`@radix-ui/react-dialog` under the hood) — modal by default, which gives
+ * focus trapping, Escape-to-close, and body-scroll-lock (the corridor
+ * "freeze" behavior) for free, no hand-rolled overlay code needed.
+ */
+export function ProjectDrawer() {
+  const drawerOpen = useAppStore((s) => s.drawerOpen);
+  const setDrawerOpen = useAppStore((s) => s.setDrawerOpen);
   const project = useAppStore(selectSelectedProject);
   const activeTab = useAppStore((s) => s.detailTab);
   const setActiveTab = useAppStore((s) => s.setDetailTab);
@@ -69,37 +92,24 @@ export function ProjectDetail() {
   const [isEditing, setIsEditing] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
 
-  // Keep the persisted navigation identifier in sync with the route param. The
-  // route is the source of truth for *which* project is open; `project` itself
-  // is derived from `projects` (Rust) via `selectSelectedProject`, so it always
-  // carries fresh git/run state and resolves to null if the path is no longer
-  // registered.
-  useEffect(() => {
-    setSelectedProjectPath(projectPath);
-  }, [projectPath, setSelectedProjectPath]);
-
-  if (!project) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <p className="text-sm text-muted-foreground">No project selected.</p>
-      </div>
-    );
-  }
-
   const handleRemove = () => {
+    if (!project) return;
     removeProject(project.path);
     setShowRemoveConfirm(false);
   };
 
   const handleRegenerate = async () => {
+    if (!project) return;
     await regenerateDesc(project.path);
   };
 
   const handleRescan = async () => {
+    if (!project) return;
     await rescanProject(project.path);
   };
 
   const handleRefreshSkills = async () => {
+    if (!project) return;
     try {
       const skills = await api.refreshSkills(project.path);
       toast.success(`Refreshed ${skills.length} skill${skills.length === 1 ? "" : "s"}.`);
@@ -113,109 +123,108 @@ export function ProjectDetail() {
   };
 
   return (
-    <div className="flex flex-1 flex-col min-h-0">
-      <PageHeader
-        title={
-          <span className="flex items-center gap-2">
-            <Link
-              to="/"
-              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              onClick={(e) => {
-                // Use the navigate() path so memory-history back works the same.
-                e.preventDefault();
-                navigate({ to: "/" });
-              }}
-              aria-label="Back to dashboard"
-            >
-              <ArrowLeft className="size-4" />
-            </Link>
-            <span className="font-display">{project.name}</span>
-          </span>
-        }
-        subtitle={<span className="font-mono text-[11px]">{project.path}</span>}
-        actions={<StatusBadge status={project.status} />}
-      />
+    <Sheet open={drawerOpen && !!project} onOpenChange={(open) => !open && setDrawerOpen(false)}>
+      <SheetContent
+        side="right"
+        className="flex h-full w-[760px] max-w-[92vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[760px]"
+      >
+        {project && (
+          <>
+            <SheetHeader className="shrink-0 border-b border-border px-6 py-5 pr-12 text-left">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <SheetTitle className="font-display text-lg">{project.name}</SheetTitle>
+                  <SheetDescription className="mt-0.5 font-mono text-[11px]">
+                    {project.path}
+                  </SheetDescription>
+                  {project.description && (
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {project.description}
+                    </p>
+                  )}
+                </div>
+                <StatusBadge status={project.status} />
+              </div>
+            </SheetHeader>
 
-      {/* Stuck-question callout: tab-agnostic. Shown whenever a Selasar-spawned
-          agent has an AskUserQuestion parked for this project, regardless of
-          which tab is active — so the user can answer it from anywhere in the
-          detail view (not just the Agent tab). Mirrors the card the Agent tab
-          renders, reading from the same navigation-stable store. */}
-      <StuckQuestionCallout projectPath={project.path} />
-      <StuckPermissionCallout projectPath={project.path} />
-      <StuckPlanCallout projectPath={project.path} />
+            {/* Stuck-question callout: tab-agnostic. Shown whenever a
+                Selasar-spawned agent has an AskUserQuestion parked for this
+                project, regardless of which tab is active. */}
+            <StuckQuestionCallout projectPath={project.path} />
+            <StuckPermissionCallout projectPath={project.path} />
+            <StuckPlanCallout projectPath={project.path} />
 
-      {/* Body: tab rail + content */}
-      <div className="flex flex-1 min-h-0">
-        {/* Sidebar nav */}
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-border p-3">
-          <div className="mb-1 px-3 py-1 font-display text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            {project.name}
-          </div>
-          {TABS.map((tab) => {
-            const active = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={cn(
-                  "relative rounded-md px-3 py-1.5 text-left text-sm transition-colors",
-                  active
-                    ? "nav-active-bar bg-accent font-medium text-foreground"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            {/* Top-level tab rail */}
+            <nav className="flex shrink-0 items-center gap-1 border-b border-border px-4">
+              {TABS.map((tab) => {
+                const active = topLevelTab(activeTab) === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={cn(
+                      "flex items-center gap-1.5 border-b-2 px-3 py-2.5 text-sm transition-colors",
+                      active
+                        ? "border-primary font-medium text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {tab.icon}
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            {/* Content panel.
+                Overview / Loops / Decisions use a scroll container. The
+                Agent tab needs an inner-scroll layout instead: its Chat
+                surface has its own transcript scroller, so the wrapper must
+                be a bounded flex child — NOT an overflow-y-auto container,
+                which would give the Chat root an unbounded height and break
+                the inner scroll. */}
+            {topLevelTab(activeTab) === "agent" ? (
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
+                <AgentPanel projectPath={project.path} />
+              </div>
+            ) : (
+              <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-6">
+                {topLevelTab(activeTab) === "overview" && (
+                  <OverviewTab
+                    project={project}
+                    isEditing={isEditing}
+                    onEdit={() => setIsEditing(true)}
+                    onCancelEdit={() => setIsEditing(false)}
+                    onRegenerate={handleRegenerate}
+                    onRescan={handleRescan}
+                    onRefreshSkills={handleRefreshSkills}
+                    onToggleAutonomous={handleToggleAutonomous}
+                    onFinder={() => openInFinder(project.path)}
+                    onTerminal={() => openInTerminal(project.path)}
+                    onRemove={() => setShowRemoveConfirm(true)}
+                  />
                 )}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </nav>
 
-        {/* Content panel.
-            Overview / Decisions / Loops use a scroll container (their content
-            flows like a document). The Agent tab needs an inner-scroll layout
-            instead: its Chat surface has its own transcript scroller, so the
-            wrapper must be a bounded flex child — NOT an overflow-y-auto
-            container, which would give the Chat root an unbounded height and
-            break the inner scroll. */}
-        {activeTab === "agent" ? (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
-            <AgentPanel projectPath={project.path} />
-          </div>
-        ) : (
-          <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-8">
-            {activeTab === "overview" && (
-              <OverviewTab
-                project={project}
-                isEditing={isEditing}
-                onEdit={() => setIsEditing(true)}
-                onCancelEdit={() => setIsEditing(false)}
-                onRegenerate={handleRegenerate}
-                onRescan={handleRescan}
-                onRefreshSkills={handleRefreshSkills}
-                onToggleAutonomous={handleToggleAutonomous}
-                onFinder={() => openInFinder(project.path)}
-                onTerminal={() => openInTerminal(project.path)}
-                onRemove={() => setShowRemoveConfirm(true)}
-              />
+                {topLevelTab(activeTab) === "loops" && (
+                  <LoopsTabContent
+                    projectPath={project.path}
+                    focusEpics={activeTab === "epics"}
+                  />
+                )}
+
+                {topLevelTab(activeTab) === "decisions" && (
+                  <DecisionsTabContent
+                    projectPath={project.path}
+                    focusGraph={activeTab === "graph"}
+                  />
+                )}
+              </div>
             )}
-
-            {activeTab === "decisions" && (
-              <DecisionsPanel projectPath={project.path} />
-            )}
-
-            {activeTab === "loops" && <LoopsPanel projectPath={project.path} />}
-
-            {activeTab === "epics" && <EpicsPanel projectPath={project.path} />}
-
-            {activeTab === "graph" && (
-              <KnowledgeGraphPanel projectPath={project.path} />
-            )}
-          </div>
+          </>
         )}
-      </div>
+      </SheetContent>
 
-      {showRemoveConfirm && (
+      {project && showRemoveConfirm && (
         <ConfirmDialog
           title="Remove Project"
           message={`Remove "${project.name}" from the registry? The .loopdeck folder and project files will NOT be deleted.`}
@@ -225,7 +234,78 @@ export function ProjectDetail() {
           danger
         />
       )}
-    </div>
+    </Sheet>
+  );
+}
+
+// ── Loops tab: nested Loops / Epics sub-tabs ─────────────────────────────────
+
+/**
+ * Epics tab content (`EpicsPanel.tsx`, incl. `RunQueuePanel`) relocates here
+ * as a nested sub-tab per the Phase 1 spike ADR — reused unchanged, not
+ * redesigned.
+ */
+function LoopsTabContent({
+  projectPath,
+  focusEpics,
+}: {
+  projectPath: string;
+  focusEpics: boolean;
+}) {
+  return (
+    <Tabs defaultValue={focusEpics ? "epics" : "loops"}>
+      <TabsList>
+        <TabsTrigger value="loops">
+          <Repeat size={13} className="mr-1.5" />
+          Loops
+        </TabsTrigger>
+        <TabsTrigger value="epics">
+          <Layers size={13} className="mr-1.5" />
+          Epics
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="loops">
+        <LoopsPanel projectPath={projectPath} />
+      </TabsContent>
+      <TabsContent value="epics">
+        <EpicsPanel projectPath={projectPath} />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+// ── Decisions tab: nested Decisions / Graph sub-tabs ─────────────────────────
+
+/**
+ * Graph tab content (`KnowledgeGraphPanel.tsx`) relocates here as a nested
+ * sub-tab per the Phase 1 spike ADR — reused unchanged, not redesigned.
+ */
+function DecisionsTabContent({
+  projectPath,
+  focusGraph,
+}: {
+  projectPath: string;
+  focusGraph: boolean;
+}) {
+  return (
+    <Tabs defaultValue={focusGraph ? "graph" : "decisions"}>
+      <TabsList>
+        <TabsTrigger value="decisions">
+          <Lightbulb size={13} className="mr-1.5" />
+          Decisions
+        </TabsTrigger>
+        <TabsTrigger value="graph">
+          <Network size={13} className="mr-1.5" />
+          Graph
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="decisions">
+        <DecisionsPanel projectPath={projectPath} />
+      </TabsContent>
+      <TabsContent value="graph">
+        <KnowledgeGraphPanel projectPath={projectPath} />
+      </TabsContent>
+    </Tabs>
   );
 }
 
@@ -262,7 +342,7 @@ function StuckQuestionCallout({ projectPath }: { projectPath: string }) {
   }
 
   return (
-    <div className="border-b border-amber-500/30 bg-amber-500/5 px-6 py-3">
+    <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/5 px-6 py-3">
       <div className="max-h-[45vh] overflow-y-auto">
         <AskUserQuestionCard questions={pending.questions} onSubmit={onSubmit} />
       </div>
@@ -317,7 +397,7 @@ function StuckPermissionCallout({ projectPath }: { projectPath: string }) {
   }
 
   return (
-    <div className="border-b border-rose-500/30 bg-rose-500/5 px-6 py-3">
+    <div className="shrink-0 border-b border-rose-500/30 bg-rose-500/5 px-6 py-3">
       <PermissionApprovalCard
         toolName={pending.toolName}
         input={pending.input}
@@ -343,7 +423,7 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
   }
 
   return (
-    <div className="border-b border-sky-500/30 bg-sky-500/5 px-6 py-3">
+    <div className="shrink-0 border-b border-sky-500/30 bg-sky-500/5 px-6 py-3">
       <PlanApprovalCard plan={pending.plan} onDecide={onDecide} />
     </div>
   );

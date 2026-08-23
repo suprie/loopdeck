@@ -111,12 +111,79 @@ a night variant onto a drawer that doesn't exist yet.
 
 ## Architecture Decisions
 
-Placeholder — no decisions made yet in the planning conversation. Fill in as
-the spike phase and each PRD's Design section resolve open questions (drawer
-routing model, Epics/Graph relocation, whether "night" becomes a `RunState`
-variant or a derived UI flag).
+### ADR-1: Detail drawer is pure UI state, not URL/route-backed (2026-08-23)
 
-### ADR-1: <title> — fill in
+- **Status**: accepted
+- **Context**: `prd-detail-drawer` Phase 1 spike. The routed
+  `/project/$projectPath` full-page view needed to become a slide-over
+  overlay. Open question: keep it URL-backed (route or query param, rendered
+  as an overlay) for bookmark/deep-link/back-button behavior, or make it
+  plain show/hide state matching the mockup exactly.
+- **Decision**: Pure UI state — `appStore.drawerOpen` (bool) +
+  `selectedProjectPath` (already existed, decoupled from routing).
+  `ProjectDrawer.tsx` mounts app-wide in `AppShell.tsx`, not inside a route.
+  The old `/project/$projectPath` route and `ProjectDetail.tsx` are deleted.
+- **Why**: This is a Tauri desktop app with an in-memory router and no
+  visible address bar — the browser back-button and bookmarking value a real
+  route buys a web app doesn't apply here. `selectedProjectPath` was already
+  a plain store field, not derived from route params, so route-backing was
+  already partly fictional before this change. The rail/corridor (this
+  epic's actual navigation model) opens the drawer directly; nothing in the
+  mockup or this app's usage pattern needs to survive a process restart or
+  be shared as a link.
+- **Consequences**: No deep-link or shareable-URL to a specific project's
+  drawer state (open question from the PRD — explicitly out of scope, not
+  revisited: nothing in this app currently generates or consumes such a
+  link). Reopening the app always lands on the corridor/dashboard;
+  `selectedProjectPath`/`drawerOpen` are session-only, matching every other
+  transient UI-state field in `appStore.ts`. `CommandPalette`,
+  `AttentionPanel`, `useStuckSessions`, and `useProjects` all switched from
+  `navigate({ to: "/project/$projectPath" })` to `appStore.openDrawer(path)`.
+
+### ADR-2: Epics and Graph tabs relocate as nested sub-tabs, not top-level (2026-08-23)
+
+- **Status**: accepted
+- **Context**: The mockup's drawer has 4 tabs (Overview/Agent/Loops/
+  Decisions); the current app's routed view has 6 (adds Epics and Graph).
+  Open question: fold Epics/Graph into one of the 4, add a 5th/6th tab
+  beyond the mockup, or reach them another way.
+- **Decision**: `EpicsPanel.tsx` (incl. `RunQueuePanel`) becomes a nested
+  sub-tab under **Loops** (`LoopsTabContent` in `ProjectDrawer.tsx`, a
+  `Loops | Epics` sub-tab pair); `KnowledgeGraphPanel.tsx` becomes a nested
+  sub-tab under **Decisions** (`DecisionsTabContent`, a `Decisions | Graph`
+  pair). Both panels are reused unchanged, not redesigned. The legacy
+  `DetailTab` union keeps its `"epics"`/`"graph"` values (deep-selects the
+  right sub-tab from callers like `useProjects.createProject`); a new
+  `topLevelTab()` helper maps them onto the drawer's 4 top-level tabs.
+- **Why**: Epics/loops and epics/graph are each already conceptually paired
+  (an epic's loops *are* loop-queue items; the graph is a project-wide view
+  most relevant next to its decision history) — nesting keeps the drawer at
+  the mockup's literal 4-tab width instead of growing it, with zero
+  functionality dropped.
+- **Consequences**: None of `EpicsPanel`'s or `KnowledgeGraphPanel`'s own
+  code changed — only where they're mounted from. `RunQueuePanel` (the
+  night-run data source `prd-night-run-surfaces` needs) stays reachable at
+  Loops → Epics.
+
+### ADR-3: `prd-night-run-surfaces`'s `RunState` question is not this spike's blocker (2026-08-23)
+
+- **Status**: accepted
+- **Context**: Phase 1's third item asks to confirm with whoever owns
+  `prd-night-run-surfaces` sequencing whether "night run" needs to be a real
+  `RunState` variant by the time this drawer's variant-selection logic is
+  built.
+- **Decision**: No cross-PRD confirmation needed before this PRD's Phase 1/2
+  land. This PRD's Non-Goals already exclude changing what `RunState` values
+  exist, and `prd-night-run-surfaces.md`'s own Design section (line 37)
+  already tracks "new enum value vs. derived flag" as *its own* Phase 1
+  open question, resolved when that PRD's Phase 1 is built — not by this
+  spike guessing ahead of it.
+- **Why**: This PRD's Phase 2 build (the drawer shell) has no
+  variant-selection logic at all — that branch point is introduced by
+  `prd-night-run-surfaces` itself. Answering it here would be resolving a
+  different PRD's open question without that PRD's own Phase 1 context.
+- **Consequences**: `prd-night-run-surfaces` Phase 1 inherits this question
+  unchanged; no action taken in this repo beyond this note.
 
 ## Success Criteria
 

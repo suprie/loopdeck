@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { Plus, FolderOpen, FolderPlus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
@@ -25,10 +24,9 @@ function greeting(): string {
 }
 
 export function Dashboard() {
-  const navigate = useNavigate();
   const projects = useAppStore((s) => s.projects);
   const isLoading = useAppStore((s) => s.isLoading);
-  const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
+  const openDrawer = useAppStore((s) => s.openDrawer);
   const { scanFolder, loadProjects } = useProjects();
   const attentionCount = useAttentionItems().length;
   const [showNewProject, setShowNewProject] = useState(false);
@@ -43,11 +41,10 @@ export function Dashboard() {
     loadProjects();
   }, [loadProjects]);
 
-  /** Navigate to a project's detail view. The full entry is derived from
-   *  `projects` in ProjectDetail, so only the path identifier is stored. */
+  /** Open a project's detail drawer. The full entry is derived from
+   *  `projects` in ProjectDrawer, so only the path identifier is stored. */
   const handleSelect = (path: string) => {
-    setSelectedProjectPath(path);
-    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
+    openDrawer(path);
   };
 
   const handleScan = async () => {

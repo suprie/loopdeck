@@ -41,6 +41,13 @@ interface AppState {
   /** Project path awaiting an auto-fired `agent_start_loop` when its Agent tab
    *  mounts. Set by the dashboard Start CTA; consumed + cleared by AgentPanel. */
   pendingAgentStart: string | null;
+  /** Whether the project detail drawer overlay (`ProjectDrawer.tsx`) is open.
+   *  Transient, never persisted — always closed on next launch. Per the
+   *  `prd-detail-drawer` Phase 1 spike ADR, the drawer is pure UI state, not
+   *  URL/route-backed (this app's router uses in-memory history with no
+   *  visible address bar, so route-backing bought no real bookmark/back
+   *  benefit). */
+  drawerOpen: boolean;
 
   // ── Actions ──
   setProjects: (projects: ProjectEntry[]) => void;
@@ -51,6 +58,12 @@ interface AppState {
   setError: (error: string | null) => void;
   setDetailTab: (tab: DetailTab) => void;
   setPendingAgentStart: (path: string | null) => void;
+  setDrawerOpen: (open: boolean) => void;
+  /** Select a project and open the drawer in one call — the common path for
+   *  rail doors, corridor cards, the attention panel, and the command
+   *  palette. Callers that need a specific starting tab call `setDetailTab`
+   *  alongside this. */
+  openDrawer: (path: string) => void;
   addProject: (project: ProjectEntry) => void;
   removeProjectByPath: (path: string) => void;
   updateProject: (project: ProjectEntry) => void;
@@ -84,6 +97,7 @@ export const useAppStore = create<AppState>()(
       error: null,
       detailTab: "overview",
       pendingAgentStart: null,
+      drawerOpen: false,
 
       // Simple setters
       setProjects: (projects) => set({ projects }),
@@ -94,6 +108,8 @@ export const useAppStore = create<AppState>()(
       setError: (error) => set({ error }),
       setDetailTab: (tab) => set({ detailTab: tab }),
       setPendingAgentStart: (path) => set({ pendingAgentStart: path }),
+      setDrawerOpen: (open) => set({ drawerOpen: open }),
+      openDrawer: (path) => set({ selectedProjectPath: path, drawerOpen: true }),
 
       // Mutations — only ever touch `projects`; the selected project is derived.
       addProject: (project) =>

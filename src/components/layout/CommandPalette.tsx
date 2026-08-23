@@ -41,6 +41,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const projects = useAppStore((s) => s.projects);
+  const openDrawer = useAppStore((s) => s.openDrawer);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -60,7 +61,7 @@ export function CommandPalette() {
 
   const goToProject = (path: string) => {
     setOpen(false);
-    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
+    openDrawer(path);
   };
 
   return (

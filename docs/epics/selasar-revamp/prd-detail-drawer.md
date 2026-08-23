@@ -66,39 +66,47 @@ below it should be built until the spike's ADR is recorded._
 
 ### Phase 1 — Spike: drawer routing model + tab relocation
 
-- [ ] Decide whether the drawer stays URL-backed (route or query-param
+- [x] Decide whether the drawer stays URL-backed (route or query-param
       change, rendered as an overlay instead of a page swap) or is pure UI
       state with no routing; weigh deep-link/bookmark/back-button behavior
       against the mockup's plain show/hide implementation. Record the
-      decision as an ADR in the epic README.
-- [ ] Decide where the Epics tab (`EpicsPanel.tsx`, including
+      decision as an ADR in the epic README. — ADR-1: pure UI state, see
+      `README.md`.
+- [x] Decide where the Epics tab (`EpicsPanel.tsx`, including
       `RunQueuePanel`) and Graph tab (`KnowledgeGraphPanel.tsx`) relocate —
       folded into one of the four remaining tabs, added as a fifth tab
       beyond the mockup's four, or reachable another way. Record the
-      decision as an ADR.
-- [ ] Confirm with whoever owns `prd-night-run-surfaces` sequencing whether
+      decision as an ADR. — ADR-2: nested sub-tabs under Loops/Decisions,
+      see `README.md`.
+- [x] Confirm with whoever owns `prd-night-run-surfaces` sequencing whether
       "night run" needs to exist as a real `RunState` variant by the time
       this drawer's variant-selection logic is built, so that logic isn't
-      built twice.
+      built twice. — ADR-3: not this spike's blocker, `prd-night-run-surfaces`
+      already owns that question in its own Phase 1.
 
 ### Phase 2 — Overlay drawer shell
 
-- [ ] Build the drawer's standard variant (scrim + slide-over panel, header
+- [x] Build the drawer's standard variant (scrim + slide-over panel, header
       with path/name/description, Overview/Agent/Loops/Decisions tab rail)
       per the spike's routing decision, reusing existing tab content
       components (`OverviewTab`, `AgentPanel`, `LoopsPanel`,
-      `DecisionsPanel`).
-- [ ] Wire rail-door clicks (from `prd-rail-corridor-shell`) and
+      `DecisionsPanel`). — `ProjectDrawer.tsx`, built on shadcn `Sheet`.
+- [x] Wire rail-door clicks (from `prd-rail-corridor-shell`) and
       corridor-card clicks to open the drawer instead of navigating to the
-      old full-page route.
-- [ ] Relocate Epics and Graph tab content per the spike's decision.
+      old full-page route. — `Rail.tsx`, `Dashboard.tsx`, `AttentionPanel.tsx`,
+      `CommandPalette.tsx`, `useStuckSessions.ts` all switched to
+      `appStore.openDrawer()`.
+- [x] Relocate Epics and Graph tab content per the spike's decision. —
+      `LoopsTabContent`/`DecisionsTabContent` in `ProjectDrawer.tsx`.
 
 ### Phase 3 — Verification
 
 - [ ] Manual smoke test: open/close the drawer from both rail and corridor,
       tab switching, and — if URL-backed — direct-URL load and
-      browser-back behavior.
-- [ ] `npx tsc --noEmit` clean; confirm no regression in existing per-tab
+      browser-back behavior. — Deferred to human; this is a Tauri desktop
+      app with no browser-mode IPC mock in this repo (same documented gap
+      as every prior UI-only loop in `loops.md`).
+- [x] `npx tsc --noEmit` clean; confirm no regression in existing per-tab
       functionality (Agent chat, starting a loop, decisions list, epics
       list, knowledge graph) now rendered inside the drawer.
 

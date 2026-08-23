@@ -21,6 +21,7 @@ export function useProjects() {
   const addProject = useAppStore((s) => s.addProject);
   const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
   const setDetailTab = useAppStore((s) => s.setDetailTab);
+  const setDrawerOpen = useAppStore((s) => s.setDrawerOpen);
   const removeProjectByPath = useAppStore((s) => s.removeProjectByPath);
   const updateProjectInStore = useAppStore((s) => s.updateProject);
   const updateProjectDescription = useAppStore((s) => s.updateProjectDescription);
@@ -65,7 +66,7 @@ export function useProjects() {
   );
 
   /** Create a brand-new project from scratch: fresh dir + .loopdeck/ bootstrap,
-   *  then land on its Epics tab so the first epic can be authored. */
+   *  then open its drawer on the Epics tab so the first epic can be authored. */
   const createProject = useCallback(
     async (parent: string, name: string) => {
       setLoading(true);
@@ -75,10 +76,7 @@ export function useProjects() {
         addProject(entry);
         setSelectedProjectPath(entry.path);
         setDetailTab("epics");
-        navigate({
-          to: "/project/$projectPath",
-          params: { projectPath: encodeURIComponent(entry.path) },
-        });
+        setDrawerOpen(true);
         return entry;
       } catch (err) {
         const appErr = err as AppError;
@@ -88,7 +86,7 @@ export function useProjects() {
         setLoading(false);
       }
     },
-    [setLoading, setError, addProject, setSelectedProjectPath, setDetailTab, navigate],
+    [setLoading, setError, addProject, setSelectedProjectPath, setDetailTab, setDrawerOpen],
   );
 
   /** Import a discovered repository into the registry. */
@@ -112,7 +110,9 @@ export function useProjects() {
     [setLoading, setError, addProject, navigate],
   );
 
-  /** Remove a project from the registry. */
+  /** Remove a project from the registry. Closes the drawer — there's no
+   *  route to leave now that it's an overlay, and the removed project's
+   *  content would otherwise linger open. */
   const removeProject = useCallback(
     async (path: string) => {
       setLoading(true);
@@ -120,7 +120,7 @@ export function useProjects() {
       try {
         await api.removeProject(path);
         removeProjectByPath(path);
-        navigate({ to: "/" });
+        setDrawerOpen(false);
       } catch (err) {
         const appErr = err as AppError;
         setError(appErr.message ?? String(err));
@@ -128,7 +128,7 @@ export function useProjects() {
         setLoading(false);
       }
     },
-    [setLoading, setError, removeProjectByPath, navigate],
+    [setLoading, setError, removeProjectByPath, setDrawerOpen],
   );
 
   /** Update a project's description. */
