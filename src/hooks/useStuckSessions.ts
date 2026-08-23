@@ -1,7 +1,6 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
 import * as api from "../lib/tauri";
-import { router } from "../router";
 import { useAppStore } from "../store/appStore";
 import { usePendingInteractions } from "../store/pendingInteractions";
 
@@ -39,9 +38,11 @@ const STUCK_TOAST_DURATION = Infinity;
  * is newly-detected
  * since the last reconcile — not on every focus.
  *
- * Uses the exported `router` instance (not `useNavigate`) so it works from
- * `App.tsx`, which sits above `RouterProvider` and therefore outside router
- * context. Wired in `App.tsx` to run on mount and on `window` focus. No
+ * Opens the stuck project's drawer via the Zustand store directly (not
+ * `useNavigate`) so it works from `App.tsx`, which sits above
+ * `RouterProvider` and therefore outside router context — and because the
+ * drawer is pure UI state, not a route, per the `prd-detail-drawer` Phase 1
+ * spike ADR. Wired in `App.tsx` to run on mount and on `window` focus. No
  * background polling: the triggers are launch, focus, and manual refresh only.
  */
 export function useStuckSessions() {
@@ -75,14 +76,10 @@ export function useStuckSessions() {
     const nameFor = (path: string) =>
       projects.find((p) => p.path === path)?.name ?? path;
 
-    // Helper to navigate the user to the stuck project's detail view, where
-    // the tab-agnostic callouts (question + approval) render regardless of
-    // which tab is active.
-    const goTo = (path: string) =>
-      router.navigate({
-        to: "/project/$projectPath",
-        params: { projectPath: encodeURIComponent(path) },
-      });
+    // Helper to open the stuck project's drawer, where the tab-agnostic
+    // callouts (question + approval) render regardless of which tab is
+    // active.
+    const goTo = (path: string) => useAppStore.getState().openDrawer(path);
 
     // ── Questions ──
     const newlyStuckQuestions = usePendingInteractions

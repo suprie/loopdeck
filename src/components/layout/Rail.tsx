@@ -1,4 +1,4 @@
-import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { LayoutGrid, Moon, Pin, PinOff, Settings } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -118,16 +118,12 @@ function Door({
  */
 export function Rail() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const navigate = useNavigate();
   const projects = useAppStore((s) => s.projects);
-  const setSelectedProjectPath = useAppStore((s) => s.setSelectedProjectPath);
+  const drawerOpen = useAppStore((s) => s.drawerOpen);
+  const selectedProjectPath = useAppStore((s) => s.selectedProjectPath);
+  const openDrawer = useAppStore((s) => s.openDrawer);
   const { doors, overflow } = selectRailDoors(projects);
   const nightRunStatuses = useNightRunStatuses(doors.map((p) => p.path));
-
-  const openProject = (path: string) => {
-    setSelectedProjectPath(path);
-    navigate({ to: "/project/$projectPath", params: { projectPath: encodeURIComponent(path) } });
-  };
 
   return (
     <nav className="flex w-[72px] shrink-0 flex-col items-center border-r border-border bg-surface py-3">
@@ -136,9 +132,9 @@ export function Rail() {
           <Door
             key={project.path}
             project={project}
-            active={pathname === `/project/${encodeURIComponent(project.path)}`}
+            active={drawerOpen && selectedProjectPath === project.path}
             nightRun={nightRunStatuses[project.path] ?? false}
-            onSelect={() => openProject(project.path)}
+            onSelect={() => openDrawer(project.path)}
           />
         ))}
         {overflow && (

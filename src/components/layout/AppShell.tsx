@@ -6,6 +6,7 @@ import { useTheme } from "@/lib/theme";
 import { useAppStore } from "@/store/appStore";
 import { CommandPalette } from "./CommandPalette";
 import { Rail } from "./Rail";
+import { ProjectDrawer } from "../detail/ProjectDrawer";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
@@ -80,6 +81,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         </header>
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</main>
       </div>
+
+      {/* Project detail overlay — mounted app-wide (not route-scoped) so a
+       *  rail door, corridor card, or command-palette jump opens it over
+       *  whatever page is currently showing. See `ProjectDrawer.tsx`. */}
+      <ProjectDrawer />
     </div>
   );
 }
