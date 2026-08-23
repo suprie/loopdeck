@@ -101,7 +101,7 @@ below it should be built until the spike's ADR is recorded._
 
 ### Phase 3 — Verification
 
-- [ ] Manual smoke test: open/close the drawer from both rail and corridor,
+- [ ] `selasar-revamp/manual-smoke-test-open-close-the-drawer-from-both-rail-and-corridor` Manual smoke test: open/close the drawer from both rail and corridor,
       tab switching, and — if URL-backed — direct-URL load and
       browser-back behavior. — Deferred to human; this is a Tauri desktop
       app with no browser-mode IPC mock in this repo (same documented gap

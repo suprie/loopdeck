@@ -360,6 +360,7 @@ prerequisite.
 ## Parking Lot
 - [ ] **Move agent control into LoopDeck app** — When LoopDeck can spawn/manage AI agents from within the app (not just the terminal), it should own all agent configuration: CLAUDE.md, skills, hooks, and memory conventions. The current `.claude/settings.local.json` hooks (PreToolUse dirty flag, Stop hook reminder) are temporary workarounds that only work in the Claude Code terminal context. Once LoopDeck controls the agent runtime, it can intelligently decide when to prompt for memory updates, apply project-specific instructions, and manage skills — without relying on external hook files.
 - [ ] **macOS App Sandbox** — enable App Sandbox + scoped entitlements (user-selected files only) so a misbehaving agent is bounded by more than the OS user. Requires rethinking `current_dir(project_path)` access patterns.
+- [ ] **Loops graph (0.7.0)** — Continuation of loops engineering: the loop stays the node, 0.6.0 (`role-based-orchestration`) adds per-run-plan edge types (`depends_on` scheduling, handoff from-role→to-role, review verdicts); 0.7.0 promotes edges into the spec layer (dependencies authored on loops, not per-night plans), unifies execution state into one graph (in-flight / blocked / critical path across epics), and adds invalidation propagation on re-run (which completed loops go stale). Constraint on 0.6.0 already recorded: the handoff ledger persists graph-native.
 
 
 ## History
