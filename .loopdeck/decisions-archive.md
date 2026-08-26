@@ -978,3 +978,28 @@
 - **Consequences**: Run status now reports the real backend handle, reconciles only matching inactive terminal queue phases, clears stale live UI state, and permits unattended retry for parked, failed, interrupted, or killed phases.
 
 
+## 2026-08-04 — Run queue batches every queued phase into one combined LLM turn
+- **Status**: accepted
+- **Context**: `execute_run` fired one `claude_session` turn per queued run-queue phase, sequentially — an overnight run of N loops was N separate LLM calls. User explicitly wants N queued loops merged into a single prompt and a single turn for any run with 2+ queued phases, unconditionally (no opt-in flag) — a true batch, not a queue.
+- **Consequences**: `run_executor::build_combined_phase_prompt` replaces the one-loop-per-turn prompt builder (a 1-element call reduces to the same prompt shape as before); `commands::run_queue::execute_run`'s per-phase `for` loop became a `while let Some(batch) = next_queued_batch(&plan)` loop that gathers every currently-`Queued` phase index and drives one turn for the whole batch. The turn's single outcome (status/park_payload/verdict/draft-PR) fans out identically to every phase in the batch — there is no per-loop signal inside one turn to split on. Token cap and wall-clock timeout scale by batch size; `token_usage`/`wall_clock_secs` are split evenly across the batch for the morning report. `execution.yaml`'s single `current` slot only tracks the batch's first phase as a UI-focus pointer — `run-plan.yaml`'s per-phase `status` remains the accurate per-loop record, an accepted minor tracking gap given `execution.yaml` has no multi-current concept.
+## 2026-08-04 — Session heartbeat
+- **Status**: proposed
+- **Context**: AI session active on LoopDeck development.
+
+## 2026-08-04 — `assign-loop-id/generate-collision-free-slug` promoted and implemented
+- **Status**: accepted
+- **Context**: First loop of the newly-drafted `docs/epics/overnight-orchestration/prd-assign-loop-id.md` (Phase 1), promoted into a background worktree session rather than worked inline in this conversation.
+- **Consequences**: New pure `epic::generate_loop_id(epic_slug, title, existing_ids) -> String` + private `kebab_case` helper (`src-tauri/src/epic.rs`) — kebab-cases a loop title, scopes it `<epic_slug>/<title-slug>`, appends `-2`/`-3`/... on collision against a caller-supplied id list. `#[allow(dead_code)]` on both — no production caller yet; the `assign_loop_id` IPC command that will call this is a separate, unpromoted Phase 1 item. 4 new tests (no collision, one collision, multiple collisions, real kebab-casing of punctuation/spaces/mixed case). The background session ran in an isolated worktree branched from git history, so it never saw this session's still-uncommitted PRD file and reconstructed a stub from the task prompt alone — its code changes were verified correct and reapplied here against the real, full PRD (which now has this one item checked `[x]`); its own worktree/PRD stub was left untouched, not merged.
+- **Detail**: Gates green in this worktree: fmt/clippy(lib, `-D warnings`)/test(580 passed, +4, 8 ignored). No frontend change.
+
+## 2026-08-04 — `assign-loop-id/picker-action` + `assign-loop-id/refresh-on-success` promoted and implemented
+- **Status**: accepted
+- **Context**: `prd-assign-loop-id.md` Phase 2's two items (`picker-action`, `refresh-on-success`) are the frontend action and its success-refresh behavior — not independently buildable, since a picker action that doesn't refresh state would leave the checkbox stuck disabled after a successful assignment. Implemented together in a worktree branched from `claude/assign-loop-id-generate-slug` (PR #65, CI green, not yet merged), which already carried Phase 1's backend in full.
+- **Consequences**: New `api.assignLoopId` wrapper (`src/lib/tauri.ts`) and an "Assign ID" button in `EpicsPanel.tsx`'s picker row, guarded by the same `!done && noId` condition the disabled picker checkbox and promote button already use. On success it refetches epics state via the existing `load()` (the same pattern `handlePromote` uses for a structural change, versus `handleToggle`'s local-patch pattern for a same-shape boolean flip) — `loop.id` going from `null` to a string unlocks the picker checkbox automatically, no manual reload. Errors surface via `toast.error`, matching the existing `handlePromote`/`handleToggle` pattern.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-04 `assign-loop-id/picker-action` entry) has the full file/symbol breakdown, gate results, and an explicit note that UI verification was tsc/build only — no live click-through was practical in this environment (Tauri desktop app, no browser-mode IPC mock).
+
+## 2026-08-04 — Docs-accuracy PRD complete: audit, rewrite, verify
+- **Status**: accepted
+- **Context**: `docs/PRD.md` froze at V1 and listed non-goals the shipped code violates (agents, Claude/Codex, loops, decisions); `CLAUDE.md` described a single `commands.rs` (now a `commands/` dir) with stale file-size callouts.
+- **Consequences**: New audit deliverable `docs/epics/optimization/docs-accuracy-audit.md` (contradictions D1–D8, C1–C5). Both docs rewritten — `docs/PRD.md` gained an Amendments section marking shipped non-goals historical with cross-links to the shipping epic (`multi-model-agents` for Claude/Codex integration, per the actual git history), `CLAUDE.md` tree + Context Discipline rewritten to the actual tree (32 modules + `commands/`, 81 commands, verified line counts). Re-audit zero contradictions; verifier PASS; PRD `status` flipped `proposed` → `accepted`, all phase boxes checked.
+

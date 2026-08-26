@@ -1,1 +1,1 @@
-Selasar revamp — prd-rebrand-tokens complete (Phases 1-3): tokens, full rebrand to Selasar, and Phase-3 verification (visual pass fixed 6 WCAG contrast defects; tsc clean; Selasar title confirmed)
+Selasar revamp — prd-night-run-surfaces Phase 1 item 1 complete: drawer night variant (phase-chip rail + 3 budget gauges), verifier PASS

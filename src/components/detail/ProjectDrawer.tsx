@@ -19,6 +19,8 @@ import { toast } from "sonner";
 import { relativeTime } from "../../lib/time";
 import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
+import { useRunStatus } from "../../hooks/useRunStatus";
+import { hasActiveOrQueuedRun } from "../../lib/rail";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
@@ -27,6 +29,7 @@ import { LoopsPanel } from "./LoopsPanel";
 import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
+import { NightRunTab } from "./NightRunTab";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
@@ -91,6 +94,14 @@ export function ProjectDrawer() {
 
   const [isEditing, setIsEditing] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
+
+  // Night-variant selection (prd-night-run-surfaces Phase 1): while the
+  // project has a run in flight or queued, the Agent tab swaps for the night
+  // variant (phase-chip rail + budget gauges). Derived from the same
+  // getRunStatus poll the rail doors use — no new backend concept.
+  const runStatus = useRunStatus(drawerOpen && project ? project.path : null);
+  const nightPlan =
+    runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
 
   const handleRemove = () => {
     if (!project) return;
@@ -185,7 +196,11 @@ export function ProjectDrawer() {
                 the inner scroll. */}
             {topLevelTab(activeTab) === "agent" ? (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
-                <AgentPanel projectPath={project.path} />
+                {nightPlan ? (
+                  <NightRunTab projectPath={project.path} plan={nightPlan} />
+                ) : (
+                  <AgentPanel projectPath={project.path} />
+                )}
               </div>
             ) : (
               <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-6">
