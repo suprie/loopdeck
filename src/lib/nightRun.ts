@@ -1,4 +1,4 @@
-import type { AskUserQuestionSpec, RunPhase, RunPhaseStatus, RunPlan } from "../types";
+import type { AskUserQuestionSpec, Epic, RunPhase, RunPhaseStatus, RunPlan } from "../types";
 
 // ── Shared run-plan presentation (relocated from RunQueuePanel.tsx) ─────────
 // Single source for both run surfaces — RunQueuePanel's phase rows and the
@@ -156,6 +156,24 @@ export function gaugePercent(used: number, cap: number): number {
 /** `1_234_567` → `"1,234,567"`. */
 export function formatTokens(n: number): string {
   return n.toLocaleString();
+}
+
+/** True when any PRD loop is queueable for an overnight run — has a stable
+ *  execution ID (the join key create_run_plan needs) and isn't checked off or
+ *  recorded in history. Mirrors EpicsPanel's per-loop picker-checkbox gate
+ *  (`!done && !noId`); gates the drawer header's "Plan tonight" entry point
+ *  (prd-night-run-surfaces Phase 2 item 3). */
+export function hasQueueablePhases(epics: Epic[]): boolean {
+  for (const epic of epics) {
+    for (const prd of epic.prds) {
+      for (const phase of prd.phases) {
+        for (const loop of phase.loops) {
+          if (loop.id && !loop.checked && !loop.done_in_history) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /** Seconds → `"Xh Ym"` past an hour, else `"Xm Ys"`, else `"Ys"`. */

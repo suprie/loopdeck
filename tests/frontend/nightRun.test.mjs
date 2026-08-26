@@ -8,6 +8,7 @@ import {
   parseParkedQuestions,
   parkedInbox,
   shouldAutoSelectNightVariant,
+  hasQueueablePhases,
   DEFAULT_RUN_PHASE_TOKEN_CAP,
   DEFAULT_RUN_PHASE_WALL_CLOCK_SECS,
   DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS,
@@ -190,4 +191,52 @@ test("shouldAutoSelectNightVariant: once per drawer-open span, per project", () 
   // No active/queued run plan (or drawer closed) → never switch.
   assert.equal(shouldAutoSelectNightVariant({ ...base, nightPlan: null }), false);
   assert.equal(shouldAutoSelectNightVariant({ ...base, drawerOpen: false }), false);
+});
+
+// Minimal real-shape Epic tree (mirrors epic.rs / types/index.ts) for the
+// "Plan tonight" gate. Each loop: [id?, checked, done_in_history].
+function epicWithLoops(loops) {
+  return {
+    slug: "e",
+    title: "E",
+    milestone: "m",
+    status: "in_progress",
+    description: "",
+    dir: "docs/epics/e",
+    prds: [
+      {
+        slug: "p",
+        epic: "e",
+        status: "accepted",
+        description: "",
+        file: "prd-p.md",
+        phases: [{ name: "Phase 1", loops }],
+      },
+    ],
+  };
+}
+
+test("hasQueueablePhases: mirrors EpicsPanel's picker gate (!done && !noId)", () => {
+  const loop = (id, checked = false, done_in_history = false) => ({
+    title: "T",
+    checked,
+    done_in_history,
+    ...(id ? { id } : {}),
+  });
+
+  // Open loop with a stable ID → queueable.
+  assert.equal(hasQueueablePhases([epicWithLoops([loop("p/t")])]), true);
+  // Legacy ID-less loop → not queueable (no join key).
+  assert.equal(hasQueueablePhases([epicWithLoops([loop(null)])]), false);
+  // Checked off or done in history → not queueable.
+  assert.equal(hasQueueablePhases([epicWithLoops([loop("p/t", true)])]), false);
+  assert.equal(hasQueueablePhases([epicWithLoops([loop("p/t", false, true)])]), false);
+  // Any open ID'd loop anywhere in the tree qualifies…
+  assert.equal(
+    hasQueueablePhases([epicWithLoops([loop(null, true), loop("p/t2")])]),
+    true,
+  );
+  // …and an empty tree doesn't.
+  assert.equal(hasQueueablePhases([]), false);
+  assert.equal(hasQueueablePhases([epicWithLoops([])]), false);
 });

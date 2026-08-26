@@ -108,9 +108,14 @@ restructuring for the drawer's layout._
 - [ ] Wire the wizard's final action to the existing queue-run command,
       confirming the phase/budget/consent payload shape matches what
       `run_executor.rs` expects.
-- [ ] Add the "Plan tonight" entry point to the drawer header, gated on the
+- [x] Add the "Plan tonight" entry point to the drawer header, gated on the
       project having queueable PRD phases (mirroring whatever gate
       `EpicsPanel.tsx` currently uses).
+      (2026-08-26: `PlanTonightButton` in `ProjectDrawer.tsx`'s header, gated
+      by new `hasQueueablePhases(epics)` in `lib/nightRun.ts` — the picker
+      checkbox's exact `!done && !noId` condition as a shared tested helper.
+      Per the run's pre-answered clarification, the button holds local
+      open/close state only until items 1-2's wizard exists.)
 
 ### Phase 3 — Morning report drawer
 

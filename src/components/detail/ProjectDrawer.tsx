@@ -14,6 +14,7 @@ import {
   Layers,
   Bot,
   Network,
+  Moon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { relativeTime } from "../../lib/time";
@@ -21,7 +22,7 @@ import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { useRunStatus } from "../../hooks/useRunStatus";
 import { hasActiveOrQueuedRun } from "../../lib/rail";
-import { shouldAutoSelectNightVariant } from "../../lib/nightRun";
+import { shouldAutoSelectNightVariant, hasQueueablePhases } from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
@@ -186,7 +187,10 @@ export function ProjectDrawer() {
                     </p>
                   )}
                 </div>
-                <StatusBadge status={project.status} />
+                <div className="flex shrink-0 items-center gap-2">
+                  <PlanTonightButton projectPath={project.path} />
+                  <StatusBadge status={project.status} />
+                </div>
               </div>
             </SheetHeader>
 
@@ -473,6 +477,59 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
     <div className="shrink-0 border-b border-sky-500/30 bg-sky-500/5 px-6 py-3">
       <PlanApprovalCard plan={pending.plan} onDecide={onDecide} />
     </div>
+  );
+}
+
+// ── Plan-tonight entry point ─────────────────────────────────────────────────
+
+/**
+ * "Plan tonight" button in the drawer header (prd-night-run-surfaces Phase 2
+ * item 3). Gated on the project having queueable PRD phases — the same
+ * `!done && !noId` gate EpicsPanel's overnight-run picker checkboxes use, via
+ * the shared `hasQueueablePhases`.
+ *
+ * The 3-step wizard this opens is this phase's items 1-2 (separate loops);
+ * until it exists the button only holds local open/close state, per the
+ * pre-answered clarification in the run plan: no modal content yet. Renders
+ * null when nothing is queueable.
+ */
+function PlanTonightButton({ projectPath }: { projectPath: string }) {
+  const [open, setOpen] = useState(false);
+  const [queueable, setQueueable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getEpics(projectPath)
+      .then((epics) => {
+        if (!cancelled) setQueueable(hasQueueablePhases(epics));
+      })
+      .catch(() => {
+        // Gate closed on fetch failure — the entry point simply doesn't show.
+        if (!cancelled) setQueueable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
+  if (!queueable) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((v) => !v)}
+      aria-expanded={open}
+      title="Plan an overnight run"
+      className={cn(
+        "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
+        open
+          ? "border-[var(--primary)] text-[var(--primary)]"
+          : "border-border text-foreground hover:bg-accent",
+      )}
+    >
+      <Moon size={12} />
+      Plan tonight
+    </button>
   );
 }
 

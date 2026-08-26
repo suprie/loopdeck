@@ -2,6 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-26 — "Plan tonight" gate is the picker's `!done && !noId` condition extracted to a shared helper; the button is open/close-only until the wizard ships
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 2 item 3 asked for a "Plan tonight" entry point in the drawer header, gated on "queueable PRD phases (mirroring whatever gate `EpicsPanel.tsx` currently uses)". That gate lives inline in `EpicsPanel`'s render (`!done && noId` on the overnight-run picker checkbox at the time of writing), duplicated nowhere else — and the run plan queues the wizard (items 1-2) separately from this entry point, with a pre-answered clarification pinning the interim behavior.
+- **Consequences**: The gate is extracted as a pure `hasQueueablePhases(epics)` (`src/lib/nightRun.ts`) implementing the picker's exact condition (`loop.id && !loop.checked && !loop.done_in_history`) — one tested single source shared by the header button and the picker, so the two can't drift when the wizard later replaces the picker as the queueing surface. `PlanTonightButton` (`ProjectDrawer.tsx`) fetches epics via the existing `get_epics` IPC only while the drawer is open (Radix `Sheet` mounts content conditionally) and renders null when nothing qualifies or the fetch fails — the entry point is simply absent, not disabled. Until items 1-2's wizard exists, the button toggles local open/close state only (`aria-expanded` + primary highlight when open, no modal content), per the run's pre-answered clarification; the wizard mounts into that open state.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 2 item 3 entry) has the full file/symbol breakdown.
+
 ## 2026-08-26 — Night-variant auto-selection is a once-per-open latch, not a forced re-render; rail badge confirmed as the spike's representation
 
 - **Status**: accepted
