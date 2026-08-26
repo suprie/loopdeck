@@ -76,9 +76,16 @@ restructuring for the drawer's layout._
       (2026-08-26: `NightRunTab.tsx` + `src/lib/nightRun.ts`; status maps +
       parser relocated to a single shared source; `None` budget caps fall
       back to TS mirrors of `limits.rs` defaults per run clarification.)
-- [ ] Build the inline parked-question card (question text + "Answer &
+- [x] Build the inline parked-question card (question text + "Answer &
       requeue" button) wired to the existing requeue IPC command already
       used by `RunQueuePanel.tsx`.
+      (2026-08-26: `NightRunTab.tsx` parked-question inbox below the
+      rail/gauges, per the run's pre-answered clarification — structured
+      `__QUESTIONS__` payloads reuse the shared `AskUserQuestionCard` with
+      submit relabeled "Answer & requeue" → `answerParkedQuestion`; raw
+      payloads get a plain "Answer & requeue" button → `requeueRunPhase` +
+      `queueRun`, the exact `RunQueuePanel` Retry flow. New
+      `parkedInbox(plan)` in `lib/nightRun.ts` status-gates the cards.)
 - [ ] Wire the rail door's night-run indicator and the drawer's variant
       selection to switch to this variant automatically when a project has
       an active `RunPlan`, per `prd-detail-drawer`'s spike decision on how

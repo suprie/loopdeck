@@ -27,10 +27,14 @@ export function AskUserQuestionCard({
   questions,
   disabled,
   onSubmit,
+  submitLabel,
 }: {
   questions: AskUserQuestionSpec[];
   disabled?: boolean;
   onSubmit: (answers: AskUserQuestionAnswers) => void;
+  /** Overrides the submit button's label. The night variant's parked card
+   *  passes "Answer & requeue" — submitting there also requeues the phase. */
+  submitLabel?: string;
 }) {
   // Per-question selection state. For single-select we track a single label
   // string (or null); for multi-select a Set of labels. Plus an "Other…"
@@ -201,7 +205,7 @@ export function AskUserQuestionCard({
           onClick={() => onSubmit(buildAnswers())}
           className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Submit answer{questions.length > 1 ? "s" : ""}
+          {submitLabel ?? `Submit answer${questions.length > 1 ? "s" : ""}`}
         </button>
       </div>
     </div>

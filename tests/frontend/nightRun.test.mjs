@@ -6,6 +6,7 @@ import {
   formatDuration,
   formatTokens,
   parseParkedQuestions,
+  parkedInbox,
   DEFAULT_RUN_PHASE_TOKEN_CAP,
   DEFAULT_RUN_PHASE_WALL_CLOCK_SECS,
   DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS,
@@ -125,4 +126,40 @@ test("parseParkedQuestions (shared with RunQueuePanel) extracts the executor mar
   assert.deepEqual(parseParkedQuestions(payload).questions, spec);
   assert.equal(parseParkedQuestions("plain reason").questions, null);
   assert.equal(parseParkedQuestions(undefined).questions, null);
+});
+
+test("parkedInbox: one card per currently-parked phase, structured vs raw split", () => {
+  const spec = [
+    {
+      question: "Which DB?",
+      header: "Storage",
+      options: [{ label: "sqlite", description: "" }],
+      multiSelect: false,
+    },
+  ];
+  const structured = phase({
+    execution_id: "x/loop-1",
+    status: "parked",
+    park_payload: `__QUESTIONS__${JSON.stringify(spec)}__END__`,
+  });
+  const raw = phase({
+    execution_id: "x/loop-2",
+    status: "parked",
+    park_payload: "manual approval waited past deadline",
+  });
+  // Same payload on a completed phase — park_payload persists, must NOT card.
+  const doneWithPayload = phase({
+    execution_id: "x/loop-3",
+    status: "completed",
+    park_payload: "stalled: old question",
+  });
+  const queuedNoPayload = phase({ execution_id: "x/loop-4", status: "queued" });
+
+  const cards = parkedInbox(plan({ phases: [structured, raw, doneWithPayload, queuedNoPayload] }));
+
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].phase.execution_id, "x/loop-1");
+  assert.deepEqual(cards[0].questions, spec);
+  assert.equal(cards[1].phase.execution_id, "x/loop-2");
+  assert.equal(cards[1].questions, null);
 });

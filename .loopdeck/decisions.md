@@ -2,6 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-26 — Night-variant parked inbox: reuse `AskUserQuestionCard` (label override) instead of a new card component; status-gate, don't payload-gate
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 1 item 2 asked for an inline parked-question card with "Answer & requeue", and the run's pre-answered clarification pinned placement (stacked below the rail/gauges, mirroring `RunQueuePanel`'s inbox) and told this loop to reuse the existing structure/component boundary. Two open implementation questions: build a new card component, and how to select which phases get one.
+- **Consequences**: No new card component — the shared `AskUserQuestionCard` gains an optional `submitLabel` prop so the night variant's submit button reads "Answer & requeue"; `RunQueuePanel`'s two existing call sites pass no label and render unchanged. The PRD's "wired to the existing requeue IPC command" resolves to *both* requeue paths `RunQueuePanel` already uses: structured `__QUESTIONS__` payloads → `answerParkedQuestion` (pin + requeue in one call), raw payloads → `requeueRunPhase` + `queueRun` (`handleRetry`'s flow verbatim). Card selection is `parkedInbox(plan)` gated on `status === "parked"` *and* `park_payload` — payload-only gating (what item 1's read-only rendering used) would re-show open questions for phases that later completed or were requeued, since `park_payload` persists on the phase. `NightRunTab` doesn't own plan state (the drawer's `useRunStatus` poll does), so an answered card hides optimistically via a local `resolved` set until the next poll, rather than a `setPlan` the component can't perform.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 1 item 2 entry) has the full file/symbol breakdown.
+
 ## 2026-08-12 — Rail pin state is a plain per-machine bool; night-run badge is a run-plan-derived placeholder
 
 - **Status**: accepted

@@ -1,4 +1,4 @@
-import type { AskUserQuestionSpec, RunPhaseStatus, RunPlan } from "../types";
+import type { AskUserQuestionSpec, RunPhase, RunPhaseStatus, RunPlan } from "../types";
 
 // ── Shared run-plan presentation (relocated from RunQueuePanel.tsx) ─────────
 // Single source for both run surfaces — RunQueuePanel's phase rows and the
@@ -102,6 +102,26 @@ export function budgetGauges(plan: RunPlan): BudgetGauge[] {
       unit: "secs",
     },
   ];
+}
+
+/** One currently-parked phase's card model for the night variant's inline
+ *  parked-question inbox (prd-night-run-surfaces Phase 1, item 2).
+ *  `questions` is non-null when the payload carries structured
+ *  `__QUESTIONS__` JSON (answered via `answerParkedQuestion`), null for a
+ *  raw-text payload (requeued via `requeueRunPhase`). */
+export interface ParkedCard {
+  phase: RunPhase;
+  questions: AskUserQuestionSpec[] | null;
+}
+
+/** The night variant's parked-question inbox: one card per *currently-parked*
+ *  phase. Status-gated, not just payload-gated — `park_payload` can persist
+ *  on a phase that later completed or was requeued, and those must not render
+ *  as open questions. Mirrors RunQueuePanel's "Parked questions" inbox. */
+export function parkedInbox(plan: RunPlan): ParkedCard[] {
+  return plan.phases
+    .filter((p) => p.status === "parked" && p.park_payload)
+    .map((p) => ({ phase: p, questions: parseParkedQuestions(p.park_payload).questions }));
 }
 
 /** Fill percentage for a gauge bar, clamped to [0, 100] — a blown cap pins
