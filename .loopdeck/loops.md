@@ -7,6 +7,7 @@
 - **Status**: completed
 
 ## Next Steps
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/88
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/87
 
 - [ ] `prd-night-run-surfaces` Phase 1 item 3: rail-door night-run indicator + automatic drawer variant switch (currently the swap is Agent-tab-local; drawer doesn't auto-select the Agent tab)
