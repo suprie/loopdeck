@@ -124,6 +124,28 @@ export function parkedInbox(plan: RunPlan): ParkedCard[] {
     .map((p) => ({ phase: p, questions: parseParkedQuestions(p.park_payload).questions }));
 }
 
+/** Whether the drawer should auto-select its Agent tab — which the render
+ *  below swaps for the night variant — per prd-night-run-surfaces Phase 1
+ *  item 3. Fires at most once per continuous drawer-open span per project
+ *  (`switchedForPath` latch): a user who navigates to another tab mid-run is
+ *  never yanked back, while a run that *starts* (or is first detected) while
+ *  the drawer is already open still triggers the one-time switch. The signal
+ *  is the same `hasActiveOrQueuedRun`-gated plan the rail doors' moon badge
+ *  uses — per the detail-drawer spike (ADR-3), "night run" is a derived
+ *  run-plan flag, not a new `RunState` variant. */
+export function shouldAutoSelectNightVariant(args: {
+  drawerOpen: boolean;
+  projectPath: string | null;
+  /** Non-null only while the project has an active/queued run plan. */
+  nightPlan: RunPlan | null;
+  activeTopLevelTab: string;
+  switchedForPath: string | null;
+}): boolean {
+  if (!args.drawerOpen || !args.projectPath || !args.nightPlan) return false;
+  if (args.switchedForPath === args.projectPath) return false;
+  return args.activeTopLevelTab !== "agent";
+}
+
 /** Fill percentage for a gauge bar, clamped to [0, 100] — a blown cap pins
  *  the bar full rather than overflowing the track. */
 export function gaugePercent(used: number, cap: number): number {

@@ -86,10 +86,18 @@ restructuring for the drawer's layout._
       payloads get a plain "Answer & requeue" button → `requeueRunPhase` +
       `queueRun`, the exact `RunQueuePanel` Retry flow. New
       `parkedInbox(plan)` in `lib/nightRun.ts` status-gates the cards.)
-- [ ] Wire the rail door's night-run indicator and the drawer's variant
+- [x] Wire the rail door's night-run indicator and the drawer's variant
       selection to switch to this variant automatically when a project has
       an active `RunPlan`, per `prd-detail-drawer`'s spike decision on how
       "night run" is represented.
+      (2026-08-26: spike ADR-3 confirmed the rail's placeholder-derived
+      `hasActiveOrQueuedRun` flag as *the* representation — no new
+      `RunState` variant — so the door badge stays as built (comments
+      de-placeholdered); the missing half was drawer auto-selection:
+      `ProjectDrawer` now auto-selects the Agent tab (which swaps to
+      `NightRunTab`) once per continuous drawer-open span per project via
+      new `shouldAutoSelectNightVariant` in `lib/nightRun.ts` — a user who
+      navigates away mid-run is never yanked back.)
 
 ### Phase 2 — Plan-tonight wizard
 

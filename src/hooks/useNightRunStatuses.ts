@@ -6,9 +6,12 @@ const POLL_MS = 5000;
 
 /**
  * Polls `getRunStatus` for each given project path, returning which ones
- * have an active or queued overnight run — the rail's night-run door badge
- * (`prd-rail-corridor-shell` Phase 1). Same poll cadence `RunQueuePanel`
- * already uses for a single project, fanned out to every visible door.
+ * have an active or queued overnight run — the rail's night-run door badge.
+ * Started as a placeholder in `prd-rail-corridor-shell` Phase 1; the
+ * detail-drawer spike (ADR-3) later resolved this derived flag as *the*
+ * night-run representation, so the badge is now the confirmed indicator.
+ * Same poll cadence `RunQueuePanel` uses for a single project, fanned out
+ * to every visible door.
  */
 export function useNightRunStatuses(paths: string[]): Record<string, boolean> {
   const key = paths.join("|");

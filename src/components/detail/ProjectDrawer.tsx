@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Pencil,
   Sparkles,
@@ -21,6 +21,7 @@ import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { useRunStatus } from "../../hooks/useRunStatus";
 import { hasActiveOrQueuedRun } from "../../lib/rail";
+import { shouldAutoSelectNightVariant } from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
@@ -102,6 +103,37 @@ export function ProjectDrawer() {
   const runStatus = useRunStatus(drawerOpen && project ? project.path : null);
   const nightPlan =
     runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
+
+  // prd-night-run-surfaces Phase 1 item 3: while the project has an
+  // active/queued run, the drawer auto-selects the Agent tab (swapped for the
+  // night variant below) — so opening a moon-badged rail door lands on the
+  // night variant, not whatever tab was last persisted. Once per continuous
+  // drawer-open span per project (`shouldAutoSelectNightVariant`'s latch): a
+  // user who navigates away mid-run isn't yanked back, and closing the drawer
+  // (or switching project) re-arms it.
+  const switchedForPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!drawerOpen) {
+      switchedForPath.current = null;
+      return;
+    }
+    const projectPath = project?.path ?? null;
+    if (
+      shouldAutoSelectNightVariant({
+        drawerOpen,
+        projectPath,
+        nightPlan,
+        activeTopLevelTab: topLevelTab(activeTab),
+        switchedForPath: switchedForPath.current,
+      })
+    ) {
+      setActiveTab("agent");
+    }
+    // Latch even when already on the Agent tab — "auto-switched" means "this
+    // open already showed the night variant", which is also true if the user
+    // landed there themselves.
+    if (nightPlan && projectPath) switchedForPath.current = projectPath;
+  }, [drawerOpen, project, nightPlan, activeTab, setActiveTab]);
 
   const handleRemove = () => {
     if (!project) return;

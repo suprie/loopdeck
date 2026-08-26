@@ -7,6 +7,7 @@ import {
   formatTokens,
   parseParkedQuestions,
   parkedInbox,
+  shouldAutoSelectNightVariant,
   DEFAULT_RUN_PHASE_TOKEN_CAP,
   DEFAULT_RUN_PHASE_WALL_CLOCK_SECS,
   DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS,
@@ -162,4 +163,31 @@ test("parkedInbox: one card per currently-parked phase, structured vs raw split"
   assert.deepEqual(cards[0].questions, spec);
   assert.equal(cards[1].phase.execution_id, "x/loop-2");
   assert.equal(cards[1].questions, null);
+});
+
+test("shouldAutoSelectNightVariant: once per drawer-open span, per project", () => {
+  const base = {
+    drawerOpen: true,
+    projectPath: "/repo",
+    nightPlan: plan(),
+    activeTopLevelTab: "overview",
+    switchedForPath: null,
+  };
+  // Fresh open on a project with an active run → switch.
+  assert.equal(shouldAutoSelectNightVariant(base), true);
+  // Already showing the Agent tab (user's persisted tab) → nothing to do…
+  assert.equal(shouldAutoSelectNightVariant({ ...base, activeTopLevelTab: "agent" }), false);
+  // …but the caller still latches, so a later manual tab change doesn't yank.
+  assert.equal(
+    shouldAutoSelectNightVariant({ ...base, switchedForPath: "/repo", activeTopLevelTab: "loops" }),
+    false,
+  );
+  // Switching project while the drawer stays open re-arms the switch.
+  assert.equal(
+    shouldAutoSelectNightVariant({ ...base, projectPath: "/other", switchedForPath: "/repo" }),
+    true,
+  );
+  // No active/queued run plan (or drawer closed) → never switch.
+  assert.equal(shouldAutoSelectNightVariant({ ...base, nightPlan: null }), false);
+  assert.equal(shouldAutoSelectNightVariant({ ...base, drawerOpen: false }), false);
 });

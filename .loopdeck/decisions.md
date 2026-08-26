@@ -2,7 +2,13 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
-## 2026-08-26 — Night-variant parked inbox: reuse `AskUserQuestionCard` (label override) instead of a new card component; status-gate, don't payload-gate
+## 2026-08-26 — Night-variant auto-selection is a once-per-open latch, not a forced re-render; rail badge confirmed as the spike's representation
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 1 item 3 asked the drawer to "switch to this variant automatically when a project has an active `RunPlan`, per `prd-detail-drawer`'s spike decision." The spike's ADR-3 had already resolved "night run" as the derived `hasActiveOrQueuedRun` flag (no new `RunState` variant), which made the rail door's moon badge — built as an explicit placeholder in `prd-rail-corridor-shell` Phase 1 — the confirmed indicator, needing only doc de-placeholdering. The open judgment call was how the drawer's auto-switch behaves against a user who's mid-navigation.
+- **Consequences**: `ProjectDrawer.tsx` auto-selects the Agent tab (swapped for `NightRunTab` by item 1's render) via new pure `shouldAutoSelectNightVariant` (`src/lib/nightRun.ts`): fires at most once per continuous drawer-open span per project (local `switchedForPath` ref, reset on drawer close, re-armed on project switch), latching even when the user was already on the Agent tab. So opening a moon-badged rail door lands on the night variant, and a run that starts while the drawer is open still triggers the one-time switch — but a user who then navigates to Loops/Epics mid-run is never yanked back (queueing happens on the Epics tab; a re-switch per poll would fight the user). The latch is the *whole* policy, so it lives in one tested pure function rather than inline effect state.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 1 item 3 entry) has the full file/symbol breakdown.
+
 
 - **Status**: accepted
 - **Context**: `prd-night-run-surfaces` Phase 1 item 2 asked for an inline parked-question card with "Answer & requeue", and the run's pre-answered clarification pinned placement (stacked below the rail/gauges, mirroring `RunQueuePanel`'s inbox) and told this loop to reuse the existing structure/component boundary. Two open implementation questions: build a new card component, and how to select which phases get one.
