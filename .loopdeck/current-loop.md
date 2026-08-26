@@ -1,1 +1,1 @@
-Selasar revamp — prd-night-run-surfaces Phase 1 item 1 complete: drawer night variant (phase-chip rail + 3 budget gauges), verifier PASS
+Night-run wizard wiring BLOCKED — run-plan order runs it before the wizard loop; parked for human

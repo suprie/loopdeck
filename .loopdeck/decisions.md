@@ -2,6 +2,12 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-26 — Wizard-wiring loop blocked on run-plan dependency order, not re-scoped
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 2 item 2 (wire the wizard's final action to queue-run) was queued before item 1 (build the wizard), so no wizard existed to wire; the run's pre-answered clarification directed blocking rather than guessing scope.
+- **Consequences**: Loop recorded BLOCKED with zero code — the entry-point stub (`PlanTonightButton`, open/close-only) remains the wizard's mount point, and a run-plan reorder (wizard loop first) is parked as a human question in `loops.md ## Next Steps`.
+
 ## 2026-08-26 — "Plan tonight" gate is the picker's `!done && !noId` condition extracted to a shared helper; the button is open/close-only until the wizard ships
 
 - **Status**: accepted
