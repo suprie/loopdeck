@@ -101,13 +101,31 @@ restructuring for the drawer's layout._
 
 ### Phase 2 — Plan-tonight wizard
 
-- [ ] Build the 3-step wizard (phase picker with dependency labels + stall
+- [x] Build the 3-step wizard (phase picker with dependency labels + stall
       policy toggle + budget inputs → pre-flight interview text inputs with
       skip checkboxes → consent summary + required checkbox), reusing the
       existing pre-flight-interview and queue-time-consent IPC commands.
-- [ ] Wire the wizard's final action to the existing queue-run command,
+      (2026-08-28: `PlanTonightWizard.tsx` mounted from the drawer header's
+      `PlanTonightButton`. Per the run's pre-answered clarifications:
+      dependency labels come from new tested `dependencyLabel()` in
+      `lib/nightRun.ts` (mirrors `build_run_plan`'s authored-order
+      predecessor chain); `createRunPlan` fires on the 1→2 transition with
+      draft-PR consent pre-checked; step 2 runs live interviews inline
+      (Run-interview/Skip controls — parked `AskUserQuestion` cards render
+      inline by polling the shared pending-question slot, answer fields are
+      the "text inputs"); step 3's required checkbox gates only the final
+      action.)
+- [x] Wire the wizard's final action to the existing queue-run command,
       confirming the phase/budget/consent payload shape matches what
       `run_executor.rs` expects.
+      (2026-08-28: Start button calls the same `queueRun` IPC
+      RunQueuePanel's Start uses. Payload-shape confirmation: `queue_run`
+      takes only the project path and re-reads `run-plan.yaml` — the
+      phase/budget/consent shape was fixed by `createRunPlan` at the 1→2
+      transition, so no new payload crosses the boundary. Button gating
+      mirrors `queue_run`'s pending-interview guard; on resolve the wizard
+      closes and auto-switches to the Agent tab, which the runStatus poll
+      swaps for the night variant.)
 - [x] Add the "Plan tonight" entry point to the drawer header, gated on the
       project having queueable PRD phases (mirroring whatever gate
       `EpicsPanel.tsx` currently uses).
