@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import { cn } from "../../lib/utils";
+import { useStreamingState } from "../../store/streamingState";
 import type {
   AppError,
   AskUserQuestionAnswers,
@@ -62,6 +63,11 @@ interface PlanTonightWizardProps {
   epics: Epic[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Fired after `queueRun` resolves — the drawer closes the wizard and
+   *  auto-switches to the Agent tab, which now renders the night variant
+   *  (the plan it polls is active/queued). Per the run's pre-answered
+   *  clarification: "close wizard, auto-switch." */
+  onStarted?: () => void;
 }
 
 /**
@@ -85,7 +91,13 @@ interface PlanTonightWizardProps {
  *   variant's `answerParkedQuestion` — unblocks and resolves the interview,
  *   pinning the answers into the phase.
  */
-export function PlanTonightWizard({ projectPath, epics, open, onOpenChange }: PlanTonightWizardProps) {
+export function PlanTonightWizard({
+  projectPath,
+  epics,
+  open,
+  onOpenChange,
+  onStarted,
+}: PlanTonightWizardProps) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [stallPolicy, setStallPolicy] = useState<StallPolicy>("continue_independent");
@@ -94,6 +106,7 @@ export function PlanTonightWizard({ projectPath, epics, open, onOpenChange }: Pl
   const [phaseMinutes, setPhaseMinutes] = useState("90");
   const [runHours, setRunHours] = useState("8");
   const [creating, setCreating] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [plan, setPlan] = useState<RunPlan | null>(null);
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
   const [skippingId, setSkippingId] = useState<string | null>(null);
@@ -229,6 +242,30 @@ export function PlanTonightWizard({ projectPath, epics, open, onOpenChange }: Pl
   const hasPendingInterview =
     plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
 
+  // The final action (prd-night-run-surfaces Phase 2, item 2): start the
+  // queued run via the same `queueRun` IPC RunQueuePanel's Start button and
+  // the executor (`run_executor.rs` via `queue_run`) already consume. No new
+  // payload crosses the boundary — the phase/budget/consent shape was fixed
+  // by `createRunPlan` on the 1→2 transition and persisted to
+  // `.loopdeck/run-plan.yaml`; `queue_run` takes only the project path and
+  // re-reads that file, refusing while any phase's interview is still
+  // `pending` (the same gate as `canStart` in RunQueuePanel).
+  const handleStartRun = async () => {
+    setStarting(true);
+    try {
+      useStreamingState.getState().beginTurn(projectPath);
+      await api.queueRun(projectPath);
+      toast.success("Overnight run started");
+      onStarted?.();
+    } catch (err) {
+      useStreamingState.getState().clear(projectPath);
+      const appErr = err as AppError;
+      toast.error("Failed to start run", { description: appErr.message ?? String(err) });
+    } finally {
+      setStarting(false);
+    }
+  };
+
   if (!hasQueueablePhases(epics)) return null;
 
   return (
@@ -351,10 +388,18 @@ export function PlanTonightWizard({ projectPath, epics, open, onOpenChange }: Pl
           {step === 3 && (
             <button
               type="button"
-              disabled
-              title="Start wiring lands in the follow-up loop (wizard final action)"
-              className="flex cursor-not-allowed items-center gap-1.5 rounded-md bg-[var(--primary)] px-3 py-1.5 text-xs font-medium text-[var(--primary-foreground)] opacity-40"
+              onClick={handleStartRun}
+              disabled={!consentConfirmed || hasPendingInterview || starting}
+              title={
+                hasPendingInterview
+                  ? "Answer or skip every queued phase's pre-flight interview first"
+                  : !consentConfirmed
+                    ? "Confirm consent to start the run"
+                    : undefined
+              }
+              className="flex items-center gap-1.5 rounded-md bg-[var(--primary)] px-3 py-1.5 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
+              {starting && <Loader2 size={12} className="animate-spin" />}
               Start overnight run
             </button>
           )}

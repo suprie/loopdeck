@@ -190,7 +190,10 @@ export function ProjectDrawer() {
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <PlanTonightButton projectPath={project.path} />
+                  <PlanTonightButton
+                    projectPath={project.path}
+                    onStarted={() => setActiveTab("agent")}
+                  />
                   <StatusBadge status={project.status} />
                 </div>
               </div>
@@ -491,7 +494,14 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
  * the shared `hasQueueablePhases`. Opens the 3-step wizard (this phase's
  * items 1-2). Renders null when nothing is queueable.
  */
-function PlanTonightButton({ projectPath }: { projectPath: string }) {
+function PlanTonightButton({
+  projectPath,
+  onStarted,
+}: {
+  projectPath: string;
+  /** Wizard's final-action callback: close it and land on the night variant. */
+  onStarted: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [epics, setEpics] = useState<Epic[] | null>(null);
 
@@ -534,6 +544,13 @@ function PlanTonightButton({ projectPath }: { projectPath: string }) {
         epics={epics}
         open={open}
         onOpenChange={setOpen}
+        onStarted={() => {
+          // "Close wizard, auto-switch" (run's pre-answered clarification):
+          // land on the Agent tab, which the runStatus poll now swaps for the
+          // night variant — the just-started plan is active.
+          setOpen(false);
+          onStarted();
+        }}
       />
     </>
   );
