@@ -7,7 +7,7 @@
 - **Status**: completed
 
 ## Next Steps
-- [ ] Review & merge the wizard's draft PR (see Run metadata in the PR body)
+- [ ] Review & merge the wizard's draft PR (supersedes #87/#88): https://github.com/suprie/loopdeck/pull/89
 - [ ] `prd-night-run-surfaces` Phase 3: morning-report drawer (verdict table, parked questions via Phase 1's inline card, kill callouts, audit tail)
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the new wizard, through the drawer's night variant
 
