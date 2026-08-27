@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Pencil,
   Sparkles,
@@ -14,6 +14,7 @@ import {
   Layers,
   Bot,
   Network,
+  Moon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { relativeTime } from "../../lib/time";
@@ -21,6 +22,7 @@ import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { useRunStatus } from "../../hooks/useRunStatus";
 import { hasActiveOrQueuedRun } from "../../lib/rail";
+import { shouldAutoSelectNightVariant, hasQueueablePhases } from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
@@ -103,6 +105,37 @@ export function ProjectDrawer() {
   const nightPlan =
     runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
 
+  // prd-night-run-surfaces Phase 1 item 3: while the project has an
+  // active/queued run, the drawer auto-selects the Agent tab (swapped for the
+  // night variant below) — so opening a moon-badged rail door lands on the
+  // night variant, not whatever tab was last persisted. Once per continuous
+  // drawer-open span per project (`shouldAutoSelectNightVariant`'s latch): a
+  // user who navigates away mid-run isn't yanked back, and closing the drawer
+  // (or switching project) re-arms it.
+  const switchedForPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!drawerOpen) {
+      switchedForPath.current = null;
+      return;
+    }
+    const projectPath = project?.path ?? null;
+    if (
+      shouldAutoSelectNightVariant({
+        drawerOpen,
+        projectPath,
+        nightPlan,
+        activeTopLevelTab: topLevelTab(activeTab),
+        switchedForPath: switchedForPath.current,
+      })
+    ) {
+      setActiveTab("agent");
+    }
+    // Latch even when already on the Agent tab — "auto-switched" means "this
+    // open already showed the night variant", which is also true if the user
+    // landed there themselves.
+    if (nightPlan && projectPath) switchedForPath.current = projectPath;
+  }, [drawerOpen, project, nightPlan, activeTab, setActiveTab]);
+
   const handleRemove = () => {
     if (!project) return;
     removeProject(project.path);
@@ -154,7 +187,10 @@ export function ProjectDrawer() {
                     </p>
                   )}
                 </div>
-                <StatusBadge status={project.status} />
+                <div className="flex shrink-0 items-center gap-2">
+                  <PlanTonightButton projectPath={project.path} />
+                  <StatusBadge status={project.status} />
+                </div>
               </div>
             </SheetHeader>
 
@@ -441,6 +477,59 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
     <div className="shrink-0 border-b border-sky-500/30 bg-sky-500/5 px-6 py-3">
       <PlanApprovalCard plan={pending.plan} onDecide={onDecide} />
     </div>
+  );
+}
+
+// ── Plan-tonight entry point ─────────────────────────────────────────────────
+
+/**
+ * "Plan tonight" button in the drawer header (prd-night-run-surfaces Phase 2
+ * item 3). Gated on the project having queueable PRD phases — the same
+ * `!done && !noId` gate EpicsPanel's overnight-run picker checkboxes use, via
+ * the shared `hasQueueablePhases`.
+ *
+ * The 3-step wizard this opens is this phase's items 1-2 (separate loops);
+ * until it exists the button only holds local open/close state, per the
+ * pre-answered clarification in the run plan: no modal content yet. Renders
+ * null when nothing is queueable.
+ */
+function PlanTonightButton({ projectPath }: { projectPath: string }) {
+  const [open, setOpen] = useState(false);
+  const [queueable, setQueueable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getEpics(projectPath)
+      .then((epics) => {
+        if (!cancelled) setQueueable(hasQueueablePhases(epics));
+      })
+      .catch(() => {
+        // Gate closed on fetch failure — the entry point simply doesn't show.
+        if (!cancelled) setQueueable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
+  if (!queueable) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((v) => !v)}
+      aria-expanded={open}
+      title="Plan an overnight run"
+      className={cn(
+        "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
+        open
+          ? "border-[var(--primary)] text-[var(--primary)]"
+          : "border-border text-foreground hover:bg-accent",
+      )}
+    >
+      <Moon size={12} />
+      Plan tonight
+    </button>
   );
 }
 

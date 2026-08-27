@@ -1,4 +1,4 @@
-import type { AskUserQuestionSpec, RunPhaseStatus, RunPlan } from "../types";
+import type { AskUserQuestionSpec, Epic, RunPhase, RunPhaseStatus, RunPlan } from "../types";
 
 // ── Shared run-plan presentation (relocated from RunQueuePanel.tsx) ─────────
 // Single source for both run surfaces — RunQueuePanel's phase rows and the
@@ -104,6 +104,48 @@ export function budgetGauges(plan: RunPlan): BudgetGauge[] {
   ];
 }
 
+/** One currently-parked phase's card model for the night variant's inline
+ *  parked-question inbox (prd-night-run-surfaces Phase 1, item 2).
+ *  `questions` is non-null when the payload carries structured
+ *  `__QUESTIONS__` JSON (answered via `answerParkedQuestion`), null for a
+ *  raw-text payload (requeued via `requeueRunPhase`). */
+export interface ParkedCard {
+  phase: RunPhase;
+  questions: AskUserQuestionSpec[] | null;
+}
+
+/** The night variant's parked-question inbox: one card per *currently-parked*
+ *  phase. Status-gated, not just payload-gated — `park_payload` can persist
+ *  on a phase that later completed or was requeued, and those must not render
+ *  as open questions. Mirrors RunQueuePanel's "Parked questions" inbox. */
+export function parkedInbox(plan: RunPlan): ParkedCard[] {
+  return plan.phases
+    .filter((p) => p.status === "parked" && p.park_payload)
+    .map((p) => ({ phase: p, questions: parseParkedQuestions(p.park_payload).questions }));
+}
+
+/** Whether the drawer should auto-select its Agent tab — which the render
+ *  below swaps for the night variant — per prd-night-run-surfaces Phase 1
+ *  item 3. Fires at most once per continuous drawer-open span per project
+ *  (`switchedForPath` latch): a user who navigates to another tab mid-run is
+ *  never yanked back, while a run that *starts* (or is first detected) while
+ *  the drawer is already open still triggers the one-time switch. The signal
+ *  is the same `hasActiveOrQueuedRun`-gated plan the rail doors' moon badge
+ *  uses — per the detail-drawer spike (ADR-3), "night run" is a derived
+ *  run-plan flag, not a new `RunState` variant. */
+export function shouldAutoSelectNightVariant(args: {
+  drawerOpen: boolean;
+  projectPath: string | null;
+  /** Non-null only while the project has an active/queued run plan. */
+  nightPlan: RunPlan | null;
+  activeTopLevelTab: string;
+  switchedForPath: string | null;
+}): boolean {
+  if (!args.drawerOpen || !args.projectPath || !args.nightPlan) return false;
+  if (args.switchedForPath === args.projectPath) return false;
+  return args.activeTopLevelTab !== "agent";
+}
+
 /** Fill percentage for a gauge bar, clamped to [0, 100] — a blown cap pins
  *  the bar full rather than overflowing the track. */
 export function gaugePercent(used: number, cap: number): number {
@@ -114,6 +156,24 @@ export function gaugePercent(used: number, cap: number): number {
 /** `1_234_567` → `"1,234,567"`. */
 export function formatTokens(n: number): string {
   return n.toLocaleString();
+}
+
+/** True when any PRD loop is queueable for an overnight run — has a stable
+ *  execution ID (the join key create_run_plan needs) and isn't checked off or
+ *  recorded in history. Mirrors EpicsPanel's per-loop picker-checkbox gate
+ *  (`!done && !noId`); gates the drawer header's "Plan tonight" entry point
+ *  (prd-night-run-surfaces Phase 2 item 3). */
+export function hasQueueablePhases(epics: Epic[]): boolean {
+  for (const epic of epics) {
+    for (const prd of epic.prds) {
+      for (const phase of prd.phases) {
+        for (const loop of phase.loops) {
+          if (loop.id && !loop.checked && !loop.done_in_history) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /** Seconds → `"Xh Ym"` past an hour, else `"Xm Ys"`, else `"Ys"`. */

@@ -42,10 +42,13 @@ export function selectRailDoors(projects: ProjectEntry[]): {
 }
 
 /**
- * Whether a project has an overnight run in flight or queued — the rail's
- * placeholder night-run signal (prd-night-run-surfaces owns the real one,
- * pending its detail-drawer spike). Derived from the same run-plan data
- * `RunQueuePanel` already polls, not a new backend concept.
+ * Whether a project has an overnight run in flight or queued — the night-run
+ * signal shared by the rail doors' moon badge and the drawer's night-variant
+ * selection (`ProjectDrawer.tsx`). The detail-drawer spike (ADR-3,
+ * `docs/epics/selasar-revamp/README.md`) resolved "night run" as exactly this
+ * derived run-plan flag — no new `RunState` variant — so what started as the
+ * rail's placeholder is now the confirmed representation. Derived from the
+ * same run-plan data `RunQueuePanel` already polls, not a new backend concept.
  */
 export function hasActiveOrQueuedRun(status: RunQueueStatus | undefined): boolean {
   if (!status) return false;

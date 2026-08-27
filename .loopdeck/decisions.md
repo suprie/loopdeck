@@ -2,6 +2,32 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-08-26 — Wizard-wiring loop blocked on run-plan dependency order, not re-scoped
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 2 item 2 (wire the wizard's final action to queue-run) was queued before item 1 (build the wizard), so no wizard existed to wire; the run's pre-answered clarification directed blocking rather than guessing scope.
+- **Consequences**: Loop recorded BLOCKED with zero code — the entry-point stub (`PlanTonightButton`, open/close-only) remains the wizard's mount point, and a run-plan reorder (wizard loop first) is parked as a human question in `loops.md ## Next Steps`.
+
+## 2026-08-26 — "Plan tonight" gate is the picker's `!done && !noId` condition extracted to a shared helper; the button is open/close-only until the wizard ships
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 2 item 3 asked for a "Plan tonight" entry point in the drawer header, gated on "queueable PRD phases (mirroring whatever gate `EpicsPanel.tsx` currently uses)". That gate lives inline in `EpicsPanel`'s render (`!done && noId` on the overnight-run picker checkbox at the time of writing), duplicated nowhere else — and the run plan queues the wizard (items 1-2) separately from this entry point, with a pre-answered clarification pinning the interim behavior.
+- **Consequences**: The gate is extracted as a pure `hasQueueablePhases(epics)` (`src/lib/nightRun.ts`) implementing the picker's exact condition (`loop.id && !loop.checked && !loop.done_in_history`) — one tested single source shared by the header button and the picker, so the two can't drift when the wizard later replaces the picker as the queueing surface. `PlanTonightButton` (`ProjectDrawer.tsx`) fetches epics via the existing `get_epics` IPC only while the drawer is open (Radix `Sheet` mounts content conditionally) and renders null when nothing qualifies or the fetch fails — the entry point is simply absent, not disabled. Until items 1-2's wizard exists, the button toggles local open/close state only (`aria-expanded` + primary highlight when open, no modal content), per the run's pre-answered clarification; the wizard mounts into that open state.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 2 item 3 entry) has the full file/symbol breakdown.
+
+## 2026-08-26 — Night-variant auto-selection is a once-per-open latch, not a forced re-render; rail badge confirmed as the spike's representation
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 1 item 3 asked the drawer to "switch to this variant automatically when a project has an active `RunPlan`, per `prd-detail-drawer`'s spike decision." The spike's ADR-3 had already resolved "night run" as the derived `hasActiveOrQueuedRun` flag (no new `RunState` variant), which made the rail door's moon badge — built as an explicit placeholder in `prd-rail-corridor-shell` Phase 1 — the confirmed indicator, needing only doc de-placeholdering. The open judgment call was how the drawer's auto-switch behaves against a user who's mid-navigation.
+- **Consequences**: `ProjectDrawer.tsx` auto-selects the Agent tab (swapped for `NightRunTab` by item 1's render) via new pure `shouldAutoSelectNightVariant` (`src/lib/nightRun.ts`): fires at most once per continuous drawer-open span per project (local `switchedForPath` ref, reset on drawer close, re-armed on project switch), latching even when the user was already on the Agent tab. So opening a moon-badged rail door lands on the night variant, and a run that starts while the drawer is open still triggers the one-time switch — but a user who then navigates to Loops/Epics mid-run is never yanked back (queueing happens on the Epics tab; a re-switch per poll would fight the user). The latch is the *whole* policy, so it lives in one tested pure function rather than inline effect state.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 1 item 3 entry) has the full file/symbol breakdown.
+
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 1 item 2 asked for an inline parked-question card with "Answer & requeue", and the run's pre-answered clarification pinned placement (stacked below the rail/gauges, mirroring `RunQueuePanel`'s inbox) and told this loop to reuse the existing structure/component boundary. Two open implementation questions: build a new card component, and how to select which phases get one.
+- **Consequences**: No new card component — the shared `AskUserQuestionCard` gains an optional `submitLabel` prop so the night variant's submit button reads "Answer & requeue"; `RunQueuePanel`'s two existing call sites pass no label and render unchanged. The PRD's "wired to the existing requeue IPC command" resolves to *both* requeue paths `RunQueuePanel` already uses: structured `__QUESTIONS__` payloads → `answerParkedQuestion` (pin + requeue in one call), raw payloads → `requeueRunPhase` + `queueRun` (`handleRetry`'s flow verbatim). Card selection is `parkedInbox(plan)` gated on `status === "parked"` *and* `park_payload` — payload-only gating (what item 1's read-only rendering used) would re-show open questions for phases that later completed or were requeued, since `park_payload` persists on the phase. `NightRunTab` doesn't own plan state (the drawer's `useRunStatus` poll does), so an answered card hides optimistically via a local `resolved` set until the next poll, rather than a `setPlan` the component can't perform.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 1 item 2 entry) has the full file/symbol breakdown.
+
 ## 2026-08-12 — Rail pin state is a plain per-machine bool; night-run badge is a run-plan-derived placeholder
 
 - **Status**: accepted

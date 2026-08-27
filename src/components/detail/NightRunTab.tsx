@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
-import { Moon, AlertTriangle } from "lucide-react";
+import { Moon, AlertTriangle, Loader2, RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 import * as api from "../../lib/tauri";
+import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import {
   budgetGauges,
   formatDuration,
   formatTokens,
   gaugePercent,
-  parseParkedQuestions,
+  parkedInbox,
   STATUS_COLOR,
   STATUS_LABEL,
 } from "../../lib/nightRun";
-import type { Epic, RunPhase, RunPlan } from "../../types";
+import type { AppError, AskUserQuestionAnswers, Epic, RunPhase, RunPlan } from "../../types";
 import { buildIdToTitle } from "./EpicsPanel";
+import { useStreamingState } from "../../store/streamingState";
 
 /**
  * The drawer's night variant (prd-night-run-surfaces Phase 1, item 1):
@@ -21,12 +24,22 @@ import { buildIdToTitle } from "./EpicsPanel";
  * `RunQueuePanel`'s status maps and parked-question parser rather than
  * re-deriving shapes.
  *
- * The interactive parked-question card with "Answer & requeue" (Phase 1,
- * item 2) and the automatic variant-switch-on-drawer-open (item 3) land in
- * their own loops — parked payloads render read-only here.
+ * Below the rail/gauges: the inline parked-question inbox (Phase 1, item 2),
+ * one card per currently-parked phase, mirroring `RunQueuePanel`'s
+ * "Parked questions" inbox — structured `__QUESTIONS__` payloads answer via
+ * the shared `AskUserQuestionCard` (submit = "Answer & requeue" →
+ * `answerParkedQuestion`), raw payloads get a plain "Answer & requeue"
+ * button → `requeueRunPhase` + `queueRun`, same as RunQueuePanel's Retry.
+ *
+ * The automatic variant-switch-on-drawer-open (item 3) lands in its own loop.
  */
 export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: RunPlan }) {
   const [idToTitle, setIdToTitle] = useState<Record<string, string>>({});
+  const [answeringId, setAnsweringId] = useState<string | null>(null);
+  const [requeueingId, setRequeueingId] = useState<string | null>(null);
+  // Phases answered/requeued from this tab, hidden optimistically until the
+  // drawer's 5s `useRunStatus` poll delivers the updated plan.
+  const [resolved, setResolved] = useState<Set<string>>(new Set());
 
   // Loop titles for chip tooltips — same join EpicsPanel feeds RunQueuePanel.
   useEffect(() => {
@@ -43,7 +56,54 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
   }, [projectPath]);
 
   const title = (phase: RunPhase) => idToTitle[phase.execution_id] ?? phase.execution_id;
-  const parked = plan.phases.filter((p) => p.park_payload);
+
+  const resolve = (executionId: string) =>
+    setResolved((prev) => {
+      const next = new Set(prev);
+      next.add(executionId);
+      return next;
+    });
+
+  // Same flow as RunQueuePanel's handleAnswerParked: pin the answers into the
+  // phase's interview and requeue it in one IPC call.
+  const handleAnswer = async (executionId: string, answers: AskUserQuestionAnswers) => {
+    setAnsweringId(executionId);
+    try {
+      await api.answerParkedQuestion(projectPath, executionId, answers);
+      resolve(executionId);
+      toast.success("Answers pinned — phase requeued");
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to answer parked question", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setAnsweringId(null);
+    }
+  };
+
+  // Raw-payload fallback, same flow as RunQueuePanel's handleRetry: requeue
+  // the phase (there are no structured answers to pin), then resume the run.
+  const handleRequeue = async (executionId: string) => {
+    setRequeueingId(executionId);
+    try {
+      useStreamingState.getState().beginTurn(projectPath);
+      await api.requeueRunPhase(projectPath, executionId);
+      await api.queueRun(projectPath);
+      resolve(executionId);
+      toast.success("Parked phase restarted unattended");
+    } catch (err) {
+      useStreamingState.getState().clear(projectPath);
+      const appErr = err as AppError;
+      toast.error("Failed to requeue phase", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setRequeueingId(null);
+    }
+  };
+
+  const cards = parkedInbox(plan).filter((c) => !resolved.has(c.phase.execution_id));
 
   return (
     <div className="mx-auto min-h-0 w-full max-w-2xl flex-1 overflow-y-auto pb-6">
@@ -130,54 +190,54 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
         </div>
       </div>
 
-      {/* Read-only parked payloads. The interactive "Answer & requeue" card
-          (Phase 1, item 2) replaces this when it lands. */}
-      {parked.length > 0 && (
+      {/* Inline parked-question inbox (Phase 1, item 2): stacked below the
+          rail/gauges, one card per currently-parked phase — same shape as
+          RunQueuePanel's "Parked questions" inbox. */}
+      {cards.length > 0 && (
         <div className="mt-4 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
           <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Parked ({parked.length})
+            Parked questions ({cards.length})
           </div>
           <ul className="space-y-2">
-            {parked.map((phase) => (
-              <ParkedPayloadRow
-                key={phase.execution_id}
-                phase={phase}
-                title={title(phase)}
-              />
+            {cards.map(({ phase, questions }) => (
+              <li key={phase.execution_id} className="rounded bg-amber-500/5 px-2.5 py-2">
+                <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+                  <AlertTriangle size={11} className="shrink-0 text-[var(--warning)]" />
+                  {title(phase)}
+                </div>
+                {questions ? (
+                  <AskUserQuestionCard
+                    questions={questions}
+                    disabled={answeringId === phase.execution_id}
+                    submitLabel="Answer & requeue"
+                    onSubmit={(answers) => handleAnswer(phase.execution_id, answers)}
+                  />
+                ) : (
+                  <>
+                    <p className="break-words pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                      {phase.park_payload}
+                    </p>
+                    <div className="mt-1.5 flex justify-end">
+                      <button
+                        onClick={() => handleRequeue(phase.execution_id)}
+                        disabled={requeueingId === phase.execution_id}
+                        className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)] transition-colors hover:bg-accent disabled:opacity-50"
+                      >
+                        {requeueingId === phase.execution_id ? (
+                          <Loader2 size={10} className="animate-spin" />
+                        ) : (
+                          <RotateCcw size={10} />
+                        )}
+                        Answer &amp; requeue
+                      </button>
+                    </div>
+                  </>
+                )}
+              </li>
             ))}
           </ul>
         </div>
       )}
     </div>
-  );
-}
-
-/** One parked phase's payload — structured questions (via the shared
- *  `__QUESTIONS__` parser) rendered as text, raw reason as a fallback. */
-function ParkedPayloadRow({ phase, title }: { phase: RunPhase; title: string }) {
-  const parsed = parseParkedQuestions(phase.park_payload);
-  return (
-    <li className="rounded bg-amber-500/5 px-2.5 py-2">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-foreground">
-        <AlertTriangle size={11} className="shrink-0 text-[var(--warning)]" />
-        {title}
-      </div>
-      {parsed.questions ? (
-        <ul className="space-y-1 pl-4">
-          {parsed.questions.map((q) => (
-            <li key={q.question} className="text-[11px] leading-relaxed text-muted-foreground">
-              <span className="font-medium text-foreground">{q.header}:</span> {q.question}
-              <span className="block text-[10px]">
-                {q.options.map((o) => o.label).join(" · ")}
-              </span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="break-words pl-4 text-[11px] leading-relaxed text-muted-foreground">
-          {phase.park_payload}
-        </p>
-      )}
-    </li>
   );
 }

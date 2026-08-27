@@ -6,6 +6,9 @@ import {
   formatDuration,
   formatTokens,
   parseParkedQuestions,
+  parkedInbox,
+  shouldAutoSelectNightVariant,
+  hasQueueablePhases,
   DEFAULT_RUN_PHASE_TOKEN_CAP,
   DEFAULT_RUN_PHASE_WALL_CLOCK_SECS,
   DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS,
@@ -125,4 +128,115 @@ test("parseParkedQuestions (shared with RunQueuePanel) extracts the executor mar
   assert.deepEqual(parseParkedQuestions(payload).questions, spec);
   assert.equal(parseParkedQuestions("plain reason").questions, null);
   assert.equal(parseParkedQuestions(undefined).questions, null);
+});
+
+test("parkedInbox: one card per currently-parked phase, structured vs raw split", () => {
+  const spec = [
+    {
+      question: "Which DB?",
+      header: "Storage",
+      options: [{ label: "sqlite", description: "" }],
+      multiSelect: false,
+    },
+  ];
+  const structured = phase({
+    execution_id: "x/loop-1",
+    status: "parked",
+    park_payload: `__QUESTIONS__${JSON.stringify(spec)}__END__`,
+  });
+  const raw = phase({
+    execution_id: "x/loop-2",
+    status: "parked",
+    park_payload: "manual approval waited past deadline",
+  });
+  // Same payload on a completed phase — park_payload persists, must NOT card.
+  const doneWithPayload = phase({
+    execution_id: "x/loop-3",
+    status: "completed",
+    park_payload: "stalled: old question",
+  });
+  const queuedNoPayload = phase({ execution_id: "x/loop-4", status: "queued" });
+
+  const cards = parkedInbox(plan({ phases: [structured, raw, doneWithPayload, queuedNoPayload] }));
+
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].phase.execution_id, "x/loop-1");
+  assert.deepEqual(cards[0].questions, spec);
+  assert.equal(cards[1].phase.execution_id, "x/loop-2");
+  assert.equal(cards[1].questions, null);
+});
+
+test("shouldAutoSelectNightVariant: once per drawer-open span, per project", () => {
+  const base = {
+    drawerOpen: true,
+    projectPath: "/repo",
+    nightPlan: plan(),
+    activeTopLevelTab: "overview",
+    switchedForPath: null,
+  };
+  // Fresh open on a project with an active run → switch.
+  assert.equal(shouldAutoSelectNightVariant(base), true);
+  // Already showing the Agent tab (user's persisted tab) → nothing to do…
+  assert.equal(shouldAutoSelectNightVariant({ ...base, activeTopLevelTab: "agent" }), false);
+  // …but the caller still latches, so a later manual tab change doesn't yank.
+  assert.equal(
+    shouldAutoSelectNightVariant({ ...base, switchedForPath: "/repo", activeTopLevelTab: "loops" }),
+    false,
+  );
+  // Switching project while the drawer stays open re-arms the switch.
+  assert.equal(
+    shouldAutoSelectNightVariant({ ...base, projectPath: "/other", switchedForPath: "/repo" }),
+    true,
+  );
+  // No active/queued run plan (or drawer closed) → never switch.
+  assert.equal(shouldAutoSelectNightVariant({ ...base, nightPlan: null }), false);
+  assert.equal(shouldAutoSelectNightVariant({ ...base, drawerOpen: false }), false);
+});
+
+// Minimal real-shape Epic tree (mirrors epic.rs / types/index.ts) for the
+// "Plan tonight" gate. Each loop: [id?, checked, done_in_history].
+function epicWithLoops(loops) {
+  return {
+    slug: "e",
+    title: "E",
+    milestone: "m",
+    status: "in_progress",
+    description: "",
+    dir: "docs/epics/e",
+    prds: [
+      {
+        slug: "p",
+        epic: "e",
+        status: "accepted",
+        description: "",
+        file: "prd-p.md",
+        phases: [{ name: "Phase 1", loops }],
+      },
+    ],
+  };
+}
+
+test("hasQueueablePhases: mirrors EpicsPanel's picker gate (!done && !noId)", () => {
+  const loop = (id, checked = false, done_in_history = false) => ({
+    title: "T",
+    checked,
+    done_in_history,
+    ...(id ? { id } : {}),
+  });
+
+  // Open loop with a stable ID → queueable.
+  assert.equal(hasQueueablePhases([epicWithLoops([loop("p/t")])]), true);
+  // Legacy ID-less loop → not queueable (no join key).
+  assert.equal(hasQueueablePhases([epicWithLoops([loop(null)])]), false);
+  // Checked off or done in history → not queueable.
+  assert.equal(hasQueueablePhases([epicWithLoops([loop("p/t", true)])]), false);
+  assert.equal(hasQueueablePhases([epicWithLoops([loop("p/t", false, true)])]), false);
+  // Any open ID'd loop anywhere in the tree qualifies…
+  assert.equal(
+    hasQueueablePhases([epicWithLoops([loop(null, true), loop("p/t2")])]),
+    true,
+  );
+  // …and an empty tree doesn't.
+  assert.equal(hasQueueablePhases([]), false);
+  assert.equal(hasQueueablePhases([epicWithLoops([])]), false);
 });
