@@ -341,6 +341,17 @@ export async function requeueRunPhase(
 }
 
 /**
+ * Requeue every retryable terminal phase (parked/failed/interrupted/killed)
+ * at once — the mass-retry path for a run that died wholesale. The next
+ * queue_run executes them as one combined session (single verify→ship),
+ * not N per-phase sessions.
+ * Rust: requeue_failed_run_phases(path) -> Result<RunPlan, AppError>
+ */
+export async function requeueFailedRunPhases(path: string): Promise<RunPlan> {
+  return invoke<RunPlan>("requeue_failed_run_phases", { path });
+}
+
+/**
  * Run one queued phase's pre-flight interview turn (prd-run-queue Phase 3):
  * a bounded session whose `AskUserQuestion` calls render as the same
  * question cards chat already shows. Awaits the whole turn, including any

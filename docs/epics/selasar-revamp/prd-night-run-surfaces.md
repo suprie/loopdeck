@@ -69,28 +69,28 @@ restructuring for the drawer's layout._
 
 ### Phase 1 — Night drawer variant
 
-- [ ] Build the drawer's night variant (phase-chip rail + 3 budget gauges)
+- [ ] `selasar-revamp/build-the-drawer-s-night-variant-phase-chip-rail-3-budget-gauges` Build the drawer's night variant (phase-chip rail + 3 budget gauges)
       sourced from the real `RunPlan`/`RunPhase`/`RunBudgets` types,
       reusing `RunQueuePanel.tsx`'s existing phase-row and
       parked-question-parsing logic rather than re-deriving shapes.
-- [ ] Build the inline parked-question card (question text + "Answer &
+- [ ] `selasar-revamp/build-the-inline-parked-question-card-question-text-answer` Build the inline parked-question card (question text + "Answer &
       requeue" button) wired to the existing requeue IPC command already
       used by `RunQueuePanel.tsx`.
-- [ ] Wire the rail door's night-run indicator and the drawer's variant
+- [ ] `selasar-revamp/wire-the-rail-door-s-night-run-indicator-and-the-drawer-s-variant` Wire the rail door's night-run indicator and the drawer's variant
       selection to switch to this variant automatically when a project has
       an active `RunPlan`, per `prd-detail-drawer`'s spike decision on how
       "night run" is represented.
 
 ### Phase 2 — Plan-tonight wizard
 
-- [ ] Build the 3-step wizard (phase picker with dependency labels + stall
+- [ ] `selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall` Build the 3-step wizard (phase picker with dependency labels + stall
       policy toggle + budget inputs → pre-flight interview text inputs with
       skip checkboxes → consent summary + required checkbox), reusing the
       existing pre-flight-interview and queue-time-consent IPC commands.
-- [ ] Wire the wizard's final action to the existing queue-run command,
+- [ ] `selasar-revamp/wire-the-wizard-s-final-action-to-the-existing-queue-run-command` Wire the wizard's final action to the existing queue-run command,
       confirming the phase/budget/consent payload shape matches what
       `run_executor.rs` expects.
-- [ ] Add the "Plan tonight" entry point to the drawer header, gated on the
+- [ ] `selasar-revamp/add-the-plan-tonight-entry-point-to-the-drawer-header-gated-on-the` Add the "Plan tonight" entry point to the drawer header, gated on the
       project having queueable PRD phases (mirroring whatever gate
       `EpicsPanel.tsx` currently uses).
 

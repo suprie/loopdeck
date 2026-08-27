@@ -1,6 +1,6 @@
-id: run-5db04327-baf6-4e3c-b3fb-a4d4360b23fc
+id: run-1b0a1aa4-26a0-468c-8fe1-43032107d22b
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-16T01:20:46.575347Z
+created: 2026-08-27T22:59:27.664417Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -8,108 +8,34 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
-  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-5db04327-baf6-4e3c-b3fb-a4d4360b23fc
-  worktree_branch: run/selasar-revamp-decide-whether-the-drawer-stays-url-backed-route-or-query-param-plus7-a4d4360b23fc
-  worktree_kept: true
-wall_clock_secs: 408
+  worktree_kept: false
+wall_clock_secs: 607
 stall_policy: continue_independent
 phases:
-- execution_id: selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
+- execution_id: selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall
   status: completed
   interview:
-  - question: 'Drawer routing model: how much weight should bookmark/deep-link/browser-back behavior get vs matching the mockup''s plain show/hide state?'
-    answer: Let spike decide freely
+  - question: Wizard step 2 says 'pre-flight interview text inputs with skip checkboxes'. The existing IPC has no 'submit typed answers' command — `runPhaseInterview` runs a live agent session that may park AskUserQuestion cards (answered via `answerParkedQuestion`), and `skipPhaseInterview` just marks a phase skipped. What should step 2 actually do?
+    answer: Live interviews inline (Recommended) — Step 2 lists each selected phase with Run-interview / Skip controls (like RunQueuePanel's Answer/Skip). Running an interview streams the agent turn inside the wizard; if it parks a question, the question card renders inline and answers pin via answerParkedQuestion. 'Text inputs' = the answer fields on parked cards.
+  - question: Consent (`draftPrAuthorized`) is a `createRunPlan` argument, but the consent checkbox is wizard step 3 — after step 2's interviews, which can only run against an already-created plan. When does the wizard call `createRunPlan`?
+    answer: Create entering step 2, checkbox gates start (Recommended) — createRunPlan fires on the step 1→2 transition with the checkbox pre-checked (RunQueuePanel defaults it true); step 3's required checkbox then gates only the final queue-run action. If the user abandons the wizard mid-way, the created plan simply sits queued-but-unstarted (same state the current panel leaves).
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/85'
-  token_usage: 25062
-  wall_clock_secs: 408
-- execution_id: selasar-revamp/decide-where-the-epics-tab-epicspanel-tsx-including
-  status: parked
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/89'
+  token_usage: 67741
+  wall_clock_secs: 301
+- execution_id: selasar-revamp/wire-the-wizard-s-final-action-to-the-existing-queue-run-command
+  status: completed
   interview:
-  - question: 'Epics tab (EpicsPanel.tsx: epic/PRD/phase tree + RunQueuePanel, 855 lines) relocates where?'
-    answer: Fold into existing tab
-  - question: Graph tab (KnowledgeGraphPanel.tsx) relocates where?
-    answer: Fold into existing tab
+  - question: 'Tonight''s run worktree branches from the main tree''s HEAD, which lacks the wizard''s mount point (`PlanTonightButton`) and the Phase 1 night variant — they live only in draft PRs #87/#88, and the run-plan reorder (wizard-build before wiring) is uncommitted on this chore branch. What should the run start from?'
+    answer: 'Merge #87/#88 first (Recommended)'
+  - question: When the wizard's final action calls queueRun and it resolves, what should the UI do? (PRD is silent.)
+    answer: Close wizard, auto-switch (Recommended)
+  - question: The wizard-build loop runs first tonight and builds all 3 steps including the final consent+start button. How should the work be split so this loop's criterion ('wire the final action to queue-run') doesn't end up a duplicate or a no-op?
+    answer: Loop 1 leaves stub (Recommended)
   interview_status: answered
   depends_on:
-  - selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
-- execution_id: selasar-revamp/confirm-with-whoever-owns-prd-night-run-surfaces-sequencing-whether
-  status: parked
-  interview:
-  - question: This loop's task text says "confirm with whoever owns prd-night-run-surfaces" — but this is a solo repo, unattended, no separate owner to ping overnight. How should the run resolve this checklist item?
-    answer: Self-decide, record ADR
-  - question: 'If the agent self-decides (or you want a default answer captured either way): should "night run" need a real new RunState enum variant, or a derived flag, by the time the drawer''s variant-selection logic is built?'
-    answer: Real new enum variant (Recommended)
-  interview_status: answered
-  depends_on:
-  - selasar-revamp/decide-where-the-epics-tab-epicspanel-tsx-including
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
-- execution_id: selasar-revamp/build-the-drawer-s-standard-variant-scrim-slide-over-panel-header
-  status: parked
-  interview:
-  - question: 'PRD''s own Open Questions flags this unresolved for Phase 2 build: while drawer open, should corridor behind it stay interactive (scrollable) or freeze?'
-    answer: Freeze corridor (Recommended)
-  interview_status: answered
-  depends_on:
-  - selasar-revamp/confirm-with-whoever-owns-prd-night-run-surfaces-sequencing-whether
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
-- execution_id: selasar-revamp/wire-rail-door-clicks-from-prd-rail-corridor-shell-and
-  status: parked
-  interview:
-  - question: 'AttentionPanel.tsx and CommandPalette.tsx also call navigate({to: "/project/$projectPath"}) today, same as Rail.tsx and Dashboard.tsx. The PRD checklist item only names rail-door and corridor-card clicks. Should this loop also repoint those two other entry points to open the drawer, for consistency?'
-    answer: Yes, repoint all four
-  interview_status: answered
-  depends_on:
-  - selasar-revamp/build-the-drawer-s-standard-variant-scrim-slide-over-panel-header
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
-- execution_id: selasar-revamp/relocate-epics-and-graph-tab-content-per-the-spike-s-decision
-  status: parked
-  interview:
-  - question: 'The spike''s recorded interview answer says Epics tab content (EpicsPanel.tsx: epic/PRD/phase tree + RunQueuePanel, 855 lines) should ''fold into existing tab'' but doesn''t name which of the 4 remaining tabs (Overview/Agent/Loops/Decisions). Which tab should it fold into?'
-    answer: Loops
-  - question: Same question for Graph tab content (KnowledgeGraphPanel.tsx — graphify stats + links to indexed docs). Which tab should it fold into?
-    answer: Decisions
-  - question: EpicsPanel is 855 lines (tree + RunQueuePanel) and won't fit as a simple inline section in a narrower drawer without restructuring. How should it integrate into its target tab?
-    answer: Nested sub-tabs (Recommended)
-  interview_status: answered
-  depends_on:
-  - selasar-revamp/wire-rail-door-clicks-from-prd-rail-corridor-shell-and
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
-- execution_id: selasar-revamp/manual-smoke-test-open-close-the-drawer-from-both-rail-and-corridor
-  status: parked
-  interview:
-  - question: This loop is a "manual smoke test" (open/close drawer from rail+corridor, tab switching, URL-backed load/back). No human, no Playwright/e2e harness exists. How should the unattended agent verify this?
-    answer: Code-level trace verification (Recommended)
-  - question: If the verification step finds an actual bug (e.g. a tab-switch handler wired wrong), what should the unattended run do?
-    answer: Fix in scope, then re-verify (Recommended)
-  interview_status: answered
-  depends_on:
-  - selasar-revamp/relocate-epics-and-graph-tab-content-per-the-spike-s-decision
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
-- execution_id: selasar-revamp/npx-tsc-noemit-clean-confirm-no-regression-in-existing-per-tab
-  status: parked
-  interview:
-  - question: This loop's PRD checklist item is 'npx tsc --noEmit clean; confirm no regression in existing per-tab functionality (Agent chat, starting a loop, decisions list, epics list, knowledge graph)'. No human and no Playwright/e2e harness exists (same gap already documented for the preceding manual-smoke-test loop). How should the unattended agent confirm 'no regression'?
-    answer: Code-level trace verification (Recommended)
-  - question: If tsc --noEmit surfaces a real type error, or the regression check finds an actual functional bug (e.g. a dropped prop or broken handler from the Phase 2 relocation), what should the unattended run do?
-    answer: Stop and flag for human review
-  interview_status: answered
-  depends_on:
-  - selasar-revamp/manual-smoke-test-open-close-the-drawer-from-both-rail-and-corridor
-  park_payload: no verify verdict found in the turn's final response
-  token_usage: 7248
-  wall_clock_secs: 87
+  - selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/89'
+  token_usage: 67741
+  wall_clock_secs: 301

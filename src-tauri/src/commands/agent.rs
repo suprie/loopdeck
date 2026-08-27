@@ -1925,6 +1925,15 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         tracing::warn!("failed to append assistant turn to transcript: {e}");
     }
 
+    // 4. Propagate claude-level errors as a real Err, mirroring `send_and_record`
+    //    (its step 4). claude completes the stream with `is_error: true` on
+    //    API/auth failures (e.g. a 429 rate limit) instead of crashing; passing
+    //    Ok through would let headless callers (multi-agent workers, night runs)
+    //    persist the run as done despite the failure.
+    if response.is_error {
+        return Err(AppError::Agent(response.result.clone().trim().to_string()));
+    }
+
     Ok(response)
 }
 

@@ -796,6 +796,42 @@ pub async fn requeue_run_phase(
     Ok(plan)
 }
 
+/// Requeue every retryable terminal phase at once — the mass-retry path for
+/// a run that died wholesale (e.g. a bootstrap failure that killed the whole
+/// batch). Unlike [`requeue_run_phase`], no dependents cascade is needed:
+/// every terminal phase is requeued regardless of why it stopped, so the
+/// next `queue_run` picks them all up as one combined turn (single session,
+/// one verify→ship) instead of N per-phase re-reads.
+#[tauri::command]
+pub async fn requeue_failed_run_phases(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+    if state
+        .run_handles
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .contains_key(&root)
+    {
+        return Err(AppError::RunPlan(
+            "cannot retry phases while the run is still active".into(),
+        ));
+    }
+
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
+    let requeued = requeue_all_terminal_phases(&mut plan);
+    if requeued == 0 {
+        return Err(AppError::RunPlan(
+            "no retryable phases — nothing is parked, failed, interrupted, or killed".into(),
+        ));
+    }
+    runplan::save(&root, &plan)?;
+    info!("requeued {requeued} terminal phase(s) for mass retry");
+    Ok(plan)
+}
+
 fn requeue_terminal_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), AppError> {
     let Some(phase) = plan
         .phases
@@ -844,6 +880,27 @@ fn requeue_terminal_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// Requeue every retryable terminal phase (`Parked`/`Failed`/`Interrupted`/
+/// `Killed`), clearing its park payload. Returns how many phases were
+/// requeued — 0 means the plan had nothing to retry. `Completed`/`Queued`/
+/// `Running` phases are left untouched.
+fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
+    let mut requeued = 0;
+    for phase in &mut plan.phases {
+        if matches!(
+            phase.status,
+            RunPhaseStatus::Parked
+                | RunPhaseStatus::Failed
+                | RunPhaseStatus::Interrupted
+                | RunPhaseStatus::Killed
+        ) {
+            phase.status = RunPhaseStatus::Queued;
+            phase.park_payload = None;
+            requeued += 1;
+        }
+    }
+    requeued
+}
 /// Indices of every phase currently `Queued`, in plan order — the unit of
 /// work `execute_run` hands to one combined LLM turn. `None` once nothing is
 /// left to run.
@@ -1633,6 +1690,53 @@ mod unattended_tests {
             assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
             assert!(plan.phases[0].park_payload.is_none());
         }
+    }
+
+    #[test]
+    fn requeue_all_terminal_phases_requeues_every_retryable_status() {
+        let mut plan = parked_chain();
+        plan.phases[0].status = RunPhaseStatus::Failed;
+        plan.phases[0].park_payload = Some("harness spawn failed".into());
+        plan.phases[1].status = RunPhaseStatus::Killed;
+        plan.phases[1].park_payload = Some("total run wall-clock budget exceeded".into());
+        plan.phases[2].status = RunPhaseStatus::Parked;
+        plan.phases[2].park_payload = Some("verify verdict: BLOCK".into());
+
+        let requeued = requeue_all_terminal_phases(&mut plan);
+
+        assert_eq!(requeued, 3);
+        assert!(plan
+            .phases
+            .iter()
+            .all(|phase| phase.status == RunPhaseStatus::Queued));
+        assert!(plan.phases.iter().all(|phase| phase.park_payload.is_none()));
+    }
+
+    #[test]
+    fn requeue_all_terminal_phases_leaves_active_and_completed_phases_alone() {
+        let mut plan = parked_chain();
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        plan.phases[1].status = RunPhaseStatus::Running;
+        plan.phases[2].status = RunPhaseStatus::Interrupted;
+        plan.phases[2].park_payload = Some("turn interrupted".into());
+
+        let requeued = requeue_all_terminal_phases(&mut plan);
+
+        assert_eq!(requeued, 1);
+        assert_eq!(plan.phases[0].status, RunPhaseStatus::Completed);
+        assert_eq!(plan.phases[1].status, RunPhaseStatus::Running);
+        assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
+        assert!(plan.phases[2].park_payload.is_none());
+    }
+
+    #[test]
+    fn requeue_all_terminal_phases_counts_zero_when_nothing_is_retryable() {
+        let mut plan = parked_chain();
+        for phase in &mut plan.phases {
+            phase.status = RunPhaseStatus::Completed;
+        }
+
+        assert_eq!(requeue_all_terminal_phases(&mut plan), 0);
     }
 
     #[test]
