@@ -66,6 +66,23 @@ const DELIVERY_STATUS_LABEL: Record<DeliveryStatus, string> = {
   shipped: "shipped",
 };
 
+/** Stable execution ID -> loop title, for human-readable phase labels.
+ *  Shared with the drawer's night variant (NightRunTab.tsx) — the join key
+ *  is the loop ID, titles are presentation only. */
+export function buildIdToTitle(epics: Epic[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const epic of epics) {
+    for (const prd of epic.prds) {
+      for (const phase of prd.phases) {
+        for (const loop of phase.loops) {
+          if (loop.id) map[loop.id] = loop.title;
+        }
+      }
+    }
+  }
+  return map;
+}
+
 /** Small pill showing a loop's derived execution state, plus a delivery chip
  * once the loop is completed (implemented/committed/in review/shipped) — the
  * PRD's precise progress-language distinction between "implemented" and
@@ -141,19 +158,7 @@ export function EpicsPanel({ projectPath }: EpicsPanelProps) {
 
   // Stable ID -> title, so the run-queue view can show human-readable phase
   // names instead of raw execution IDs.
-  const idToTitle = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const epic of epics) {
-      for (const prd of epic.prds) {
-        for (const phase of prd.phases) {
-          for (const loop of phase.loops) {
-            if (loop.id) map[loop.id] = loop.title;
-          }
-        }
-      }
-    }
-    return map;
-  }, [epics]);
+  const idToTitle = useMemo(() => buildIdToTitle(epics), [epics]);
 
   // Derived progress is a best-effort enrichment: a project still in legacy
   // mode (no execution.yaml) has no snapshot, and the panel falls back to

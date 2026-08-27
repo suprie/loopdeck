@@ -69,10 +69,13 @@ restructuring for the drawer's layout._
 
 ### Phase 1 — Night drawer variant
 
-- [ ] Build the drawer's night variant (phase-chip rail + 3 budget gauges)
+- [x] Build the drawer's night variant (phase-chip rail + 3 budget gauges)
       sourced from the real `RunPlan`/`RunPhase`/`RunBudgets` types,
       reusing `RunQueuePanel.tsx`'s existing phase-row and
       parked-question-parsing logic rather than re-deriving shapes.
+      (2026-08-26: `NightRunTab.tsx` + `src/lib/nightRun.ts`; status maps +
+      parser relocated to a single shared source; `None` budget caps fall
+      back to TS mirrors of `limits.rs` defaults per run clarification.)
 - [ ] Build the inline parked-question card (question text + "Answer &
       requeue" button) wired to the existing requeue IPC command already
       used by `RunQueuePanel.tsx`.
