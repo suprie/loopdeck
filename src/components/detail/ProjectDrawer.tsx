@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Pencil,
   Sparkles,
@@ -16,11 +16,15 @@ import {
   Network,
   X,
   ChevronDown,
+  Moon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { relativeTime } from "../../lib/time";
 import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
+import { useRunStatus } from "../../hooks/useRunStatus";
+import { hasActiveOrQueuedRun } from "../../lib/rail";
+import { shouldAutoSelectNightVariant, hasQueueablePhases } from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
@@ -29,6 +33,8 @@ import { LoopsPanel } from "./LoopsPanel";
 import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
+import { NightRunTab } from "./NightRunTab";
+import { PlanTonightWizard } from "./PlanTonightWizard";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
@@ -42,6 +48,7 @@ import type {
   AskUserQuestionAnswers,
   ApprovalDecision,
   DetailTab,
+  Epic,
   PlanApprovalDecision,
   ProjectEntry,
 } from "../../types";
@@ -94,6 +101,45 @@ export function ProjectDrawer() {
   const [isEditing, setIsEditing] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
 
+  // Night-variant selection (prd-night-run-surfaces Phase 1): while the
+  // project has a run in flight or queued, the Agent tab swaps for the night
+  // variant (phase-chip rail + budget gauges). Derived from the same
+  // getRunStatus poll the rail doors use — no new backend concept.
+  const runStatus = useRunStatus(drawerOpen && project ? project.path : null);
+  const nightPlan =
+    runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
+
+  // prd-night-run-surfaces Phase 1 item 3: while the project has an
+  // active/queued run, the drawer auto-selects the Agent tab (swapped for the
+  // night variant below) — so opening a moon-badged rail door lands on the
+  // night variant, not whatever tab was last persisted. Once per continuous
+  // drawer-open span per project (`shouldAutoSelectNightVariant`'s latch): a
+  // user who navigates away mid-run isn't yanked back, and closing the drawer
+  // (or switching project) re-arms it.
+  const switchedForPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!drawerOpen) {
+      switchedForPath.current = null;
+      return;
+    }
+    const projectPath = project?.path ?? null;
+    if (
+      shouldAutoSelectNightVariant({
+        drawerOpen,
+        projectPath,
+        nightPlan,
+        activeTopLevelTab: topLevelTab(activeTab),
+        switchedForPath: switchedForPath.current,
+      })
+    ) {
+      setActiveTab("agent");
+    }
+    // Latch even when already on the Agent tab — "auto-switched" means "this
+    // open already showed the night variant", which is also true if the user
+    // landed there themselves.
+    if (nightPlan && projectPath) switchedForPath.current = projectPath;
+  }, [drawerOpen, project, nightPlan, activeTab, setActiveTab]);
+
   const handleRemove = () => {
     if (!project) return;
     removeProject(project.path);
@@ -145,7 +191,13 @@ export function ProjectDrawer() {
                     </p>
                   )}
                 </div>
-                <StatusBadge status={project.status} />
+                <div className="flex shrink-0 items-center gap-2">
+                  <PlanTonightButton
+                    projectPath={project.path}
+                    onStarted={() => setActiveTab("agent")}
+                  />
+                  <StatusBadge status={project.status} />
+                </div>
               </div>
             </SheetHeader>
 
@@ -187,7 +239,11 @@ export function ProjectDrawer() {
                 the inner scroll. */}
             {topLevelTab(activeTab) === "agent" ? (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
-                <AgentPanel projectPath={project.path} />
+                {nightPlan ? (
+                  <NightRunTab projectPath={project.path} plan={nightPlan} />
+                ) : (
+                  <AgentPanel projectPath={project.path} />
+                )}
               </div>
             ) : (
               <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-6">
@@ -483,6 +539,77 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
     <div className="shrink-0 border-b border-sky-500/30 bg-sky-500/5 px-6 py-3">
       <PlanApprovalCard plan={pending.plan} onDecide={onDecide} />
     </div>
+  );
+}
+
+// ── Plan-tonight entry point ─────────────────────────────────────────────────
+
+/**
+ * "Plan tonight" button in the drawer header (prd-night-run-surfaces Phase 2
+ * item 3). Gated on the project having queueable PRD phases — the same
+ * `!done && !noId` gate EpicsPanel's overnight-run picker checkboxes use, via
+ * the shared `hasQueueablePhases`. Opens the 3-step wizard (this phase's
+ * items 1-2). Renders null when nothing is queueable.
+ */
+function PlanTonightButton({
+  projectPath,
+  onStarted,
+}: {
+  projectPath: string;
+  /** Wizard's final-action callback: close it and land on the night variant. */
+  onStarted: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [epics, setEpics] = useState<Epic[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getEpics(projectPath)
+      .then((loaded) => {
+        if (!cancelled) setEpics(loaded);
+      })
+      .catch(() => {
+        // Gate closed on fetch failure — the entry point simply doesn't show.
+        if (!cancelled) setEpics(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
+
+  if (!epics || !hasQueueablePhases(epics)) return null;
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-expanded={open}
+        title="Plan an overnight run"
+        className={cn(
+          "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
+          open
+            ? "border-[var(--primary)] text-[var(--primary)]"
+            : "border-border text-foreground hover:bg-accent",
+        )}
+      >
+        <Moon size={12} />
+        Plan tonight
+      </button>
+      <PlanTonightWizard
+        projectPath={projectPath}
+        epics={epics}
+        open={open}
+        onOpenChange={setOpen}
+        onStarted={() => {
+          // "Close wizard, auto-switch" (run's pre-answered clarification):
+          // land on the Agent tab, which the runStatus poll now swaps for the
+          // night variant — the just-started plan is active.
+          setOpen(false);
+          onStarted();
+        }}
+      />
+    </>
   );
 }
 

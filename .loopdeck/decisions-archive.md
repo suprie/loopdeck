@@ -1010,7 +1010,6 @@
 - **Consequences**: Run status now reports the real backend handle, reconciles only matching inactive terminal queue phases, clears stale live UI state, and permits unattended retry for parked, failed, interrupted, or killed phases.
 
 
-
 ## 2026-08-04 — Run queue batches every queued phase into one combined LLM turn
 - **Status**: accepted
 - **Context**: `execute_run` fired one `claude_session` turn per queued run-queue phase, sequentially — an overnight run of N loops was N separate LLM calls. User explicitly wants N queued loops merged into a single prompt and a single turn for any run with 2+ queued phases, unconditionally (no opt-in flag) — a true batch, not a queue.
@@ -1035,3 +1034,4 @@
 - **Status**: accepted
 - **Context**: `docs/PRD.md` froze at V1 and listed non-goals the shipped code violates (agents, Claude/Codex, loops, decisions); `CLAUDE.md` described a single `commands.rs` (now a `commands/` dir) with stale file-size callouts.
 - **Consequences**: New audit deliverable `docs/epics/optimization/docs-accuracy-audit.md` (contradictions D1–D8, C1–C5). Both docs rewritten — `docs/PRD.md` gained an Amendments section marking shipped non-goals historical with cross-links to the shipping epic (`multi-model-agents` for Claude/Codex integration, per the actual git history), `CLAUDE.md` tree + Context Discipline rewritten to the actual tree (32 modules + `commands/`, 81 commands, verified line counts). Re-audit zero contradictions; verifier PASS; PRD `status` flipped `proposed` → `accepted`, all phase boxes checked.
+

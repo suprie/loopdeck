@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Play, RotateCcw, Shield, Square as StopIcon, XCircle, Zap } from "lucide-react";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
-import type { AskUserQuestionSpec } from "../../types";
 import { toast } from "sonner";
-import type { AppError, ContentBlock, PhaseVerdict, RunBudgets, RunPhase, RunPhaseStatus, RunPlan, RunReport, StallPolicy } from "../../types";
+import type { AppError, ContentBlock, PhaseVerdict, RunBudgets, RunPhase, RunPlan, RunReport, StallPolicy } from "../../types";
 import * as api from "../../lib/tauri";
+import {
+  parseParkedQuestions,
+  STATUS_COLOR,
+  STATUS_LABEL,
+} from "../../lib/nightRun";
 import { useStreamingState } from "../../store/streamingState";
 import {
   Select,
@@ -13,26 +17,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
-
-const STATUS_LABEL: Record<RunPhaseStatus, string> = {
-  queued: "queued",
-  running: "running",
-  parked: "parked",
-  completed: "completed",
-  failed: "failed",
-  interrupted: "interrupted",
-  killed: "killed",
-};
-
-const STATUS_COLOR: Record<RunPhaseStatus, string> = {
-  queued: "var(--muted-foreground)",
-  running: "var(--primary)",
-  parked: "var(--warning)",
-  completed: "var(--success)",
-  failed: "var(--destructive)",
-  interrupted: "var(--warning)",
-  killed: "var(--destructive)",
-};
 
 // Poll interval for the live run-queue view. Cheap local IPC (reads
 // run-plan.yaml), so polling unconditionally — even before a plan exists —
@@ -741,23 +725,4 @@ function LiveRunActivity({ blocks, busy }: { blocks: ContentBlock[]; busy: boole
 function summarize(value: string, max: number) {
   const compact = value.replace(/\s+/g, " ").trim();
   return compact.length > max ? `${compact.slice(0, max)}…` : compact;
-}
-
-/** Extract structured AskUserQuestionSpec from a park_payload that contains
- *  a `__QUESTIONS__<json>__END__` marker written by the executor. */
-function parseParkedQuestions(reason?: string): { questions: AskUserQuestionSpec[] | null } {
-  if (!reason) return { questions: null };
-  const start = reason.indexOf("__QUESTIONS__");
-  const end = reason.indexOf("__END__");
-  if (start === -1 || end === -1 || end <= start) return { questions: null };
-  try {
-    const json = reason.slice(start + 14, end);
-    const parsed = JSON.parse(json);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return { questions: parsed as AskUserQuestionSpec[] };
-    }
-  } catch {
-    // JSON parse failed — fall through to plain text rendering.
-  }
-  return { questions: null };
 }

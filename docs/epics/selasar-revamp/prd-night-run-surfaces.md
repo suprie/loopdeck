@@ -69,30 +69,71 @@ restructuring for the drawer's layout._
 
 ### Phase 1 — Night drawer variant
 
-- [ ] `selasar-revamp/build-the-drawer-s-night-variant-phase-chip-rail-3-budget-gauges` Build the drawer's night variant (phase-chip rail + 3 budget gauges)
+- [x] Build the drawer's night variant (phase-chip rail + 3 budget gauges)
       sourced from the real `RunPlan`/`RunPhase`/`RunBudgets` types,
       reusing `RunQueuePanel.tsx`'s existing phase-row and
       parked-question-parsing logic rather than re-deriving shapes.
-- [ ] `selasar-revamp/build-the-inline-parked-question-card-question-text-answer` Build the inline parked-question card (question text + "Answer &
+      (2026-08-26: `NightRunTab.tsx` + `src/lib/nightRun.ts`; status maps +
+      parser relocated to a single shared source; `None` budget caps fall
+      back to TS mirrors of `limits.rs` defaults per run clarification.)
+- [x] Build the inline parked-question card (question text + "Answer &
       requeue" button) wired to the existing requeue IPC command already
       used by `RunQueuePanel.tsx`.
-- [ ] `selasar-revamp/wire-the-rail-door-s-night-run-indicator-and-the-drawer-s-variant` Wire the rail door's night-run indicator and the drawer's variant
+      (2026-08-26: `NightRunTab.tsx` parked-question inbox below the
+      rail/gauges, per the run's pre-answered clarification — structured
+      `__QUESTIONS__` payloads reuse the shared `AskUserQuestionCard` with
+      submit relabeled "Answer & requeue" → `answerParkedQuestion`; raw
+      payloads get a plain "Answer & requeue" button → `requeueRunPhase` +
+      `queueRun`, the exact `RunQueuePanel` Retry flow. New
+      `parkedInbox(plan)` in `lib/nightRun.ts` status-gates the cards.)
+- [x] Wire the rail door's night-run indicator and the drawer's variant
       selection to switch to this variant automatically when a project has
       an active `RunPlan`, per `prd-detail-drawer`'s spike decision on how
       "night run" is represented.
+      (2026-08-26: spike ADR-3 confirmed the rail's placeholder-derived
+      `hasActiveOrQueuedRun` flag as *the* representation — no new
+      `RunState` variant — so the door badge stays as built (comments
+      de-placeholdered); the missing half was drawer auto-selection:
+      `ProjectDrawer` now auto-selects the Agent tab (which swaps to
+      `NightRunTab`) once per continuous drawer-open span per project via
+      new `shouldAutoSelectNightVariant` in `lib/nightRun.ts` — a user who
+      navigates away mid-run is never yanked back.)
 
 ### Phase 2 — Plan-tonight wizard
 
-- [ ] `selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall` Build the 3-step wizard (phase picker with dependency labels + stall
+- [x] Build the 3-step wizard (phase picker with dependency labels + stall
       policy toggle + budget inputs → pre-flight interview text inputs with
       skip checkboxes → consent summary + required checkbox), reusing the
       existing pre-flight-interview and queue-time-consent IPC commands.
-- [ ] `selasar-revamp/wire-the-wizard-s-final-action-to-the-existing-queue-run-command` Wire the wizard's final action to the existing queue-run command,
+      (2026-08-28: `PlanTonightWizard.tsx` mounted from the drawer header's
+      `PlanTonightButton`. Per the run's pre-answered clarifications:
+      dependency labels come from new tested `dependencyLabel()` in
+      `lib/nightRun.ts` (mirrors `build_run_plan`'s authored-order
+      predecessor chain); `createRunPlan` fires on the 1→2 transition with
+      draft-PR consent pre-checked; step 2 runs live interviews inline
+      (Run-interview/Skip controls — parked `AskUserQuestion` cards render
+      inline by polling the shared pending-question slot, answer fields are
+      the "text inputs"); step 3's required checkbox gates only the final
+      action.)
+- [x] Wire the wizard's final action to the existing queue-run command,
       confirming the phase/budget/consent payload shape matches what
       `run_executor.rs` expects.
-- [ ] `selasar-revamp/add-the-plan-tonight-entry-point-to-the-drawer-header-gated-on-the` Add the "Plan tonight" entry point to the drawer header, gated on the
+      (2026-08-28: Start button calls the same `queueRun` IPC
+      RunQueuePanel's Start uses. Payload-shape confirmation: `queue_run`
+      takes only the project path and re-reads `run-plan.yaml` — the
+      phase/budget/consent shape was fixed by `createRunPlan` at the 1→2
+      transition, so no new payload crosses the boundary. Button gating
+      mirrors `queue_run`'s pending-interview guard; on resolve the wizard
+      closes and auto-switches to the Agent tab, which the runStatus poll
+      swaps for the night variant.)
+- [x] Add the "Plan tonight" entry point to the drawer header, gated on the
       project having queueable PRD phases (mirroring whatever gate
       `EpicsPanel.tsx` currently uses).
+      (2026-08-26: `PlanTonightButton` in `ProjectDrawer.tsx`'s header, gated
+      by new `hasQueueablePhases(epics)` in `lib/nightRun.ts` — the picker
+      checkbox's exact `!done && !noId` condition as a shared tested helper.
+      Per the run's pre-answered clarification, the button holds local
+      open/close state only until items 1-2's wizard exists.)
 
 ### Phase 3 — Morning report drawer
 

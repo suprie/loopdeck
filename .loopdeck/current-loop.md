@@ -1,1 +1,1 @@
-Selasar revamp — prd-rebrand-tokens complete (Phases 1-3): tokens, full rebrand to Selasar, and Phase-3 verification (visual pass fixed 6 WCAG contrast defects; tsc clean; Selasar title confirmed)
+Night-run wizard wiring BLOCKED — run-plan order runs it before the wizard loop; parked for human
