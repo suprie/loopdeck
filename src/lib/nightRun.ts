@@ -176,6 +176,22 @@ export function hasQueueablePhases(epics: Epic[]): boolean {
   return false;
 }
 
+/** Dependency label for one selected phase in the plan-tonight wizard's
+ *  picker (prd-night-run-surfaces Phase 2, item 1). Mirrors
+ *  `run_executor.rs::build_run_plan`'s authored-order default: phase 0 has no
+ *  dependencies, every later phase depends on its immediate predecessor in
+ *  selection order. The wizard shows these labels so the picker's checkbox
+ *  order visibly IS the dependency chain the run will execute under. */
+export function dependencyLabel(
+  index: number,
+  selectedIds: string[],
+  idToTitle: Record<string, string>,
+): string {
+  if (index <= 0) return "runs first — no dependencies";
+  const prev = selectedIds[index - 1];
+  return `depends on ${idToTitle[prev] ?? prev}`;
+}
+
 /** Seconds → `"Xh Ym"` past an hour, else `"Xm Ys"`, else `"Ys"`. */
 export function formatDuration(secs: number): string {
   if (secs >= 3600) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;

@@ -32,6 +32,7 @@ import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
 import { NightRunTab } from "./NightRunTab";
+import { PlanTonightWizard } from "./PlanTonightWizard";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
@@ -45,6 +46,7 @@ import type {
   AskUserQuestionAnswers,
   ApprovalDecision,
   DetailTab,
+  Epic,
   PlanApprovalDecision,
   ProjectEntry,
 } from "../../types";
@@ -486,50 +488,54 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
  * "Plan tonight" button in the drawer header (prd-night-run-surfaces Phase 2
  * item 3). Gated on the project having queueable PRD phases — the same
  * `!done && !noId` gate EpicsPanel's overnight-run picker checkboxes use, via
- * the shared `hasQueueablePhases`.
- *
- * The 3-step wizard this opens is this phase's items 1-2 (separate loops);
- * until it exists the button only holds local open/close state, per the
- * pre-answered clarification in the run plan: no modal content yet. Renders
- * null when nothing is queueable.
+ * the shared `hasQueueablePhases`. Opens the 3-step wizard (this phase's
+ * items 1-2). Renders null when nothing is queueable.
  */
 function PlanTonightButton({ projectPath }: { projectPath: string }) {
   const [open, setOpen] = useState(false);
-  const [queueable, setQueueable] = useState(false);
+  const [epics, setEpics] = useState<Epic[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     api.getEpics(projectPath)
-      .then((epics) => {
-        if (!cancelled) setQueueable(hasQueueablePhases(epics));
+      .then((loaded) => {
+        if (!cancelled) setEpics(loaded);
       })
       .catch(() => {
         // Gate closed on fetch failure — the entry point simply doesn't show.
-        if (!cancelled) setQueueable(false);
+        if (!cancelled) setEpics(null);
       });
     return () => {
       cancelled = true;
     };
   }, [projectPath]);
 
-  if (!queueable) return null;
+  if (!epics || !hasQueueablePhases(epics)) return null;
 
   return (
-    <button
-      type="button"
-      onClick={() => setOpen((v) => !v)}
-      aria-expanded={open}
-      title="Plan an overnight run"
-      className={cn(
-        "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
-        open
-          ? "border-[var(--primary)] text-[var(--primary)]"
-          : "border-border text-foreground hover:bg-accent",
-      )}
-    >
-      <Moon size={12} />
-      Plan tonight
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-expanded={open}
+        title="Plan an overnight run"
+        className={cn(
+          "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
+          open
+            ? "border-[var(--primary)] text-[var(--primary)]"
+            : "border-border text-foreground hover:bg-accent",
+        )}
+      >
+        <Moon size={12} />
+        Plan tonight
+      </button>
+      <PlanTonightWizard
+        projectPath={projectPath}
+        epics={epics}
+        open={open}
+        onOpenChange={setOpen}
+      />
+    </>
   );
 }
 

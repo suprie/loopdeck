@@ -9,6 +9,7 @@ import {
   parkedInbox,
   shouldAutoSelectNightVariant,
   hasQueueablePhases,
+  dependencyLabel,
   DEFAULT_RUN_PHASE_TOKEN_CAP,
   DEFAULT_RUN_PHASE_WALL_CLOCK_SECS,
   DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS,
@@ -239,4 +240,20 @@ test("hasQueueablePhases: mirrors EpicsPanel's picker gate (!done && !noId)", ()
   // …and an empty tree doesn't.
   assert.equal(hasQueueablePhases([]), false);
   assert.equal(hasQueueablePhases([epicWithLoops([])]), false);
+});
+
+test("dependencyLabel: mirrors build_run_plan's authored-order predecessor chain", () => {
+  const selected = ["prd/a", "prd/b", "prd/c"];
+  const idToTitle = { "prd/a": "Loop A", "prd/b": "Loop B", "prd/c": "Loop C" };
+
+  // Phase 0 has no dependencies…
+  assert.equal(dependencyLabel(0, selected, idToTitle), "runs first — no dependencies");
+  // …every later phase depends on its immediate predecessor in selection order.
+  assert.equal(dependencyLabel(1, selected, idToTitle), "depends on Loop A");
+  assert.equal(dependencyLabel(2, selected, idToTitle), "depends on Loop B");
+  // Reordering the selection re-chains the labels — order IS the dependency.
+  const reordered = ["prd/c", "prd/a"];
+  assert.equal(dependencyLabel(1, reordered, idToTitle), "depends on Loop C");
+  // Unknown titles fall back to the raw execution ID.
+  assert.equal(dependencyLabel(1, ["prd/x", "prd/y"], {}), "depends on prd/x");
 });
