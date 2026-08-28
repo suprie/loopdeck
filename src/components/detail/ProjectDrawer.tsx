@@ -14,6 +14,8 @@ import {
   Layers,
   Bot,
   Network,
+  X,
+  ChevronDown,
   Moon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -383,7 +385,24 @@ function DecisionsTabContent({
 function StuckQuestionCallout({ projectPath }: { projectPath: string }) {
   const pending = usePendingInteractions((s) => s.questions[projectPath] ?? null);
   const clearQuestion = usePendingInteractions((s) => s.clearQuestion);
-  if (!pending) return null;
+
+  // Per-request_id UI mode. The full `AskUserQuestionCard` for a
+  // multi-question prompt is tall enough to bury the whole drawer (the
+  // "hard to read" complaint), so a question renders COLLAPSED first: a
+  // one-line strip with an Answer button and a dismiss control. Dismissed
+  // hides THIS request only — a new question (different request_id, e.g.
+  // the agent re-asking after the turn continues) resets to collapsed.
+  // Keying the mode by request_id means a re-ask never inherits the old
+  // decision.
+  const [ui, setUi] = useState<{
+    id: string;
+    mode: "collapsed" | "expanded" | "dismissed";
+  } | null>(null);
+  // `ui &&` guards the null case: with both nullish, `ui?.id === pending?.requestId`
+  // would be `undefined === undefined` (true) and dereference a null `ui`.
+  const mode = ui && ui.id === pending?.requestId ? ui.mode : "collapsed";
+
+  if (!pending || mode === "dismissed") return null;
 
   async function onSubmit(answers: AskUserQuestionAnswers) {
     try {
@@ -397,8 +416,46 @@ function StuckQuestionCallout({ projectPath }: { projectPath: string }) {
     clearQuestion(projectPath);
   }
 
+  if (mode === "collapsed") {
+    const first = pending.questions[0]?.question ?? "";
+    return (
+      <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/5 px-6 py-2">
+        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
+        <span className="min-w-0 flex-1 truncate text-xs text-foreground/90">
+          Agent question waiting
+          {pending.questions.length > 1 && ` · ${pending.questions.length} questions`}
+          {first && <span className="text-muted-foreground"> — {first}</span>}
+        </span>
+        <button
+          type="button"
+          onClick={() => setUi({ id: pending.requestId, mode: "expanded" })}
+          className="h-7 shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 transition hover:bg-amber-500/20 dark:text-amber-400"
+        >
+          Answer
+        </button>
+        <IconButton
+          label="Hide this question until a new one arrives"
+          onClick={() => setUi({ id: pending.requestId, mode: "dismissed" })}
+        >
+          <X className="size-3.5" />
+        </IconButton>
+      </div>
+    );
+  }
+
   return (
     <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/5 px-6 py-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-primary">
+          The agent has a question for you
+        </span>
+        <IconButton
+          label="Collapse to a one-line banner"
+          onClick={() => setUi({ id: pending.requestId, mode: "collapsed" })}
+        >
+          <ChevronDown className="size-3.5" />
+        </IconButton>
+      </div>
       <div className="max-h-[45vh] overflow-y-auto">
         <AskUserQuestionCard questions={pending.questions} onSubmit={onSubmit} />
       </div>

@@ -53,6 +53,7 @@ export function RunQueuePanel({
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [retryingAll, setRetryingAll] = useState(false);
   const [answeringId, setAnsweringId] = useState<string | null>(null);
   const [runActive, setRunActive] = useState(false);
   const [report, setReport] = useState<RunReport | null>(null);
@@ -157,6 +158,24 @@ export function RunQueuePanel({
     }
   };
 
+  const handleRetryFailed = async () => {
+    setRetryingAll(true);
+    try {
+      const updated = await api.requeueFailedRunPhases(projectPath);
+      setPlan(updated);
+      useStreamingState.getState().beginTurn(projectPath);
+      await api.queueRun(projectPath);
+      toast.success("Failed phases restarted as one combined run");
+      await loadPlan();
+    } catch (err) {
+      useStreamingState.getState().clear(projectPath);
+      const appErr = err as AppError;
+      toast.error("Failed to retry phases", { description: appErr.message ?? String(err) });
+    } finally {
+      setRetryingAll(false);
+    }
+  };
+
   const handleAnswerParked = async (
     executionId: string,
     answers: Parameters<typeof api.agentAnswerQuestion>[2],
@@ -218,6 +237,10 @@ export function RunQueuePanel({
   };
 
   const isRunning = runActive;
+  const retryableCount =
+    plan?.phases.filter((p) =>
+      ["parked", "failed", "interrupted", "killed"].includes(p.status),
+    ).length ?? 0;
   const hasQueuedPhase = plan?.phases.some((p) => p.status === "queued") ?? false;
   const hasPendingInterview =
     plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
@@ -325,19 +348,36 @@ export function RunQueuePanel({
                 Cancel run
               </button>
             ) : (
-              <button
-                onClick={handleStartRun}
-                disabled={!canStart || starting}
-                title={startDisabledReason}
-                className="flex items-center gap-1.5 rounded-md bg-[var(--primary)] px-2.5 py-1 text-[11px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {starting ? (
-                  <Loader2 size={11} className="animate-spin" />
-                ) : (
-                  <Play size={11} />
+              <div className="flex items-center gap-1.5">
+                {retryableCount > 0 && (
+                  <button
+                    onClick={handleRetryFailed}
+                    disabled={retryingAll}
+                    title={`Requeue all ${retryableCount} parked/failed phase(s) and restart the run as one combined session`}
+                    className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {retryingAll ? (
+                      <Loader2 size={11} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={11} />
+                    )}
+                    Retry failed ({retryableCount})
+                  </button>
                 )}
-                Start run
-              </button>
+                <button
+                  onClick={handleStartRun}
+                  disabled={!canStart || starting}
+                  title={startDisabledReason}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--primary)] px-2.5 py-1 text-[11px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {starting ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <Play size={11} />
+                  )}
+                  Start run
+                </button>
+              </div>
             )}
           </div>
 

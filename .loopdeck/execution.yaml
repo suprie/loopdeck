@@ -1,14 +1,5 @@
 schema_version: 1
-revision: 5
-current:
-  id: selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
-  title: Decide whether the drawer stays URL-backed (route or query-param
-  origin:
-    epic: selasar-revamp
-    prd: prd-detail-drawer
-    phase: 'Phase 1 — Spike: drawer routing model + tab relocation'
-  started_at: 2026-08-23T10:54:32.189413Z
-  attempt: 1
+revision: 18
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -32,3 +23,64 @@ history:
   completed_at: 2026-08-21T06:16:06.455730Z
   attempt: 1
   reason: no verify verdict found in the turn's final response
+- id: selasar-revamp/build-the-drawer-s-night-variant-phase-chip-rail-3-budget-gauges
+  title: Build the drawer's night variant (phase-chip rail + 3 budget gauges)
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 1 — Night drawer variant
+  outcome: completed
+  started_at: 2026-08-26T05:19:46.534139Z
+  completed_at: 2026-08-26T05:37:16.938066Z
+  attempt: 1
+- id: selasar-revamp/build-the-inline-parked-question-card-question-text-answer
+  title: Build the inline parked-question card (question text + "Answer &
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 1 — Night drawer variant
+  outcome: completed
+  started_at: 2026-08-26T05:46:04.106364Z
+  completed_at: 2026-08-26T05:54:39.061634Z
+  attempt: 1
+- id: selasar-revamp/wire-the-rail-door-s-night-run-indicator-and-the-drawer-s-variant
+  title: Wire the rail door's night-run indicator and the drawer's variant
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 1 — Night drawer variant
+  outcome: completed
+  started_at: 2026-08-26T06:03:33.872723Z
+  completed_at: 2026-08-26T06:12:58.585252Z
+  attempt: 1
+- id: selasar-revamp/add-the-plan-tonight-entry-point-to-the-drawer-header-gated-on-the
+  title: Add the "Plan tonight" entry point to the drawer header, gated on the
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 2 — Plan-tonight wizard
+  outcome: completed
+  started_at: 2026-08-26T06:13:05.044724Z
+  completed_at: 2026-08-26T06:20:49.950819Z
+  attempt: 1
+- id: selasar-revamp/wire-the-wizard-s-final-action-to-the-existing-queue-run-command
+  title: Wire the wizard's final action to the existing queue-run command,
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 2 — Plan-tonight wizard
+  outcome: abandoned
+  started_at: 2026-08-26T06:24:25.535229Z
+  completed_at: 2026-08-26T06:28:48.208943Z
+  attempt: 1
+  reason: 'verify verdict: BLOCK'
+- id: selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall
+  title: Build the 3-step wizard (phase picker with dependency labels + stall
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 2 — Plan-tonight wizard
+  outcome: completed
+  started_at: 2026-08-27T23:09:05.945887Z
+  completed_at: 2026-08-27T23:19:08.443271Z
+  attempt: 1

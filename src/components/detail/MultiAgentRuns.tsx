@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
-import { Bot, Loader2, Play, RotateCcw, Square, Workflow } from "lucide-react";
+import { Bot, ChevronDown, ChevronRight, Loader2, Play, RotateCcw, Square, Workflow } from "lucide-react";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
 import type {
@@ -34,6 +34,34 @@ const MAX_ASSIGNED_AGENTS = 8;
 
 function statusLabel(status: MultiAgentRunStatus): string {
   return status === "done" ? "completed" : status;
+}
+
+/** Terminal runs no longer need attention — they collapse to a compact row. */
+function isTerminal(status: MultiAgentRunStatus): boolean {
+  return status === "done" || status === "failed" || status === "cancelled";
+}
+
+/** Short relative time for collapsed run rows ("3m ago"). */
+function fmtAgo(iso: string | null): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms)) return "";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/** One-line outcome preview for a collapsed run row: an error if any sub-run
+ *  failed, else the first sub-run result. */
+function runOutcomePreview(run: MultiAgentRun): { text: string; isError: boolean } | null {
+  const failed = run.sub_runs.find((subRun) => subRun.error);
+  if (failed?.error) return { text: failed.error, isError: true };
+  const succeeded = run.sub_runs.find((subRun) => subRun.result);
+  if (succeeded?.result) return { text: succeeded.result, isError: false };
+  return null;
 }
 
 function modelLabel(subRun: MultiAgentSubRun): string {
@@ -98,6 +126,19 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
   const [starting, setStarting] = useState(false);
   const [controlling, setControlling] = useState<string | null>(null);
   const [pendingEvents, setPendingEvents] = useState<Record<string, ClaudeEvent | undefined>>({});
+  // Run ids the user explicitly expanded. Terminal runs render collapsed
+  // unless present here; non-terminal runs always render expanded (they may
+  // still need attention — running, or parked on a question/approval).
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+
+  const toggleRunExpanded = (runId: string) => {
+    setExpandedRunIds((current) => {
+      const next = new Set(current);
+      if (current.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+  };
 
   const eventKey = (runId: string, agentId: string) => `${runId}:${agentId}`;
 
@@ -264,7 +305,12 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
   }, [projectPath, setError]);
 
   return (
-    <section className="mb-3 rounded-lg border border-border bg-card/60 p-3 shrink-0">
+    // The section is capped at 45% of the agent panel's column so the
+    // conversation below (Chat is `flex-1`) always keeps the majority of the
+    // panel — run cards, questions and approvals scroll inside instead of
+    // stacking up and crowding the transcript out.
+    <section className="mb-3 flex min-h-0 max-h-[45%] shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-card/60">
+      <div className="shrink-0 p-3 pb-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
@@ -322,33 +368,62 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
           {selectedIds.length >= MAX_ASSIGNED_AGENTS ? ` (maximum ${MAX_ASSIGNED_AGENTS})` : ""}
         </p>
       ) : null}
+      </div>
 
-      {runs.slice(0, 3).map((run) => (
-        <div key={run.id} className="mt-3 border-t border-border pt-3">
-          <div className="mb-2 flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span className="font-mono">{run.id}</span>
-            <Status status={run.status} />
+      <div className="min-h-0 overflow-y-auto px-3 pb-3">
+      {runs.slice(0, 3).map((run) => {
+        const expanded = !isTerminal(run.status) || expandedRunIds.has(run.id);
+        const outcome = runOutcomePreview(run);
+        const agentNames = run.sub_runs.map((subRun) => subRun.agent_name).join(", ");
+        return (
+          <div key={run.id} className="mt-3 border-t border-border pt-3">
+            <button
+              type="button"
+              onClick={() => toggleRunExpanded(run.id)}
+              title={run.id}
+              className="flex w-full items-center gap-2 text-left text-[11px] text-muted-foreground"
+            >
+              {expanded ? (
+                <ChevronDown className="size-3 shrink-0" />
+              ) : (
+                <ChevronRight className="size-3 shrink-0" />
+              )}
+              <span className="min-w-0 truncate">{agentNames}</span>
+              <Status status={run.status} />
+              <span className="ml-auto shrink-0">{fmtAgo(run.completed_at ?? run.started_at)}</span>
+            </button>
+            {expanded ? (
+              <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                {run.sub_runs.map((subRun) => (
+                  <SubRunCard
+                    key={subRun.id}
+                    run={run}
+                    subRun={subRun}
+                    controlling={controlling}
+                    pendingEvent={pendingEvents[eventKey(run.id, subRun.agent_id)]}
+                    onControlResolved={() =>
+                      setPendingEvents((current) => ({
+                        ...current,
+                        [eventKey(run.id, subRun.agent_id)]: undefined,
+                      }))
+                    }
+                    onControl={control}
+                  />
+                ))}
+              </div>
+            ) : outcome ? (
+              <p
+                className={`mt-1 truncate pl-5 text-[11px] leading-relaxed ${
+                  outcome.isError ? "text-destructive" : "text-foreground/70"
+                }`}
+              >
+                {outcome.text}
+              </p>
+            ) : null}
           </div>
-          <div className="grid gap-2 lg:grid-cols-2">
-            {run.sub_runs.map((subRun) => (
-              <SubRunCard
-                key={subRun.id}
-                run={run}
-                subRun={subRun}
-                controlling={controlling}
-                pendingEvent={pendingEvents[eventKey(run.id, subRun.agent_id)]}
-                onControlResolved={() =>
-                  setPendingEvents((current) => ({
-                    ...current,
-                    [eventKey(run.id, subRun.agent_id)]: undefined,
-                  }))
-                }
-                onControl={control}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
+      </div>
     </section>
   );
 }
@@ -374,6 +449,19 @@ function SubRunCard({
 }) {
   const interruptKey = `${run.id}:${subRun.agent_id}:interrupt`;
   const retryKey = `${run.id}:${subRun.agent_id}:retry`;
+
+  // Question-card expansion, tracked per request_id. A newly-arrived question
+  // renders as a compact one-line strip — several waiting agents each holding
+  // a full multi-option question card bury the whole panel, and the
+  // completed/running cards below become unreadable. Expanding applies to
+  // THIS request only; a re-ask (new request_id) starts collapsed again.
+  const [questionUi, setQuestionUi] = useState<{ id: string; open: boolean } | null>(null);
+  const questionOpen =
+    pendingEvent?.type === "ask_user_question" &&
+    questionUi?.id === pendingEvent.request_id
+      ? questionUi.open
+      : false;
+
   return (
     <article className="rounded-md border border-border bg-background/60 p-3">
       <div className="flex items-start justify-between gap-2">
@@ -390,14 +478,36 @@ function SubRunCard({
       {subRun.result ? <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-foreground/80">{subRun.result}</p> : null}
       {subRun.error ? <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-destructive">{subRun.error}</p> : null}
       {pendingEvent?.type === "ask_user_question" && subRun.worktree ? (
-        <AskUserQuestionCard
-          questions={pendingEvent.questions}
-          onSubmit={(answers: AskUserQuestionAnswers) => {
-            void api
-              .agentAnswerQuestion(subRun.worktree!, pendingEvent.request_id, answers)
-              .then(onControlResolved);
-          }}
-        />
+        questionOpen ? (
+          <AskUserQuestionCard
+            questions={pendingEvent.questions}
+            onSubmit={(answers: AskUserQuestionAnswers) => {
+              void api
+                .agentAnswerQuestion(subRun.worktree!, pendingEvent.request_id, answers)
+                // Clear on failure too: `agent_answer_question` pops the
+                // backend slot before sending, so a rejected answer (turn
+                // already ended / timed out) leaves nothing pending — keeping
+                // the card would wedge it forever with no way to dismiss.
+                .catch((err) => console.warn("sub-run answer failed", err))
+                .finally(onControlResolved);
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setQuestionUi({ id: pendingEvent.request_id, open: true })}
+            className="mt-2 flex w-full items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-1.5 text-left transition hover:bg-amber-500/10"
+            title="Expand the question card"
+          >
+            <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
+            <span className="min-w-0 flex-1 truncate text-[11px] text-amber-600 dark:text-amber-400">
+              Question waiting
+              {pendingEvent.questions.length > 1 &&
+                ` · ${pendingEvent.questions.length} questions`}{" "}
+              — click to answer
+            </span>
+          </button>
+        )
       ) : null}
       {pendingEvent?.type === "permission_request" && subRun.worktree ? (
         <PermissionApprovalCard
@@ -406,7 +516,9 @@ function SubRunCard({
           onDecide={(decision) => {
             void api
               .agentAnswerPermission(subRun.worktree!, pendingEvent.request_id, decision)
-              .then(onControlResolved);
+              // Same clear-on-failure contract as the question card above.
+              .catch((err) => console.warn("sub-run approval failed", err))
+              .finally(onControlResolved);
           }}
         />
       ) : null}
@@ -416,7 +528,9 @@ function SubRunCard({
           onDecide={(decision) => {
             void api
               .agentAnswerPlan(subRun.worktree!, pendingEvent.request_id, decision)
-              .then(onControlResolved);
+              // Same clear-on-failure contract as the question card above.
+              .catch((err) => console.warn("sub-run plan decision failed", err))
+              .finally(onControlResolved);
           }}
         />
       ) : null}
