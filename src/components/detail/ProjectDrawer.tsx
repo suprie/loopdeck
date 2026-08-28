@@ -24,7 +24,11 @@ import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { useRunStatus } from "../../hooks/useRunStatus";
 import { hasActiveOrQueuedRun } from "../../lib/rail";
-import { shouldAutoSelectNightVariant, hasQueueablePhases } from "../../lib/nightRun";
+import {
+  shouldAutoSelectNightVariant,
+  hasQueueablePhases,
+  hasUnresolvedParkedQuestions,
+} from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
 import { EditDescription } from "./EditDescription";
@@ -34,6 +38,7 @@ import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
 import { NightRunTab } from "./NightRunTab";
+import { MorningReportTab } from "./MorningReportTab";
 import { PlanTonightWizard } from "./PlanTonightWizard";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
@@ -109,13 +114,28 @@ export function ProjectDrawer() {
   const nightPlan =
     runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
 
-  // prd-night-run-surfaces Phase 1 item 3: while the project has an
-  // active/queued run, the drawer auto-selects the Agent tab (swapped for the
-  // night variant below) — so opening a moon-badged rail door lands on the
-  // night variant, not whatever tab was last persisted. Once per continuous
-  // drawer-open span per project (`shouldAutoSelectNightVariant`'s latch): a
-  // user who navigates away mid-run isn't yanked back, and closing the drawer
-  // (or switching project) re-arms it.
+  // Morning-report variant selection (prd-night-run-surfaces Phase 3, item 1
+  // — the run's pre-answered "third auto-select variant"): once the run has
+  // finished but its report still has unresolved parked questions, the Agent
+  // tab swaps for the morning-report variant instead. Same flag the rail door
+  // and room card indicator use, so the badge and the surface it opens can
+  // never disagree. All parked resolved → back to the day variant.
+  const morningReady =
+    !!runStatus?.plan &&
+    !hasActiveOrQueuedRun(runStatus) &&
+    hasUnresolvedParkedQuestions(runStatus.plan);
+  // The plan driving whichever non-day variant is showing — what the
+  // auto-select latch below keys on (night while running, then the report).
+  const runVariantPlan = nightPlan ?? (morningReady ? runStatus!.plan : null);
+
+  // prd-night-run-surfaces Phase 1 item 3 (+ Phase 3's morning variant): while
+  // the project has an active/queued run — or, once finished, an unresolved
+  // morning report — the drawer auto-selects the Agent tab (swapped for the
+  // night/morning variant below) — so opening a moon- or sunrise-badged rail
+  // door lands on that variant, not whatever tab was last persisted. Once per
+  // continuous drawer-open span per project (`shouldAutoSelectNightVariant`'s
+  // latch): a user who navigates away isn't yanked back, and closing the
+  // drawer (or switching project) re-arms it.
   const switchedForPath = useRef<string | null>(null);
   useEffect(() => {
     if (!drawerOpen) {
@@ -127,7 +147,7 @@ export function ProjectDrawer() {
       shouldAutoSelectNightVariant({
         drawerOpen,
         projectPath,
-        nightPlan,
+        nightPlan: runVariantPlan,
         activeTopLevelTab: topLevelTab(activeTab),
         switchedForPath: switchedForPath.current,
       })
@@ -135,10 +155,10 @@ export function ProjectDrawer() {
       setActiveTab("agent");
     }
     // Latch even when already on the Agent tab — "auto-switched" means "this
-    // open already showed the night variant", which is also true if the user
+    // open already showed a run variant", which is also true if the user
     // landed there themselves.
-    if (nightPlan && projectPath) switchedForPath.current = projectPath;
-  }, [drawerOpen, project, nightPlan, activeTab, setActiveTab]);
+    if (runVariantPlan && projectPath) switchedForPath.current = projectPath;
+  }, [drawerOpen, project, runVariantPlan, activeTab, setActiveTab]);
 
   const handleRemove = () => {
     if (!project) return;
@@ -241,6 +261,8 @@ export function ProjectDrawer() {
               <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
                 {nightPlan ? (
                   <NightRunTab projectPath={project.path} plan={nightPlan} />
+                ) : morningReady ? (
+                  <MorningReportTab projectPath={project.path} />
                 ) : (
                   <AgentPanel projectPath={project.path} />
                 )}

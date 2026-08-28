@@ -10,6 +10,8 @@ import {
   shouldAutoSelectNightVariant,
   hasQueueablePhases,
   dependencyLabel,
+  hasUnresolvedParkedQuestions,
+  isUnresolvedParkedQuestion,
   DEFAULT_RUN_PHASE_TOKEN_CAP,
   DEFAULT_RUN_PHASE_WALL_CLOCK_SECS,
   DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS,
@@ -165,6 +167,52 @@ test("parkedInbox: one card per currently-parked phase, structured vs raw split"
   assert.deepEqual(cards[0].questions, spec);
   assert.equal(cards[1].phase.execution_id, "x/loop-2");
   assert.equal(cards[1].questions, null);
+});
+
+test("isUnresolvedParkedQuestion / hasUnresolvedParkedQuestions: mirror derive_verdict's Parked arm", () => {
+  // Parked with a question payload (structured or raw text) → unresolved.
+  assert.equal(
+    isUnresolvedParkedQuestion(phase({ status: "parked", park_payload: "stalled: need input" })),
+    true,
+  );
+  // Parked with a verify verdict → that's a verdict outcome, not an open question.
+  assert.equal(
+    isUnresolvedParkedQuestion(phase({ status: "parked", park_payload: "verify verdict: WARN" })),
+    false,
+  );
+  assert.equal(
+    isUnresolvedParkedQuestion(phase({ status: "parked", park_payload: "verify verdict: BLOCK" })),
+    false,
+  );
+  // Any other status → not a parked question, even with a lingering payload.
+  assert.equal(isUnresolvedParkedQuestion(phase({ status: "completed" })), false);
+  assert.equal(isUnresolvedParkedQuestion(phase({ status: "queued" })), false);
+
+  // The "morning report ready" flag: lit while any parked question remains…
+  assert.equal(
+    hasUnresolvedParkedQuestions(
+      plan({
+        phases: [
+          phase({ execution_id: "a", status: "completed" }),
+          phase({ execution_id: "b", status: "parked", park_payload: "waiting on you" }),
+        ],
+      }),
+    ),
+    true,
+  );
+  // …cleared once every parked question is resolved (requeued/completed).
+  assert.equal(
+    hasUnresolvedParkedQuestions(
+      plan({
+        phases: [
+          phase({ execution_id: "a", status: "completed" }),
+          phase({ execution_id: "b", status: "parked", park_payload: "verify verdict: WARN" }),
+        ],
+      }),
+    ),
+    false,
+  );
+  assert.equal(hasUnresolvedParkedQuestions(plan({ phases: [] })), false);
 });
 
 test("shouldAutoSelectNightVariant: once per drawer-open span, per project", () => {

@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Play, RotateCcw, Shield, Square as StopIcon, XCircle, Zap } from "lucide-react";
-import { AskUserQuestionCard } from "./AskUserQuestionCard";
+import { Activity, AlertTriangle, Loader2, Play, RotateCcw, Square as StopIcon, Zap } from "lucide-react";
 import { toast } from "sonner";
-import type { AppError, ContentBlock, PhaseVerdict, RunBudgets, RunPhase, RunPlan, RunReport, StallPolicy } from "../../types";
+import type { AppError, ContentBlock, RunBudgets, RunPhase, RunPlan, RunReport, StallPolicy } from "../../types";
 import * as api from "../../lib/tauri";
 import {
-  parseParkedQuestions,
   STATUS_COLOR,
   STATUS_LABEL,
 } from "../../lib/nightRun";
+import { MorningReportView } from "./MorningReportView";
 import { useStreamingState } from "../../store/streamingState";
 import {
   Select,
@@ -403,9 +402,11 @@ export function RunQueuePanel({
         </div>
       )}
 
-      {/* Morning report — rendered when the run is finished and report data is loaded */}
+      {/* Morning report — rendered when the run is finished and report data is
+          loaded. Shared view (extracted per prd-night-run-surfaces Phase 3):
+          the drawer's morning-report variant renders the same component. */}
       {report && !runActive && (
-        <MorningReport
+        <MorningReportView
           report={report}
           idToTitle={idToTitle}
           onRetry={handleRetry}
@@ -415,198 +416,6 @@ export function RunQueuePanel({
         />
       )}
     </>
-  );
-}
-
-// ── Morning Report (prd-wake-up Phase 2) ────────────────────────────────────
-
-const VERDICT_LABEL: Record<PhaseVerdict, string> = {
-  pass: "PASS",
-  warn: "WARN",
-  block: "BLOCK",
-  killed: "KILLED",
-  failed: "FAILED",
-  parked: "PARKED",
-  running: "RUNNING",
-};
-
-const VERDICT_COLOR: Record<PhaseVerdict, string> = {
-  pass: "var(--success)",
-  warn: "var(--warning)",
-  block: "var(--destructive)",
-  killed: "var(--destructive)",
-  failed: "var(--destructive)",
-  parked: "var(--warning)",
-  running: "var(--primary)",
-};
-
-function MorningReport({
-  report,
-  idToTitle,
-  onRetry,
-  retryingId,
-  onAnswerParked,
-  answeringId,
-}: {
-  report: RunReport;
-  idToTitle: Record<string, string>;
-  onRetry: (executionId: string) => void;
-  retryingId: string | null;
-  onAnswerParked: (
-    executionId: string,
-    answers: import("../../types").AskUserQuestionAnswers,
-  ) => void;
-  answeringId: string | null;
-}) {
-  const parked = report.phases.filter((p) => p.verdict === "parked");
-  const killed = report.phases.filter((p) => p.verdict === "killed");
-  const passed = report.phases.filter((p) => p.verdict === "pass");
-
-  return (
-    <div className="mb-4 rounded-lg border border-border bg-card p-3">
-      {/* Summary bar */}
-      <div className="mb-3 flex items-center gap-2 text-xs">
-        <span className="font-semibold text-foreground">Morning Report</span>
-        <span className="text-[10px] text-muted-foreground">
-          {report.plan.phases.length} phase{report.plan.phases.length !== 1 ? "s" : ""}
-        </span>
-        <span className="ml-auto flex items-center gap-3 text-[10px] text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <CheckCircle2 size={11} className="text-[var(--success)]" />
-            {passed.length} passed
-          </span>
-          <span className="flex items-center gap-1">
-            <AlertTriangle size={11} className="text-[var(--warning)]" />
-            {parked.length} parked
-          </span>
-          <span className="flex items-center gap-1">
-            <XCircle size={11} className="text-[var(--destructive)]" />
-            {killed.length} killed
-          </span>
-          {report.audit.auto_allow_count > 0 && (
-            <span className="flex items-center gap-1">
-              <Shield size={11} />
-              {report.audit.auto_allow_count} auto-allowed
-            </span>
-          )}
-        </span>
-      </div>
-
-      {/* Per-phase verdict table */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground">
-              <th className="px-1.5 py-1 text-left font-medium">Phase</th>
-              <th className="px-1.5 py-1 text-left font-medium">Verdict</th>
-              <th className="px-1.5 py-1 text-right font-medium">Tokens</th>
-              <th className="px-1.5 py-1 text-right font-medium">Wall Time</th>
-              <th className="px-1.5 py-1 text-left font-medium">Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {report.phases.map((phase) => (
-              <tr key={phase.execution_id} className="border-b border-border/50">
-                <td className="max-w-48 truncate px-1.5 py-1.5 text-foreground" title={phase.execution_id}>
-                  {idToTitle[phase.execution_id] ?? phase.execution_id}
-                </td>
-                <td className="px-1.5 py-1.5">
-                  <span
-                    className="rounded px-1.5 py-0.5 text-[10px] font-semibold"
-                    style={{ color: VERDICT_COLOR[phase.verdict] }}
-                  >
-                    {VERDICT_LABEL[phase.verdict]}
-                  </span>
-                </td>
-                <td className="px-1.5 py-1.5 text-right tabular-nums text-muted-foreground">
-                  {phase.token_usage > 0 ? phase.token_usage.toLocaleString() : "—"}
-                </td>
-                <td className="px-1.5 py-1.5 text-right tabular-nums text-muted-foreground">
-                  {phase.wall_clock_secs > 0 ? `${Math.floor(phase.wall_clock_secs / 60)}m ${phase.wall_clock_secs % 60}s` : "—"}
-                </td>
-                <td className="max-w-64 px-1.5 py-1.5 text-muted-foreground">
-                  {phase.draft_pr_url ? (
-                    <a
-                      href={phase.draft_pr_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[var(--primary)] hover:underline"
-                    >
-                      <ExternalLink size={10} />
-                      Draft PR
-                    </a>
-                  ) : phase.reason ? (
-                    <span className="truncate block" title={phase.reason}>
-                      {phase.reason.length > 80 ? `${phase.reason.slice(0, 80)}…` : phase.reason}
-                    </span>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Parked-question inbox */}
-      {parked.length > 0 && (
-        <div className="mt-3 border-t border-border pt-3">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Parked questions ({parked.length})
-          </div>
-          <ul className="space-y-2">
-            {parked.map((phase) => {
-              const parsed = parseParkedQuestions(phase.reason);
-              return (
-                <li key={phase.execution_id} className="rounded bg-amber-500/5 px-2 py-1.5">
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-medium text-foreground">
-                      {idToTitle[phase.execution_id] ?? phase.execution_id}
-                    </span>
-                    <button
-                      onClick={() => onRetry(phase.execution_id)}
-                      disabled={retryingId === phase.execution_id}
-                      className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)] transition-colors hover:bg-accent disabled:opacity-50"
-                    >
-                      {retryingId === phase.execution_id ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} />}
-                      Retry
-                    </button>
-                  </div>
-                  {parsed.questions ? (
-                    <AskUserQuestionCard
-                      questions={parsed.questions}
-                      disabled={answeringId === phase.execution_id}
-                      onSubmit={(answers) =>
-                        onAnswerParked(phase.execution_id, answers)
-                      }
-                    />
-                  ) : phase.reason ? (
-                    <p className="break-words text-[11px] text-muted-foreground">{phase.reason}</p>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-
-      {/* Audit slice summary */}
-      {report.audit.floor_denials.length > 0 && (
-        <div className="mt-3 border-t border-border pt-3">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--destructive)]">
-            Floor denials ({report.audit.floor_denials.length})
-          </div>
-          <ul className="space-y-1">
-            {report.audit.floor_denials.map((denial, i) => (
-              <li key={i} className="rounded bg-red-500/5 px-2 py-1 font-mono text-[10px] text-muted-foreground">
-                {denial}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
   );
 }
 

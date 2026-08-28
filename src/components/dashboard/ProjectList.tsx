@@ -1,11 +1,17 @@
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Sunrise } from "lucide-react";
 import type { ProjectEntry } from "../../types";
 import { relativeTime } from "../../lib/time";
 import { cn } from "../../lib/utils";
+import type { RunIndicators } from "../../hooks/useRunIndicators";
 
 interface ProjectListProps {
   projects: ProjectEntry[];
   onSelect: (project: ProjectEntry) => void;
+  /** Per-path run badges (night/morning), from the Dashboard's shared poll.
+   *  Only the morning flag is rendered here — the room card's state pill
+  //  already covers in-flight work; the sunrise chip is the "morning report
+  //  ready" attention signal (prd-night-run-surfaces Phase 3, item 2). */
+  runIndicators?: Record<string, RunIndicators>;
 }
 
 // ── Per-project gradient accents ────────────────────────────────────────────
@@ -71,7 +77,7 @@ function focusMeta(p: ProjectEntry): string {
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export function ProjectList({ projects, onSelect }: ProjectListProps) {
+export function ProjectList({ projects, onSelect, runIndicators }: ProjectListProps) {
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card">
       <div className="hidden grid-cols-[minmax(178px,0.85fr)_minmax(220px,1.18fr)_128px_18px] items-center gap-4 border-b border-border px-6 py-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 md:grid">
@@ -87,6 +93,7 @@ export function ProjectList({ projects, onSelect }: ProjectListProps) {
         const pill = statePill(project);
         const meta = focusMeta(project);
         const title = project.current_loop || "No current loop";
+        const morningReady = runIndicators?.[project.path]?.morning ?? false;
 
         return (
           <article
@@ -123,6 +130,17 @@ export function ProjectList({ projects, onSelect }: ProjectListProps) {
             </div>
 
             <div className="hidden md:block">
+              {/* "Morning report ready" chip — the room-card indicator
+                  (prd-night-run-surfaces Phase 3, item 2). Clicking anywhere
+                  on the row opens the drawer auto-selected onto the
+                  morning-report variant; the chip stays until every parked
+                  question in the report is resolved. */}
+              {morningReady && (
+                <span className="mb-1 inline-flex w-fit items-center gap-1.5 rounded-full bg-[color-mix(in_oklab,var(--primary)_13%,transparent)] px-2.5 py-1 text-[10.5px] font-semibold text-primary">
+                  <Sunrise className="size-3" />
+                  Morning report
+                </span>
+              )}
               <span
                 className={cn(
                   "inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10.5px] font-semibold before:inline-block before:size-1.5 before:rounded-full before:bg-current before:content-['']",

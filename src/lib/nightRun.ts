@@ -146,6 +146,27 @@ export function shouldAutoSelectNightVariant(args: {
   return args.activeTopLevelTab !== "agent";
 }
 
+/** Whether one phase is an *unresolved parked question* — the exact TS mirror
+ *  of `runplan.rs::derive_verdict`'s `Parked` arm: a `parked` phase whose
+ *  payload doesn't carry a verify verdict (BLOCK/WARN parks are verdict
+ *  outcomes, not open questions). Gates the "morning report ready" signal, so
+ *  the indicator (per the Phase 3 clarification) stays lit until every parked
+ *  question in the report is resolved — requeuing flips the status, which
+ *  clears the flag on the next poll. */
+export function isUnresolvedParkedQuestion(phase: RunPhase): boolean {
+  if (phase.status !== "parked") return false;
+  const payload = phase.park_payload ?? "";
+  return !payload.includes("verdict: BLOCK") && !payload.includes("verdict: WARN");
+}
+
+/** The "morning report ready" signal (prd-night-run-surfaces Phase 3, item 2):
+ *  a finished run whose report still has unresolved parked questions. Derived
+ *  from the same `getRunStatus` plan the rail doors and drawer already poll —
+ *  no report fetch needed for the boolean. */
+export function hasUnresolvedParkedQuestions(plan: RunPlan): boolean {
+  return plan.phases.some(isUnresolvedParkedQuestion);
+}
+
 /** Fill percentage for a gauge bar, clamped to [0, 100] — a blown cap pins
  *  the bar full rather than overflowing the track. */
 export function gaugePercent(used: number, cap: number): number {

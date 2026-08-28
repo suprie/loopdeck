@@ -1,10 +1,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutGrid, Moon, Pin, PinOff, Settings } from "lucide-react";
+import { LayoutGrid, Moon, Pin, PinOff, Settings, Sunrise } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/appStore";
 import { useProjects } from "@/hooks/useProjects";
-import { useNightRunStatuses } from "@/hooks/useNightRunStatuses";
+import { useRunIndicators } from "@/hooks/useRunIndicators";
 import { doorInitials, selectRailDoors } from "@/lib/rail";
 import type { ProjectEntry, RunState } from "@/types";
 import {
@@ -41,12 +41,12 @@ const RUN_STATE_TEXT: Record<RunState, string> = {
 function Door({
   project,
   active,
-  nightRun,
+  indicators,
   onSelect,
 }: {
   project: ProjectEntry;
   active: boolean;
-  nightRun: boolean;
+  indicators: { night: boolean; morning: boolean };
   onSelect: () => void;
 }) {
   const { setPinned } = useProjects();
@@ -83,13 +83,26 @@ function Door({
           {project.pinned && (
             <Pin className="absolute -bottom-1 -left-1 size-3 rotate-45 fill-current text-muted-foreground/70" />
           )}
-          {nightRun && (
+          {indicators.night && (
             <span
               className="absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-surface"
               style={{ background: "var(--warning)" }}
               title="Overnight run active or queued"
             >
               <Moon className="size-2.5 text-white" />
+            </span>
+          )}
+          {/* "Morning report ready" (prd-night-run-surfaces Phase 3): distinct
+              from the moon badge, bottom-right vs top-right — clicking the
+              door opens the drawer auto-selected onto the morning-report
+              variant. Stays lit until every parked question is resolved. */}
+          {indicators.morning && (
+            <span
+              className="absolute -bottom-1 -right-1 grid size-4 place-items-center rounded-full border border-surface"
+              style={{ background: "var(--primary)" }}
+              title="Morning report ready — open for verdicts & parked questions"
+            >
+              <Sunrise className="size-2.5 text-white" />
             </span>
           )}
         </button>
@@ -123,7 +136,7 @@ export function Rail() {
   const selectedProjectPath = useAppStore((s) => s.selectedProjectPath);
   const openDrawer = useAppStore((s) => s.openDrawer);
   const { doors, overflow } = selectRailDoors(projects);
-  const nightRunStatuses = useNightRunStatuses(doors.map((p) => p.path));
+  const runIndicators = useRunIndicators(doors.map((p) => p.path));
 
   return (
     <nav className="flex w-[72px] shrink-0 flex-col items-center border-r border-border bg-surface py-3">
@@ -133,7 +146,7 @@ export function Rail() {
             key={project.path}
             project={project}
             active={drawerOpen && selectedProjectPath === project.path}
-            nightRun={nightRunStatuses[project.path] ?? false}
+            indicators={runIndicators[project.path] ?? { night: false, morning: false }}
             onSelect={() => openDrawer(project.path)}
           />
         ))}

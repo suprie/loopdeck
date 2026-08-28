@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Plus, FolderOpen, FolderPlus } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
+import { useRunIndicators } from "../../hooks/useRunIndicators";
 import { ProjectList } from "./ProjectList";
 import { AttentionPanel, useAttentionItems } from "./AttentionPanel";
 import { TodayPanel } from "./TodayPanel";
@@ -30,6 +31,10 @@ export function Dashboard() {
   const { scanFolder, loadProjects } = useProjects();
   const attentionCount = useAttentionItems().length;
   const [showNewProject, setShowNewProject] = useState(false);
+  // Room-card run badges — the shared getRunStatus fan-out poll. Only the
+  // morning flag renders (sunrise chip on the row); the state pill above it
+  // already covers in-flight work.
+  const runIndicators = useRunIndicators(projects.map((p) => p.path));
 
   // Loop/agent activity elsewhere (the Agent tab, another session editing
   // .loopdeck/loops.md) can change current_loop / next_steps_total /
@@ -131,7 +136,11 @@ export function Dashboard() {
                   </p>
                 </div>
               </div>
-              <ProjectList projects={projects} onSelect={(p) => handleSelect(p.path)} />
+              <ProjectList
+                projects={projects}
+                onSelect={(p) => handleSelect(p.path)}
+                runIndicators={runIndicators}
+              />
             </section>
 
             <TodayPanel />

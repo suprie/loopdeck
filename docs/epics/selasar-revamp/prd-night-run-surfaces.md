@@ -137,15 +137,33 @@ restructuring for the drawer's layout._
 
 ### Phase 3 — Morning report drawer
 
-- [ ] Build the morning-report drawer (verdict table, parked-questions
+- [x] Build the morning-report drawer (verdict table, parked-questions
       section reusing Phase 1's inline card, kill callout rows, collapsible
       audit-log tail) sourced from the real `RunReport`/`AuditSlice` types,
       reusing `RunQueuePanel.tsx`'s existing morning-report rendering where
       possible.
-- [ ] Wire the room card's/rail door's "morning report ready" indicator to
+      (2026-08-28: `MorningReportView.tsx` — the rendering extracted from
+      `RunQueuePanel.tsx` per the run's pre-answered clarification, plus kill
+      callout rows and a `<details>`-collapsed audit tail — mounted both by
+      `RunQueuePanel` (unchanged behavior) and by `MorningReportTab.tsx`, the
+      drawer's third auto-select variant. Variant gating and the indicator
+      share one flag, `hasUnresolvedParkedQuestions` in `lib/nightRun.ts`, per
+      the Phase 3 open-question resolution "until all parked resolved".)
+- [x] Wire the room card's/rail door's "morning report ready" indicator to
       open this drawer.
-- [ ] Wire the report's "Answer & requeue" button to the same requeue
+      (2026-08-28: `useNightRunStatuses` renamed/extended into
+      `useRunIndicators` (night + morning from the one `getRunStatus` poll);
+      rail door gets a bottom-right Sunrise badge (`Rail.tsx`), the corridor
+      room-card row a "Morning report" chip (`ProjectList.tsx`, fed by
+      `Dashboard.tsx`). Clicking either opens the drawer, which auto-selects
+      the Agent tab onto the morning variant via the shared latch.)
+- [x] Wire the report's "Answer & requeue" button to the same requeue
       command as the night variant's inline parked card.
+      (2026-08-28: the shared `MorningReportView` parked section now uses the
+      night card's exact split — structured `__QUESTIONS__` payloads submit
+      via `answerParkedQuestion`, raw payloads via `requeueRunPhase` +
+      `queueRun` — with submit label "Answer & requeue". Both containers
+      (`RunQueuePanel`, `MorningReportTab`) pass those same handlers.)
 
 ### Phase 4 — Verification
 
@@ -163,6 +181,14 @@ restructuring for the drawer's layout._
   it stay as a fallback until the drawer ships? Resolve in Phase 1 — default
   to deleting it once the drawer variant is confirmed working, per this
   repo's "no compatibility shims" convention.
+  (Resolved 2026-08-28, Phase 3 run: the EpicsPanel mount stays for now — the
+  run's pre-answered clarification chose "extract shared" over delete, so both
+  mounts render the one `MorningReportView`. Deleting the legacy mount is a
+  Phase 4 follow-up once the drawer variant is smoke-confirmed.)
 - Should the "morning report ready" indicator auto-clear once the report's
   been opened once, or stay until every parked question in it is resolved?
   Resolve in Phase 3.
+  (Resolved 2026-08-28: stays until every parked question is resolved — the
+  indicator, the drawer's variant gating, and the auto-select latch all key
+  off `hasUnresolvedParkedQuestions`, the TS mirror of `derive_verdict`'s
+  Parked arm.)
