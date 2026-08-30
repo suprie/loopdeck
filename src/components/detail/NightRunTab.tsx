@@ -13,26 +13,9 @@ import { buildIdToTitle } from "./EpicsPanel";
 import * as api from "../../lib/tauri";
 import { ParkedQuestionInbox } from "./ParkedQuestionInbox";
 
-/**
- * The drawer's night variant (prd-night-run-surfaces Phase 1, item 1):
- * a phase-chip rail and the 3 budget gauges, rendered in place of the Agent
- * tab while the project has a run in flight or queued. Sourced entirely from
- * the real `RunPlan`/`RunPhase`/`RunBudgets` types, reusing
- * `RunQueuePanel`'s status maps and parked-question parser rather than
- * re-deriving shapes.
- *
- * Below the rail/gauges: the inline parked-question inbox (Phase 1, item 2),
- * now the shared `ParkedQuestionInbox` (also rendered by the morning-report
- * drawer) — structured `__QUESTIONS__` payloads answer via
- * `answerParkedQuestion`, raw payloads requeue via `requeueRunPhase` +
- * `queueRun`.
- *
- * The automatic variant-switch-on-drawer-open (item 3) lands in its own loop.
- */
 export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: RunPlan }) {
   const [idToTitle, setIdToTitle] = useState<Record<string, string>>({});
 
-  // Loop titles for chip tooltips — same join EpicsPanel feeds RunQueuePanel.
   useEffect(() => {
     let disposed = false;
     api
@@ -47,57 +30,6 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
   }, [projectPath]);
 
   const title = (phase: RunPhase) => idToTitle[phase.execution_id] ?? phase.execution_id;
-
-  const resolve = (executionId: string) =>
-    setResolved((prev) => {
-      const next = new Set(prev);
-      next.add(executionId);
-      return next;
-    });
-
-  // Same flow as RunQueuePanel's handleAnswerParked: pin the answers into the
-  // phase's interview and requeue it in one IPC call.
-  const handleAnswer = async (executionId: string, answers: AskUserQuestionAnswers) => {
-    setAnsweringId(executionId);
-    try {
-      await api.answerParkedQuestion(projectPath, executionId, answers);
-      useStreamingState.getState().beginTurn(projectPath);
-      await api.queueRun(projectPath);
-      resolve(executionId);
-      toast.success("Answers pinned — run resumed");
-    } catch (err) {
-      useStreamingState.getState().clear(projectPath);
-      const appErr = err as AppError;
-      toast.error("Failed to answer parked question", {
-        description: appErr.message ?? String(err),
-      });
-    } finally {
-      setAnsweringId(null);
-    }
-  };
-
-  // Raw-payload fallback, same flow as RunQueuePanel's handleRetry: requeue
-  // the phase (there are no structured answers to pin), then resume the run.
-  const handleRequeue = async (executionId: string) => {
-    setRequeueingId(executionId);
-    try {
-      useStreamingState.getState().beginTurn(projectPath);
-      await api.requeueRunPhase(projectPath, executionId);
-      await api.queueRun(projectPath);
-      resolve(executionId);
-      toast.success("Parked phase restarted unattended");
-    } catch (err) {
-      useStreamingState.getState().clear(projectPath);
-      const appErr = err as AppError;
-      toast.error("Failed to requeue phase", {
-        description: appErr.message ?? String(err),
-      });
-    } finally {
-      setRequeueingId(null);
-    }
-  };
-
-  const cards = parkedInbox(plan).filter((c) => !resolved.has(c.phase.execution_id));
 
   return (
     <section className="mx-auto mb-4 w-full max-w-3xl shrink-0 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
@@ -191,54 +123,13 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
         </div>
       </details>
 
-      {/* Inline parked-question inbox (Phase 1, item 2): stacked below the
-          rail/gauges, one card per currently-parked phase — same shape as
-          RunQueuePanel's "Parked questions" inbox. */}
-      {cards.length > 0 && (
-        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Parked questions ({cards.length})
-          </div>
-          <ul className="space-y-2">
-            {cards.map(({ phase, questions }) => (
-              <li key={phase.execution_id} className="rounded bg-amber-500/5 px-2.5 py-2">
-                <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-foreground">
-                  <AlertTriangle size={11} className="shrink-0 text-[var(--warning)]" />
-                  {title(phase)}
-                </div>
-                {questions ? (
-                  <AskUserQuestionCard
-                    questions={questions}
-                    disabled={answeringId === phase.execution_id}
-                    submitLabel="Answer & requeue"
-                    onSubmit={(answers) => handleAnswer(phase.execution_id, answers)}
-                  />
-                ) : (
-                  <>
-                    <p className="break-words pl-4 text-[11px] leading-relaxed text-muted-foreground">
-                      {phase.park_payload}
-                    </p>
-                    <div className="mt-1.5 flex justify-end">
-                      <button
-                        onClick={() => handleRequeue(phase.execution_id)}
-                        disabled={requeueingId === phase.execution_id}
-                        className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)] transition-colors hover:bg-accent disabled:opacity-50"
-                      >
-                        {requeueingId === phase.execution_id ? (
-                          <Loader2 size={10} className="animate-spin" />
-                        ) : (
-                          <RotateCcw size={10} />
-                        )}
-                        Answer &amp; requeue
-                      </button>
-                    </div>
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <div className="mt-3">
+        <ParkedQuestionInbox
+          projectPath={projectPath}
+          plan={plan}
+          idToTitle={idToTitle}
+        />
+      </div>
     </section>
   );
 }
