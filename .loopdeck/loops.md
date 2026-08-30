@@ -7,7 +7,7 @@
 - **Status**: completed
 
 ## Next Steps
-- [ ] Review & merge the Phase 3 draft PR
+- [ ] Review & merge the Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
 
 ## History
