@@ -1,20 +1,17 @@
 import { useEffect, useState } from "react";
-import { Moon, AlertTriangle, Loader2, RotateCcw } from "lucide-react";
-import { toast } from "sonner";
-import * as api from "../../lib/tauri";
-import { AskUserQuestionCard } from "./AskUserQuestionCard";
+import { Moon } from "lucide-react";
+import type { Epic, RunPhase, RunPlan } from "../../types";
 import {
   budgetGauges,
   formatDuration,
   formatTokens,
   gaugePercent,
-  parkedInbox,
   STATUS_COLOR,
   STATUS_LABEL,
 } from "../../lib/nightRun";
-import type { AppError, AskUserQuestionAnswers, Epic, RunPhase, RunPlan } from "../../types";
 import { buildIdToTitle } from "./EpicsPanel";
-import { useStreamingState } from "../../store/streamingState";
+import * as api from "../../lib/tauri";
+import { ParkedQuestionInbox } from "./ParkedQuestionInbox";
 
 /**
  * The drawer's night variant (prd-night-run-surfaces Phase 1, item 1):
@@ -25,21 +22,15 @@ import { useStreamingState } from "../../store/streamingState";
  * re-deriving shapes.
  *
  * Below the rail/gauges: the inline parked-question inbox (Phase 1, item 2),
- * one card per currently-parked phase, mirroring `RunQueuePanel`'s
- * "Parked questions" inbox — structured `__QUESTIONS__` payloads answer via
- * the shared `AskUserQuestionCard` (submit = "Answer & requeue" →
- * `answerParkedQuestion`), raw payloads get a plain "Answer & requeue"
- * button → `requeueRunPhase` + `queueRun`, same as RunQueuePanel's Retry.
+ * now the shared `ParkedQuestionInbox` (also rendered by the morning-report
+ * drawer) — structured `__QUESTIONS__` payloads answer via
+ * `answerParkedQuestion`, raw payloads requeue via `requeueRunPhase` +
+ * `queueRun`.
  *
  * The automatic variant-switch-on-drawer-open (item 3) lands in its own loop.
  */
 export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: RunPlan }) {
   const [idToTitle, setIdToTitle] = useState<Record<string, string>>({});
-  const [answeringId, setAnsweringId] = useState<string | null>(null);
-  const [requeueingId, setRequeueingId] = useState<string | null>(null);
-  // Phases answered/requeued from this tab, hidden optimistically until the
-  // drawer's 5s `useRunStatus` poll delivers the updated plan.
-  const [resolved, setResolved] = useState<Set<string>>(new Set());
 
   // Loop titles for chip tooltips — same join EpicsPanel feeds RunQueuePanel.
   useEffect(() => {

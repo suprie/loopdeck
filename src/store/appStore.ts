@@ -48,6 +48,12 @@ interface AppState {
    *  visible address bar, so route-backing bought no real bookmark/back
    *  benefit). */
   drawerOpen: boolean;
+  /** Project path -> plan id of the morning report the user has already
+   *  opened (prd-night-run-surfaces Phase 3). Clears the rail door's
+   *  "morning report ready" badge — "clear once opened" — while a new plan id
+   *  re-arms it. Transient like the rest of this block: after an app restart
+   *  the badge legitimately returns until the report is opened again. */
+  morningReportSeen: Record<string, string>;
 
   // ── Actions ──
   setProjects: (projects: ProjectEntry[]) => void;
@@ -59,6 +65,8 @@ interface AppState {
   setDetailTab: (tab: DetailTab) => void;
   setPendingAgentStart: (path: string | null) => void;
   setDrawerOpen: (open: boolean) => void;
+  /** Mark this plan's morning report as opened (badge-clear signal). */
+  markMorningReportSeen: (path: string, planId: string) => void;
   /** Select a project and open the drawer in one call — the common path for
    *  rail doors, corridor cards, the attention panel, and the command
    *  palette. Callers that need a specific starting tab call `setDetailTab`
@@ -98,6 +106,7 @@ export const useAppStore = create<AppState>()(
       detailTab: "overview",
       pendingAgentStart: null,
       drawerOpen: false,
+      morningReportSeen: {},
 
       // Simple setters
       setProjects: (projects) => set({ projects }),
@@ -109,6 +118,8 @@ export const useAppStore = create<AppState>()(
       setDetailTab: (tab) => set({ detailTab: tab }),
       setPendingAgentStart: (path) => set({ pendingAgentStart: path }),
       setDrawerOpen: (open) => set({ drawerOpen: open }),
+      markMorningReportSeen: (path, planId) =>
+        set((state) => ({ morningReportSeen: { ...state.morningReportSeen, [path]: planId } })),
       openDrawer: (path) => set({ selectedProjectPath: path, drawerOpen: true }),
 
       // Mutations — only ever touch `projects`; the selected project is derived.

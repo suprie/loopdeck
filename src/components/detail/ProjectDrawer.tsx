@@ -23,7 +23,7 @@ import { relativeTime } from "../../lib/time";
 import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { useRunStatus } from "../../hooks/useRunStatus";
-import { hasActiveOrQueuedRun } from "../../lib/rail";
+import { hasActiveOrQueuedRun, morningReportReady } from "../../lib/rail";
 import { shouldAutoSelectNightVariant, hasQueueablePhases } from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
@@ -34,6 +34,7 @@ import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
 import { NightRunTab } from "./NightRunTab";
+import { MorningReportTab } from "./MorningReportTab";
 import { PlanTonightWizard } from "./PlanTonightWizard";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
@@ -51,6 +52,7 @@ import type {
   Epic,
   PlanApprovalDecision,
   ProjectEntry,
+  RunPlan,
 } from "../../types";
 
 /** The drawer's 4 top-level tabs, per `prd-detail-drawer` Phase 2. Epics and

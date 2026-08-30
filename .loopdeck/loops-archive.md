@@ -1539,3 +1539,21 @@ description_preview on import, rescan_project command. 30→30 tests (added max_
 Built the scanner, .loopdeck/ bootstrap, project config registry, and full React UI.
 10 IPC commands: scan, import, list, get, update_description, remove, open_in_finder,
 open_in_terminal, regenerate_description, rescan_project. 30 Rust tests passing.
+
+### 2026-08-28 — prd-night-run-surfaces Phase 2: plan-tonight wizard (3-step modal + queueRun final action)
+- **Status**: completed
+- **Completed**: 2026-08-28
+
+`PlanTonightWizard.tsx` (3-step modal mounted from the drawer header's `PlanTonightButton`),
+`dependencyLabel()` in lib/nightRun.ts, createRunPlan at the 1→2 transition, live interviews
+inline via the shared pending-question slot, final action = queueRun. Verifier PASS (2/2). PR #89.
+
+### 2026-08-30 — prd-night-run-surfaces Phase 3: morning-report drawer + rail sun badge + shared parked inbox
+- **Status**: completed
+- **Completed**: 2026-08-30
+
+All three queued loops in one session: `MorningReportTab.tsx` (verdict table, kill callouts,
+collapsible `AuditSlice` tail) in the Agent-tab slot with a stay-on-report latch; rail door sun
+"morning report ready" badge with clear-once-opened latch (`appStore.morningReportSeen`);
+`ParkedQuestionInbox.tsx` extracted from NightRunTab so the report's "Answer & requeue" runs both
+night-variant requeue paths identically. `morningReportReady()` + tests in lib/rail.ts.
