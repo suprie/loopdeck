@@ -278,6 +278,21 @@ pub fn find_loop_by_id(repo_path: &Path, loop_id: &str) -> Option<LoopLocation> 
     None
 }
 
+pub fn find_replacement_loop_id(repo_path: &Path, prior: &LoopLocation) -> Option<String> {
+    let matches: Vec<String> = parse_epics(repo_path)
+        .into_iter()
+        .filter(|epic| epic.slug == prior.epic)
+        .flat_map(|epic| epic.prds.into_iter())
+        .filter(|prd| prd.slug == prior.prd)
+        .flat_map(|prd| prd.phases.into_iter())
+        .filter(|phase| phase.name == prior.phase)
+        .flat_map(|phase| phase.loops.into_iter())
+        .filter(|item| item.title == prior.title)
+        .filter_map(|item| item.id)
+        .collect();
+    (matches.len() == 1).then(|| matches.into_iter().next().expect("one match"))
+}
+
 // ── Promote-to-loop bridge (spec → runtime) ─────────────────────────
 
 /// Promote a PRD checklist item into `.loopdeck/loops.md ## Current`.
@@ -1640,6 +1655,39 @@ another: 123
     }
 
     #[test]
+    fn replacement_lookup_requires_exact_origin_and_title() {
+        let dir = create_temp_repo();
+        write_epic(
+            &dir,
+            "e",
+            &VALID_EPIC_README.replace("support-project-management", "e"),
+        );
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: d\n---\n\n# A\n\n## Phases\n\n### Phase 1 — Build\n- [ ] `new-id/task` Do it\n",
+        );
+        let prior = LoopLocation {
+            epic: "e".into(),
+            prd: "prd-a".into(),
+            phase: "Phase 1 — Build".into(),
+            title: "Do it".into(),
+        };
+        assert_eq!(
+            find_replacement_loop_id(&dir, &prior).as_deref(),
+            Some("new-id/task")
+        );
+
+        let renamed = LoopLocation {
+            title: "Old title".into(),
+            ..prior
+        };
+        assert_eq!(find_replacement_loop_id(&dir, &renamed), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn test_parse_prd_missing_phases_section_is_lenient() {
         let dir = create_temp_repo();
         let body = "\
@@ -2650,12 +2698,12 @@ description: >
 
     /// Round-trips `assign_loop_id` against this repo's own real PRD file
     /// (not a synthetic fixture) — `docs/epics/optimization/prd-memory-hygiene.md`,
-    /// which has an id-less unchecked item ("Confirm both active files are
-    /// under the new budget.") sitting among wrapped list items, prose,
-    /// headers, and blank lines. Copies the real file into a temp repo (so
-    /// the actual tracked file is never mutated) and asserts every line
-    /// except the target is byte-for-byte identical, and the target line
-    /// only gains the id prefix with its checked state unchanged.
+    /// whose unchecked items sit among wrapped list items, prose, headers,
+    /// and blank lines. Copies the real file into a temp repo (so the actual
+    /// tracked file is never mutated), doctors the first unchecked item to be
+    /// id-less, and asserts every line except the target is byte-for-byte
+    /// identical, and the target line only gains the id prefix with its
+    /// checked state unchanged.
     #[test]
     fn test_assign_loop_id_round_trips_against_real_repo_prd() {
         let real_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2666,21 +2714,33 @@ description: >
             .join("prd-memory-hygiene.md");
         let original = std::fs::read_to_string(&real_path)
             .expect("this repo's own prd-memory-hygiene.md must exist");
-        assert!(
-            original.contains("- [ ] Confirm both active files are under the new budget."),
-            "fixture assumption drifted — target line no longer present verbatim"
-        );
+        // Pick the first checklist item (checked or not) and strip any
+        // existing `` `epic/slug` `` id prefix, so the fixture is an id-less
+        // unchecked item whatever state the real file is in (items gain ids
+        // and check off as loops are queued and run). ponytail: panics if the
+        // PRD ever loses all checklist items — add one back then.
+        let (doctored, title) = original
+            .lines()
+            .find_map(|l| {
+                let rest = l
+                    .strip_prefix("- [ ] ")
+                    .or_else(|| l.strip_prefix("- [x] "))?;
+                let title = match rest.strip_prefix('`') {
+                    Some(after) => after.split('`').nth(1)?.trim_start(),
+                    None => rest,
+                };
+                (!title.is_empty()).then(|| {
+                    let doctored = original.replacen(l, &format!("- [ ] {title}"), 1);
+                    (doctored, title.to_string())
+                })
+            })
+            .expect("real PRD must contain at least one checklist item");
 
         let dir = create_temp_repo();
-        write_prd(&dir, "optimization", "prd-memory-hygiene.md", &original);
+        write_prd(&dir, "optimization", "prd-memory-hygiene.md", &doctored);
 
-        let assigned = assign_loop_id(
-            &dir,
-            "optimization",
-            "prd-memory-hygiene.md",
-            "Confirm both active files are under the new budget.",
-        )
-        .expect("should assign an id to the real, id-less checklist line");
+        let assigned = assign_loop_id(&dir, "optimization", "prd-memory-hygiene.md", &title)
+            .expect("should assign an id to the real, id-less checklist line");
 
         let new_content = std::fs::read_to_string(
             dir.join("docs")
@@ -2690,9 +2750,10 @@ description: >
         )
         .unwrap();
 
-        let expected = original.replace(
-            "- [ ] Confirm both active files are under the new budget.",
-            &format!("- [ ] `{assigned}` Confirm both active files are under the new budget."),
+        let expected = doctored.replacen(
+            &format!("- [ ] {title}"),
+            &format!("- [ ] `{assigned}` {title}"),
+            1,
         );
         assert_eq!(
             new_content, expected,

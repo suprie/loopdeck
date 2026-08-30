@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
-import { Bot, ChevronDown, ChevronRight, Loader2, Play, RotateCcw, Square, Workflow } from "lucide-react";
+import { Bot, Loader2, Play, RotateCcw, Square, Workflow } from "lucide-react";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../store/appStore";
 import type {
@@ -17,6 +17,7 @@ import {
   PermissionApprovalCard,
   PlanApprovalCard,
 } from "./Chat";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 
 interface MultiAgentRunsProps {
   projectPath: string;
@@ -34,34 +35,6 @@ const MAX_ASSIGNED_AGENTS = 8;
 
 function statusLabel(status: MultiAgentRunStatus): string {
   return status === "done" ? "completed" : status;
-}
-
-/** Terminal runs no longer need attention — they collapse to a compact row. */
-function isTerminal(status: MultiAgentRunStatus): boolean {
-  return status === "done" || status === "failed" || status === "cancelled";
-}
-
-/** Short relative time for collapsed run rows ("3m ago"). */
-function fmtAgo(iso: string | null): string {
-  if (!iso) return "";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return "";
-  const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-/** One-line outcome preview for a collapsed run row: an error if any sub-run
- *  failed, else the first sub-run result. */
-function runOutcomePreview(run: MultiAgentRun): { text: string; isError: boolean } | null {
-  const failed = run.sub_runs.find((subRun) => subRun.error);
-  if (failed?.error) return { text: failed.error, isError: true };
-  const succeeded = run.sub_runs.find((subRun) => subRun.result);
-  if (succeeded?.result) return { text: succeeded.result, isError: false };
-  return null;
 }
 
 function modelLabel(subRun: MultiAgentSubRun): string {
@@ -126,20 +99,6 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
   const [starting, setStarting] = useState(false);
   const [controlling, setControlling] = useState<string | null>(null);
   const [pendingEvents, setPendingEvents] = useState<Record<string, ClaudeEvent | undefined>>({});
-  // Run ids the user explicitly expanded. Terminal runs render collapsed
-  // unless present here; non-terminal runs always render expanded (they may
-  // still need attention — running, or parked on a question/approval).
-  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
-
-  const toggleRunExpanded = (runId: string) => {
-    setExpandedRunIds((current) => {
-      const next = new Set(current);
-      if (current.has(runId)) next.delete(runId);
-      else next.add(runId);
-      return next;
-    });
-  };
-
   const eventKey = (runId: string, agentId: string) => `${runId}:${agentId}`;
 
   const rememberControlEvent = useCallback((event: MultiAgentEvent) => {
@@ -257,11 +216,6 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
     );
   };
 
-  const assignedProfiles = useMemo(
-    () => profiles.filter((profile) => selectedIds.includes(profile.id)),
-    [profiles, selectedIds],
-  );
-
   const start = useCallback(async () => {
     if (starting || selectedIds.length === 0) return;
     setStarting(true);
@@ -304,126 +258,82 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
     }
   }, [projectPath, setError]);
 
+  const recentSubRuns = runs.slice(0, 3).flatMap((run) =>
+    run.sub_runs.map((subRun) => ({ run, subRun })),
+  );
+
   return (
-    // The section is capped at 45% of the agent panel's column so the
-    // conversation below (Chat is `flex-1`) always keeps the majority of the
-    // panel — run cards, questions and approvals scroll inside instead of
-    // stacking up and crowding the transcript out.
-    <section className="mb-3 flex min-h-0 max-h-[45%] shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-card/60">
-      <div className="shrink-0 p-3 pb-0">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-            <Workflow className="size-3.5 text-primary" /> Multi-agent loop
-          </div>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            Each selected profile runs the same loop in an isolated branch and worktree.
-          </p>
-        </div>
-        <button
-          onClick={() => void start()}
-          disabled={!loaded || starting || selectedIds.length === 0}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
-        >
-          {starting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5 fill-current" />}
-          Run {selectedIds.length || ""} agent{selectedIds.length === 1 ? "" : "s"}
-        </button>
-      </div>
-
-      {!loaded ? (
-        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin" /> Loading profiles…</div>
-      ) : profiles.length === 0 ? (
-        <p className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-          Add a named agent profile in Settings before starting a multi-agent loop.
-        </p>
-      ) : (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {profiles.map((profile) => {
-            const selected = selectedIds.includes(profile.id);
-            return (
-              <label
-                key={profile.id}
-                className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition ${
-                  selected ? "border-primary/50 bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:bg-muted"
-                }`}
+    <section className="mb-2 flex shrink-0 items-center gap-2 border-b border-border pb-2 text-xs">
+      <Workflow className="size-3.5 shrink-0 text-primary" />
+      <span className="shrink-0 font-medium">Agents</span>
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
+        {recentSubRuns.map(({ run, subRun }) => (
+          <Popover key={subRun.id}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted"
+                title={`View ${subRun.agent_name}'s run`}
               >
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  disabled={!selected && selectedIds.length >= MAX_ASSIGNED_AGENTS}
-                  onChange={() => toggleProfile(profile.id)}
-                  className="accent-primary disabled:cursor-not-allowed"
-                />
-                <Bot className="size-3.5" />
-                <span>{profile.name}</span>
-              </label>
-            );
-          })}
-        </div>
-      )}
-
-      {assignedProfiles.length > 0 ? (
-        <p className="mt-2 text-[10px] text-muted-foreground">
-          Assigned: {assignedProfiles.map((profile) => profile.name).join(", ")}
-          {selectedIds.length >= MAX_ASSIGNED_AGENTS ? ` (maximum ${MAX_ASSIGNED_AGENTS})` : ""}
-        </p>
-      ) : null}
+                <Bot className="size-3" />
+                {subRun.agent_name}
+                <Status status={subRun.status} />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="max-h-[70vh] w-[min(28rem,calc(100vw-3rem))] overflow-y-auto p-3">
+              <SubRunCard
+                run={run}
+                subRun={subRun}
+                controlling={controlling}
+                pendingEvent={pendingEvents[eventKey(run.id, subRun.agent_id)]}
+                onControlResolved={() =>
+                  setPendingEvents((current) => ({
+                    ...current,
+                    [eventKey(run.id, subRun.agent_id)]: undefined,
+                  }))
+                }
+                onControl={control}
+              />
+            </PopoverContent>
+          </Popover>
+        ))}
       </div>
-
-      <div className="min-h-0 overflow-y-auto px-3 pb-3">
-      {runs.slice(0, 3).map((run) => {
-        const expanded = !isTerminal(run.status) || expandedRunIds.has(run.id);
-        const outcome = runOutcomePreview(run);
-        const agentNames = run.sub_runs.map((subRun) => subRun.agent_name).join(", ");
-        return (
-          <div key={run.id} className="mt-3 border-t border-border pt-3">
-            <button
-              type="button"
-              onClick={() => toggleRunExpanded(run.id)}
-              title={run.id}
-              className="flex w-full items-center gap-2 text-left text-[11px] text-muted-foreground"
-            >
-              {expanded ? (
-                <ChevronDown className="size-3 shrink-0" />
-              ) : (
-                <ChevronRight className="size-3 shrink-0" />
-              )}
-              <span className="min-w-0 truncate">{agentNames}</span>
-              <Status status={run.status} />
-              <span className="ml-auto shrink-0">{fmtAgo(run.completed_at ?? run.started_at)}</span>
-            </button>
-            {expanded ? (
-              <div className="mt-2 grid gap-2 lg:grid-cols-2">
-                {run.sub_runs.map((subRun) => (
-                  <SubRunCard
-                    key={subRun.id}
-                    run={run}
-                    subRun={subRun}
-                    controlling={controlling}
-                    pendingEvent={pendingEvents[eventKey(run.id, subRun.agent_id)]}
-                    onControlResolved={() =>
-                      setPendingEvents((current) => ({
-                        ...current,
-                        [eventKey(run.id, subRun.agent_id)]: undefined,
-                      }))
-                    }
-                    onControl={control}
-                  />
-                ))}
-              </div>
-            ) : outcome ? (
-              <p
-                className={`mt-1 truncate pl-5 text-[11px] leading-relaxed ${
-                  outcome.isError ? "text-destructive" : "text-foreground/70"
-                }`}
-              >
-                {outcome.text}
-              </p>
-            ) : null}
-          </div>
-        );
-      })}
-      </div>
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-primary px-2 text-[11px] font-medium text-primary-foreground"
+          >
+            <Play className="size-3 fill-current" /> Run
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-80 p-3">
+          <p className="text-xs font-semibold">Run agents</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">Each selected profile works in its own branch and worktree.</p>
+          {!loaded ? (
+            <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin" /> Loading profiles…</div>
+          ) : profiles.length === 0 ? (
+            <p className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">Add a named agent profile in Settings first.</p>
+          ) : (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {profiles.map((profile) => {
+                const selected = selectedIds.includes(profile.id);
+                return (
+                  <label key={profile.id} className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition ${selected ? "border-primary/50 bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:bg-muted"}`}>
+                    <input type="checkbox" checked={selected} disabled={!selected && selectedIds.length >= MAX_ASSIGNED_AGENTS} onChange={() => toggleProfile(profile.id)} className="accent-primary disabled:cursor-not-allowed" />
+                    <Bot className="size-3.5" />
+                    <span>{profile.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <button onClick={() => void start()} disabled={!loaded || starting || selectedIds.length === 0} className="mt-3 inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50">
+            {starting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5 fill-current" />}
+            Run {selectedIds.length} agent{selectedIds.length === 1 ? "" : "s"}
+          </button>
+        </PopoverContent>
+      </Popover>
     </section>
   );
 }

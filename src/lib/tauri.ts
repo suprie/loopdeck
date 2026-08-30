@@ -340,6 +340,15 @@ export async function requeueRunPhase(
   return invoke<RunPlan>("requeue_run_phase", { path, executionId });
 }
 
+/** Repair the PRD link for delivered work without rerunning the agent. */
+export async function relinkDeliveredPhase(
+  path: string,
+  executionId: string,
+  replacementId: string,
+): Promise<RunPlan> {
+  return invoke<RunPlan>("relink_delivered_phase", { path, executionId, replacementId });
+}
+
 /**
  * Requeue every retryable terminal phase (parked/failed/interrupted/killed)
  * at once — the mass-retry path for a run that died wholesale. The next

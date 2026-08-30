@@ -23,7 +23,7 @@ import { relativeTime } from "../../lib/time";
 import { useAppStore, selectSelectedProject } from "../../store/appStore";
 import { useProjects } from "../../hooks/useProjects";
 import { useRunStatus } from "../../hooks/useRunStatus";
-import { hasActiveOrQueuedRun, morningReportReady } from "../../lib/rail";
+import { hasActiveOrQueuedRun } from "../../lib/rail";
 import { shouldAutoSelectNightVariant, hasQueueablePhases } from "../../lib/nightRun";
 import { usePendingInteractions } from "../../store/pendingInteractions";
 import * as api from "../../lib/tauri";
@@ -34,7 +34,6 @@ import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
 import { NightRunTab } from "./NightRunTab";
-import { MorningReportTab } from "./MorningReportTab";
 import { PlanTonightWizard } from "./PlanTonightWizard";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
@@ -52,7 +51,6 @@ import type {
   Epic,
   PlanApprovalDecision,
   ProjectEntry,
-  RunPlan,
 } from "../../types";
 
 /** The drawer's 4 top-level tabs, per `prd-detail-drawer` Phase 2. Epics and
@@ -103,69 +101,14 @@ export function ProjectDrawer() {
   const [isEditing, setIsEditing] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
 
-  // Night-variant selection (prd-night-run-surfaces Phase 1): while the
-  // project has a run in flight or queued, the Agent tab swaps for the night
-  // variant (phase-chip rail + budget gauges). Derived from the same
-  // getRunStatus poll the rail doors use — no new backend concept.
+  // A run in flight or queued adds a compact status companion to the Agent
+  // tab. The conversation itself remains the primary agent surface.
   const runStatus = useRunStatus(drawerOpen && project ? project.path : null);
   const nightPlan =
     runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
 
-  // ── Morning report (prd-night-run-surfaces Phase 3) ──
-  // The finished plan once nothing is active/queued and a phase reached a
-  // terminal state (`morningReportReady`). Rendered in the same Agent-tab
-  // slot as the night variant, per the run's pre-answered clarification.
-  const morningReportSeen = useAppStore((s) => s.morningReportSeen);
-  const availableReport =
-    runStatus && morningReportReady(runStatus) && runStatus.plan ? runStatus.plan : null;
-
-  // Latch: once the report is shown it STAYS mounted even after an "Answer &
-  // requeue" from it reactivates the run (same plan id) — "stay on report,
-  // refetch it" — until the drawer closes, the project switches, or a
-  // genuinely new plan (different id) takes over.
-  const [latchedReport, setLatchedReport] = useState<RunPlan | null>(null);
-  const projectPath = project?.path ?? null;
-  useEffect(() => {
-    if (!drawerOpen || !projectPath) setLatchedReport(null);
-  }, [drawerOpen, projectPath]);
-  useEffect(() => {
-    if (availableReport) setLatchedReport(availableReport);
-  }, [availableReport]);
-  useEffect(() => {
-    if (latchedReport && runStatus?.plan && runStatus.plan.id !== latchedReport.id) {
-      setLatchedReport(null);
-    }
-  }, [runStatus, latchedReport]);
-
-  // Phase 3 item 2: opening a report-badged rail door lands on the report.
-  // Same once-per-open-span shape as the night variant's auto-select — and
-  // only while the badge would show (not yet seen for this plan id).
-  const reportSwitchedForPath = useRef<string | null>(null);
-  useEffect(() => {
-    if (!drawerOpen) {
-      reportSwitchedForPath.current = null;
-      return;
-    }
-    const path = projectPath;
-    if (
-      path &&
-      availableReport &&
-      morningReportSeen[path] !== availableReport.id &&
-      reportSwitchedForPath.current !== path
-    ) {
-      reportSwitchedForPath.current = path;
-      if (topLevelTab(activeTab) !== "agent") setActiveTab("agent");
-    } else if (path && availableReport) {
-      // Latch even when already on the Agent tab — same reasoning as the
-      // night variant: "this open already showed the report".
-      reportSwitchedForPath.current = path;
-    }
-  }, [drawerOpen, projectPath, availableReport, morningReportSeen, activeTab, setActiveTab]);
-
-  // prd-night-run-surfaces Phase 1 item 3: while the project has an
-  // active/queued run, the drawer auto-selects the Agent tab (swapped for the
-  // night variant below) — so opening a moon-badged rail door lands on the
-  // night variant, not whatever tab was last persisted. Once per continuous
+  // While the project has an active/queued run, the drawer auto-selects the
+  // Agent tab so opening a moon-badged rail door lands on its activity. Once per continuous
   // drawer-open span per project (`shouldAutoSelectNightVariant`'s latch): a
   // user who navigates away mid-run isn't yanked back, and closing the drawer
   // (or switching project) re-arms it.
@@ -292,13 +235,8 @@ export function ProjectDrawer() {
                 the inner scroll. */}
             {topLevelTab(activeTab) === "agent" ? (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
-                {latchedReport ? (
-                  <MorningReportTab projectPath={project.path} plan={latchedReport} />
-                ) : nightPlan ? (
-                  <NightRunTab projectPath={project.path} plan={nightPlan} />
-                ) : (
-                  <AgentPanel projectPath={project.path} />
-                )}
+                {nightPlan && <NightRunTab projectPath={project.path} plan={nightPlan} />}
+                <AgentPanel projectPath={project.path} />
               </div>
             ) : (
               <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-6">

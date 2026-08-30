@@ -13,26 +13,9 @@ import { buildIdToTitle } from "./EpicsPanel";
 import * as api from "../../lib/tauri";
 import { ParkedQuestionInbox } from "./ParkedQuestionInbox";
 
-/**
- * The drawer's night variant (prd-night-run-surfaces Phase 1, item 1):
- * a phase-chip rail and the 3 budget gauges, rendered in place of the Agent
- * tab while the project has a run in flight or queued. Sourced entirely from
- * the real `RunPlan`/`RunPhase`/`RunBudgets` types, reusing
- * `RunQueuePanel`'s status maps and parked-question parser rather than
- * re-deriving shapes.
- *
- * Below the rail/gauges: the inline parked-question inbox (Phase 1, item 2),
- * now the shared `ParkedQuestionInbox` (also rendered by the morning-report
- * drawer) — structured `__QUESTIONS__` payloads answer via
- * `answerParkedQuestion`, raw payloads requeue via `requeueRunPhase` +
- * `queueRun`.
- *
- * The automatic variant-switch-on-drawer-open (item 3) lands in its own loop.
- */
 export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: RunPlan }) {
   const [idToTitle, setIdToTitle] = useState<Record<string, string>>({});
 
-  // Loop titles for chip tooltips — same join EpicsPanel feeds RunQueuePanel.
   useEffect(() => {
     let disposed = false;
     api
@@ -49,7 +32,7 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
   const title = (phase: RunPhase) => idToTitle[phase.execution_id] ?? phase.execution_id;
 
   return (
-    <div className="mx-auto min-h-0 w-full max-w-2xl flex-1 overflow-y-auto pb-6">
+    <section className="mx-auto mb-4 w-full max-w-3xl shrink-0 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
       <div className="mb-5 flex items-center gap-2">
         <Moon size={14} className="text-[var(--primary)]" />
         <h2 className="text-sm font-semibold tracking-tight">Night run</h2>
@@ -60,6 +43,11 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
         </span>
       </div>
 
+      <details className="mt-3 text-xs">
+        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+          Run details: phases and budgets
+        </summary>
+        <div className="mt-3 space-y-4 border-t border-border pt-3">
       {/* Phase-chip rail: one chip per phase, colored by status via the same
           map RunQueuePanel's phase rows use. Tooltip carries the loop title. */}
       <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
@@ -132,12 +120,16 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
           })}
         </div>
       </div>
+        </div>
+      </details>
 
-      {/* Inline parked-question inbox (Phase 1, item 2): the shared component
-          also rendered by the morning-report drawer (Phase 3, item 1). */}
-      <div className="mt-4">
-        <ParkedQuestionInbox projectPath={projectPath} plan={plan} idToTitle={idToTitle} />
+      <div className="mt-3">
+        <ParkedQuestionInbox
+          projectPath={projectPath}
+          plan={plan}
+          idToTitle={idToTitle}
+        />
       </div>
-    </div>
+    </section>
   );
 }

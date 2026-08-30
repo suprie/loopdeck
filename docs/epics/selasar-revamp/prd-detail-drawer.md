@@ -66,7 +66,8 @@ below it should be built until the spike's ADR is recorded._
 
 ### Phase 1 — Spike: drawer routing model + tab relocation
 
-- [x] Decide whether the drawer stays URL-backed (route or query-param
+- [x] `selasar-revamp/decide-whether-the-drawer-stays-url-backed-route-or-query-param
+` Decide whether the drawer stays URL-backed (route or query-param
       change, rendered as an overlay instead of a page swap) or is pure UI
       state with no routing; weigh deep-link/bookmark/back-button behavior
       against the mockup's plain show/hide implementation. Record the

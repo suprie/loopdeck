@@ -1,7 +1,7 @@
 use crate::agents::{
     apply_agent_config, parse_ask_user_questions, parse_exit_plan, parse_stream_line,
-    AgentResponse, AskUserQuestionSpec, ClaudeEvent, ContentBlock, ControlRequestBody,
-    ControlResponsePayload, ResponseAccumulator, StreamEvent, TokenBudget,
+    AgentResponse, ClaudeEvent, ContentBlock, ControlRequestBody, ControlResponsePayload,
+    ResponseAccumulator, StreamEvent, TokenBudget,
 };
 use crate::config::AgentConfig;
 use crate::conversation::Attachment;
@@ -11,7 +11,6 @@ use crate::permission::{Decision, PermissionPolicy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -19,58 +18,20 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-/// Per-`read_line` idle timeout. Bounds how long we'll wait for the next line
-/// of stdout from claude with no activity — a stuck peer (no output for this
-/// long) fails loudly instead of hanging the caller.
-///
-/// Bounds *active reading* only, not the parked phase: when we're parked on
-/// `rx` awaiting an approval/answer we're not awaiting `read_line`, so this
-/// timeout never fires mid-park. The parked phase is bounded separately by
-/// [`TURN_DEADLINE`].
+mod parking;
+
+pub use parking::{
+    InterruptSlot, ParkSlots, PendingPermission, PendingPlan, PendingQuestion, PermissionSlot,
+    PlanSlot, QuestionAnswer, QuestionAnswers, QuestionSlot,
+};
+
+/// Bounds active stdout reads; parked turns use [`TURN_DEADLINE`] instead.
 const READ_LINE_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// How long `write_set_permission_mode` waits for the matching
-/// `control_response` before treating the mode switch as failed.
-///
-/// Much shorter than [`READ_LINE_TIMEOUT`]: this is a lightweight control
-/// message exchanged between turns (no model generation involved), sent and
-/// answered synchronously by the CLI, so a real reply arrives near-instantly.
-/// A long wait here would just delay surfacing a genuinely stuck process.
+/// A mode switch is a control exchange, not a model turn.
 const SET_PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Absolute (turn-start-relative) deadline bounding how long a single turn
-/// may stay **parked** on a manual approval / `AskUserQuestion`.
-///
-/// This is the backstop the 2026-07-23 "approvals/questions wait indefinitely"
-/// decision explicitly deferred. That decision removed the old 10-minute
-/// `PARKED_SLOT_TIMEOUT`: the visibility layer (toast / `ProjectCard` pill /
-/// detail-view callout, reconciled on app launch + window focus +
-/// visibilitychange) makes a *briefly*-unattended prompt unlikely to be
-/// missed, so the 10-minute auto-deny was a footgun (it silently denied
-/// prompts the user never saw). But "forgotten is unlikely" is not "forgotten
-/// is impossible": a prompt parked while the laptop is closed overnight, the
-/// app is backgrounded, or the user simply stepped away for hours still holds
-/// the per-project turn lock, blocking every later turn on that project (and
-/// stalling an unattended autonomous loop). This deadline releases it.
-///
-/// **Why 30 minutes** (3× the removed 10-minute footgun): long enough that
-/// stepping away for a meeting or lunch never trips it, short enough that a
-/// genuinely-abandoned turn frees the lock in bounded time. It is a single
-/// constant — the contract, not a runtime knob (cf. `logging::MAX_LOG_FILES`)
-/// — so it is trivial to tune if the backstop proves too tight or too loose.
-///
-/// **Scope — parked phase only.** A turn that is actively producing output is
-/// bounded by [`READ_LINE_TIMEOUT`] (per-read inactivity) and the
-/// [`ResponseAccumulator`] byte/block caps, not by this deadline. The read
-/// loop is suspended while parked, so this deadline is the only thing
-/// bounding that gap. A turn that streamed actively for longer than
-/// `TURN_DEADLINE` and *then* parked will expire on that first park — correct,
-/// since nobody is watching a turn that long.
-///
-/// On expiry the park site writes the graceful `interrupt` control_request
-/// (the live process survives — the next send resumes the conversation, just
-/// as a manual Stop does) and returns `Err`, releasing the lock. See
-/// [`park_until`].
+/// Absolute cap for all parked time in a turn; expiry releases the project lock.
 const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 /// The tool name Claude uses when it wants to ask the user a clarifying
@@ -86,65 +47,26 @@ const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 /// candidate, just a request for the human to review the plan.
 const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
 
-/// Outcome of racing a stdout read against an interrupt in the streaming loop.
-///
-/// Defined so the `select!` arms can be matched cleanly without re-running the
-/// receiver branch on every iteration.
 enum ReadOutcome {
-    /// A line was read (n bytes, 0 = EOF).
     ReadResult(usize),
-    /// The next read should proceed (interrupt sender dropped w/o firing).
     Read,
-    /// The user interrupted the turn — end it gracefully.
     Interrupted,
 }
 
-/// Outcome of a single bounded line read — see [`read_bounded_line`].
-///
-/// Replaces the `usize` returned by `read_line` with three explicit states so
-/// the read loops can distinguish "got a line", "EOF", and "discarded an
-/// oversized line" without overloading a byte count.
 enum BoundedRead {
-    /// A complete line (including its trailing newline) is in the buffer.
     Line,
-    /// EOF was reached before any bytes were read for this line.
     Eof,
-    /// The line exceeded the byte cap and was discarded in full.
     Oversized,
 }
 
-/// Outcome of parking a turn on a oneshot receiver (a pending manual approval
-/// or `AskUserQuestion`) bounded by an absolute turn deadline.
-///
-/// Separates the *decision* (this pure enum, returned by [`park_until`]) from
-/// the *action* the park site takes on each variant (write a control_response,
-/// return a cancellation error, or write an interrupt + return an expiry
-/// error) — so the deadline logic is unit-testable without a live session.
 #[derive(Debug)]
 enum ParkOutcome<T> {
-    /// The receiver resolved with an answer/verdict — write the control_response.
     Answered(T),
-    /// The sender was dropped without sending — the turn was cancelled (the
-    /// session is being dropped / a Stop landed elsewhere). The park site
-    /// returns an error so the read loop stops.
     Cancelled,
-    /// The absolute turn deadline elapsed with no answer — the prompt was
-    /// abandoned. The park site writes the graceful `interrupt` control_request
-    /// and returns an error, releasing the per-project lock.
     Expired,
 }
 
-/// Race a parked oneshot receiver against the turn's absolute deadline.
-///
-/// Returns [`ParkOutcome::Answered`] when the receiver resolves,
-/// [`ParkOutcome::Cancelled`] when the sender is dropped, or
-/// [`ParkOutcome::Expired`] when `deadline` elapses first. `deadline` is
-/// absolute (captured at turn start as a `tokio::time::Instant`), so the same
-/// deadline bounds every park within a turn — the total parked time across
-/// multiple parks is bounded by [`TURN_DEADLINE`], not re-reset per park.
-///
-/// Cancel-safe: dropping the future mid-await only drops the
-/// `oneshot::Receiver`.
+/// Uses an absolute deadline so repeated parks cannot extend a turn forever.
 async fn park_until<T>(deadline: tokio::time::Instant, rx: oneshot::Receiver<T>) -> ParkOutcome<T> {
     match tokio::time::timeout_at(deadline, rx).await {
         Ok(Ok(value)) => ParkOutcome::Answered(value),
@@ -153,35 +75,7 @@ async fn park_until<T>(deadline: tokio::time::Instant, rx: oneshot::Receiver<T>)
     }
 }
 
-/// The error surfaced when a parked prompt exceeds [`TURN_DEADLINE`].
-///
-/// Shared by the AskUserQuestion, manual-approval, and plan-approval park
-/// sites so the "abandoned, lock released" message stays consistent. The live
-/// session survives (the park site already wrote the `interrupt`
-/// control_request), so the caller can re-send to resume the conversation.
-///
-/// `AppError::TurnParked` (not `Agent`) — an unattended caller (the
-/// `prd-run-queue` executor) needs to tell this apart from a genuine turn
-/// failure without parsing the message text. `pending_detail` names what was
-/// left unanswered (the question text, the tool + input, or the plan) so an
-/// unattended caller has something concrete to show in a morning report;
-/// capped at a few hundred chars since a `Write`/`Edit` input or a long plan
-/// could otherwise blow up the message.
-/// Build the `stream-json` user-turn object written to the CLI's stdin.
-///
-/// The CLI accepts the Anthropic Messages API content-block shape verbatim, so
-/// an attached image is a plain `image` block with an inline base64 source —
-/// no CLI-specific wrapper, and no writing the file to disk for the agent to
-/// `Read` back.
-///
-/// Images are emitted **before** the text block. That ordering is Anthropic's
-/// documented recommendation for image+text prompts, and it matches how the
-/// user composes: they paste a screenshot, then type the question about it.
-///
-/// Factored out (rather than inlined at each `write_all`) because the
-/// streaming and non-streaming send paths each build this independently, and
-/// a divergence between them would be invisible until one path silently
-/// dropped attachments.
+/// Build the CLI user message; image blocks must precede any text block.
 fn user_turn_json(text: &str, attachments: &[Attachment]) -> serde_json::Value {
     let mut content: Vec<serde_json::Value> = attachments
         .iter()
@@ -214,6 +108,7 @@ fn user_turn_json(text: &str, attachments: &[Attachment]) -> serde_json::Value {
     })
 }
 
+/// Preserve a bounded description for unattended callers when a park expires.
 fn turn_deadline_expired_error(pending_detail: &str, questions_json: Option<String>) -> AppError {
     const MAX_DETAIL_CHARS: usize = 200;
     let detail: String = if pending_detail.chars().count() > MAX_DETAIL_CHARS {
@@ -315,146 +210,6 @@ where
         }
     }
 }
-
-/// The user's answer to a single `AskUserQuestion` question.
-///
-/// The user selects one or more canned option labels (radio/checkbox) and may
-/// supply free-text when the "Other…" affordance is used. The backend doesn't
-/// interpret these — it just forwards them to Claude as the tool's
-/// `updatedInput.answers` value.
-#[derive(Debug, Clone)]
-pub struct QuestionAnswer {
-    /// The selected option label(s). One entry for single-select (radio),
-    /// zero or more for multi-select (checkbox). Empty if the user typed a
-    /// free-text "Other…" answer only.
-    pub labels: Vec<String>,
-    /// Free-text from the "Other…" input, when used. Empty otherwise.
-    pub other_text: Option<String>,
-}
-
-impl QuestionAnswer {
-    /// Collapse the answer into the single string Claude expects for a
-    /// single-select question (`answers[q] = "<label>"`). Falls back to the
-    /// first label, or the other-text, when the user only typed free text.
-    pub fn as_single(&self) -> String {
-        if let Some(label) = self.labels.first() {
-            return label.clone();
-        }
-        self.other_text.clone().unwrap_or_default()
-    }
-
-    /// Collapse the answer into the value shape for a multi-select question:
-    /// `answers[q] = ["label1", "label2"]`, with any free-text appended.
-    pub fn as_multi(&self) -> Vec<String> {
-        let mut all = self.labels.clone();
-        if let Some(other) = self.other_text.clone().filter(|t| !t.trim().is_empty()) {
-            all.push(other);
-        }
-        all
-    }
-}
-
-/// All answers to one `AskUserQuestion` call, keyed by question text.
-///
-/// The key is the question text because that's what Claude's protocol uses to
-/// correlate answers back to questions (`answers: { "<question>": ... }`).
-pub type QuestionAnswers = HashMap<String, QuestionAnswer>;
-
-/// A pending `AskUserQuestion` request parked in the read loop, awaiting the
-/// user's answers.
-///
-/// Carries both the oneshot `Sender` (which `agent_answer_question` pops to
-/// deliver the answers and wake the parked turn) AND the request payload
-/// (`request_id`, the parsed `questions`). The payload is stored here — not
-/// just emitted as a `ClaudeEvent` on the streaming channel — so that a freshly
-/// mounted frontend (after the user navigated away and back mid-question) can
-/// reconcile the card via `agent_pending_question` even though the original
-/// channel event was lost when its AgentPanel unmounted.
-pub struct PendingQuestion {
-    /// Correlates the answer with the originating control_request.
-    pub request_id: String,
-    /// The structured questions to surface to the user.
-    pub questions: Vec<AskUserQuestionSpec>,
-    /// Resolves the parked turn. `None` after `agent_answer_question` consumed it.
-    pub sender: Option<oneshot::Sender<QuestionAnswers>>,
-}
-
-/// Shared wrapper around `Option<PendingQuestion>` — see `PendingQuestion` for
-/// why this carries the payload alongside the sender. Same `Arc<StdMutex<…>>`
-/// discipline as the other slots: short critical sections, never held across
-/// an `.await`.
-pub type QuestionSlot = Arc<StdMutex<Option<PendingQuestion>>>;
-
-/// A pending manual tool-approval request parked in the read loop, awaiting
-/// the user's Allow / Deny verdict. The manual-approval counterpart of
-/// `PendingQuestion`.
-///
-/// Carries the oneshot `Sender` (which `agent_answer_permission` pops to
-/// deliver the verdict) AND the request payload (`request_id`, `tool_name`,
-/// `input`) so a freshly-mounted frontend can reconcile the card via
-/// `agent_pending_permission` after navigation.
-pub struct PendingPermission {
-    /// Correlates the verdict with the originating control_request.
-    pub request_id: String,
-    /// Tool name, e.g. "Bash", "Edit".
-    pub tool_name: String,
-    /// Raw tool input as a JSON string.
-    pub input: String,
-    /// Resolves the parked turn. `None` after `agent_answer_permission` consumed it.
-    pub sender: Option<oneshot::Sender<Decision>>,
-}
-
-/// Shared wrapper around `Option<PendingPermission>`. See `PendingPermission`.
-pub type PermissionSlot = Arc<StdMutex<Option<PendingPermission>>>;
-
-/// A pending `ExitPlanMode` request parked in the read loop, awaiting the
-/// user's Approve / Reject verdict. The plan-approval counterpart of
-/// `PendingPermission` — kept as its own slot (rather than reusing
-/// `PermissionSlot`) so a plan approval and an unrelated tool approval can
-/// never collide, even though both carry the same `Decision` payload.
-///
-/// Carries the oneshot `Sender` (which `agent_answer_plan` pops to deliver the
-/// verdict) AND the request payload (`request_id`, `plan`) so a
-/// freshly-mounted frontend can reconcile the card via `agent_pending_plan`
-/// after navigation.
-pub struct PendingPlan {
-    /// Correlates the verdict with the originating control_request.
-    pub request_id: String,
-    /// The plan text Claude wrote, as passed to `ExitPlanMode`.
-    pub plan: String,
-    /// Resolves the parked turn. `None` after `agent_answer_plan` consumed it.
-    pub sender: Option<oneshot::Sender<Decision>>,
-}
-
-/// Shared wrapper around `Option<PendingPlan>`. See `PendingPlan`.
-pub type PlanSlot = Arc<StdMutex<Option<PendingPlan>>>;
-
-/// The three per-project "answer this control_request" oneshot slots that
-/// `answer_control_request` may park a turn on, bundled into one struct so it
-/// and `send_message[_streaming]` don't each carry three separate slot
-/// parameters (clippy's `too_many_arguments`). Distinct from `InterruptSlot`,
-/// which serves an unrelated purpose (the Stop button) and is threaded
-/// separately.
-pub struct ParkSlots<'a> {
-    pub question: &'a QuestionSlot,
-    pub permission: &'a PermissionSlot,
-    pub plan: &'a PlanSlot,
-}
-
-/// Shared, single-slot bridge between the read loop and the
-/// `agent_interrupt` IPC command.
-///
-/// When a turn starts, the read loop stores a fresh oneshot `Sender` here and
-/// `select!`s between the next stdout line and the receiver. `agent_interrupt`
-/// pops the sender and fires it — the loop wakes, writes the graceful
-/// `interrupt` control_request to stdin, and ends the turn with a sentinel
-/// error. The live process and its context survive (unlike `agent_reset`,
-/// which kills both), so the next send resumes the same conversation.
-///
-/// Same `Arc<StdMutex<…>>` shape as `QuestionSlot`/`PermissionSlot` for
-/// consistency: trivially short critical sections, no `.await` held under the
-/// lock.
-pub type InterruptSlot = Arc<StdMutex<Option<oneshot::Sender<()>>>>;
 
 /// A long-lived `claude --input-format stream-json` process.
 ///
@@ -639,44 +394,7 @@ impl ClaudeSession {
         })
     }
 
-    /// Decide and answer a single `control_request` from Claude.
-    ///
-    /// Called inline from both read loops whenever a `control_request` event is
-    /// parsed. This is what unblocks the agent: Claude blocks on each
-    /// permission request until we write the matching `control_response`, and
-    /// it can't run the tool (or emit the next event) until then — so requests
-    /// arrive serially. Answering in-arrival-order, keyed by `request_id`, is
-    /// therefore inherently race-free: there is never more than one outstanding
-    /// request at a time, so no queue or request map is needed (PRD R3/R4).
-    ///
-    /// **Five arms, evaluated in order:**
-    /// 0. `ExitPlanMode` is intercepted first — Claude wants to leave `plan`
-    ///    permission mode. The read loop parks on `plan_slot`'s oneshot
-    ///    receiver until the frontend resolves it via `agent_answer_plan`,
-    ///    then writes a plain `allow`/`deny` (no `updatedInput`). Autonomous
-    ///    projects skip the park (see `answer_plan_approval`).
-    /// 1. `AskUserQuestion` is intercepted next. The read loop parks on
-    ///    `question_slot`'s oneshot receiver until the frontend resolves it via
-    ///    `agent_answer_question`, then writes back an `allow` with
-    ///    `updatedInput` carrying the user's answers.
-    /// 2. The destructive floor (`policy.decide`) is consulted next. A floor
-    ///    match (`rm -rf`, `sudo`, …) is denied immediately, no prompt — the
-    ///    floor is a hard rule, not a preference.
-    /// 3. If the floor clears but the tool is in `MANUAL_APPROVAL_TOOLS`
-    ///    (Bash/Edit/Write/NotebookEdit/WebFetch), the read loop parks on
-    ///    `permission_slot`'s oneshot until the user picks Allow/Deny via
-    ///    `agent_answer_permission`, then writes the matching response.
-    /// 4. Otherwise (read-only tools, unknown tools) the synchronous
-    ///    allow-by-default policy answers immediately.
-    ///
-    /// `channel` is `Some` only on the streaming path, where each decision is
-    /// also surfaced to the UI as a `ClaudeEvent` (PermissionRequest for
-    /// permissions — `decision: "pending"` while parked, then the resolved
-    /// allow/deny; AskUserQuestion for questions; PlanApproval for
-    /// ExitPlanMode). The non-streaming path logs the decision only.
-    ///
-    /// Every permission decision is logged at `info` (tool, input, behavior,
-    /// reason) per PRD R6 — both for debugging and so the demo can narrate it.
+    /// Resolve a control request in precedence order: plan exit, question, floor, manual approval, then policy.
     async fn answer_control_request(
         &mut self,
         request_id: &str,
@@ -685,17 +403,12 @@ impl ClaudeSession {
         slots: &ParkSlots<'_>,
         turn_deadline: tokio::time::Instant,
     ) -> Result<(), AppError> {
-        // ── Arm 0: ExitPlanMode — surface the plan for human approval. ──
-        // Checked first, same precedence rationale as AskUserQuestion below:
-        // it's neither a mutating tool nor a floor candidate, just a request
-        // to leave plan mode.
         if request.tool_name == EXIT_PLAN_MODE_TOOL {
             return self
                 .answer_plan_approval(request_id, request, channel, slots.plan, turn_deadline)
                 .await;
         }
 
-        // ── Arm 1: AskUserQuestion — defer to the human via its dedicated path. ──
         if request.tool_name == ASK_USER_QUESTION_TOOL {
             return self
                 .answer_ask_user_question(
@@ -708,25 +421,10 @@ impl ClaudeSession {
                 .await;
         }
 
-        // ── Arm 2: destructive floor — hard-deny, no prompt. ──
-        // `policy.decide` runs the floor first; if it returns Deny, the request
-        // matched a destructive pattern and there's nothing to ask the user —
-        // we surface the floor reason and move on. The manual-approval arm
-        // below only runs when the floor *cleared*.
         let input_str = request.input.to_string();
         let policy_decision = self.policy.decide(&request.tool_name, &request.input);
 
-        // ── Arm 3: manual approval — park until the user decides. ──
-        // Only for mutating/executing tools (see MANUAL_APPROVAL_TOOLS) AND
-        // only when the floor didn't already deny. We check `policy_decision`
-        // rather than calling `check_destructive_floor` directly so any future
-        // hard-deny added to the policy is also exempt from prompting.
-        //
-        // **Autonomous mode skips this arm** (`is_autonomous()`): the project
-        // is opted into unattended operation, so floor-clearing mutating tools
-        // fall through to arm 4 and are auto-allowed. The floor in arm 2 still
-        // ran first, so `rm -rf` / force-push / `curl|sh` / `sudo` are denied
-        // regardless — this arm only governs whether *safe* mutations park.
+        // Autonomous mode skips only floor-clearing manual approvals.
         if policy_decision == Decision::Allow
             && !self.policy.is_autonomous()
             && crate::permission::requires_manual_approval(&request.tool_name)
@@ -743,13 +441,7 @@ impl ClaudeSession {
                 .await;
         }
 
-        // ── Arm 4: synchronous auto-policy (read-only tools, floor denies,
-        //         autonomous-mode auto-allow for mutating tools). ──
         let decision = policy_decision;
-        // Under autonomous mode, distinguish "the policy auto-allowed this"
-        // from a read-only auto-allow or a user's manual Allow. The UI uses
-        // this discriminator to tag auto-approved calls in the transcript so
-        // the morning review can see what the agent did without asking.
         let autonomous_auto_allow = self.policy.is_autonomous() && decision == Decision::Allow;
         tracing::info!(
             tool = %request.tool_name,
@@ -760,7 +452,6 @@ impl ClaudeSession {
             "permission decision",
         );
 
-        // Write the control_response back to stdin, matched by request_id.
         let stdin = self
             .stdin
             .as_mut()
@@ -781,14 +472,11 @@ impl ClaudeSession {
             .await
             .map_err(|e| AppError::Agent(format!("control_response flush failed: {}", e)))?;
 
-        // Streaming-only: narrate the decision to the UI.
         if let Some(channel) = channel {
             let _ = channel.send(ClaudeEvent::PermissionRequest {
                 request_id: request_id.to_string(),
                 tool_name: request.tool_name.clone(),
                 input: input_str,
-                // `"allow"` for read-only / user-confirmed; `"auto-allow"` for
-                // autonomous-mode auto-approvals; `"deny"` for floor denies.
                 decision: if autonomous_auto_allow {
                     String::from("auto-allow")
                 } else {
@@ -2154,6 +1842,7 @@ fn poll_reap(child: &mut Child, window: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     fn png(data: &str) -> Attachment {
         Attachment {

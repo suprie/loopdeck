@@ -9,14 +9,9 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
-  ShieldCheck,
-  ShieldX,
-  ShieldPlus,
   Repeat,
   RotateCw,
   ListChecks,
-  CheckCircle2,
-  XCircle,
   Paperclip,
   X,
 } from "lucide-react";
@@ -44,23 +39,20 @@ import { Markdown } from "../shared/Markdown";
 import { FileMentionMenu, useFileMention } from "./FileMentionMenu";
 import { SkillMenu, useSkillDiscovery } from "./SkillMenu";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
+import {
+  coalesceContentBlocks,
+  describeTool,
+  fmtDuration,
+  groupLoopRuns,
+  isOverloadError,
+  sanitise,
+} from "./chatUtils";
+import { PermissionApprovalCard, PlanApprovalCard } from "./ApprovalCards";
+
+export { buildAllowRule } from "./chatUtils";
+export { PermissionApprovalCard, PlanApprovalCard } from "./ApprovalCards";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Detect a transient gateway-overload error in a result/turn body text.
- *
- * Mirrors the backend `retry::is_overloaded` substring match (529 / overloaded)
- * so the frontend can render the friendly amber bubble — with a Retry button —
- * instead of the raw `API Error: 529 [...]` text in a destructive-red bubble.
- * Client-side detection keeps the transcript truthful (the raw text is still
- * recorded) without threading a new `error_kind` field through `AgentResponse`.
- */
-function isOverloadError(text: string | null | undefined): boolean {
-  if (!text) return false;
-  const lower = text.toLowerCase();
-  return lower.includes("529") || lower.includes("overloaded");
-}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -195,166 +187,6 @@ export interface ChatProps {
   onTogglePlanMode?: () => void;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Format milliseconds to a human-readable duration string. */
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const mins = Math.floor(ms / 60_000);
-  const secs = Math.round((ms % 60_000) / 1000);
-  return `${mins}m ${secs}s`;
-}
-
-/** Strip ANSI escape codes (claude sometimes emits them even in stream-json). */
-function sanitise(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
-}
-
-/**
- * Extract the human-readable subject from an auto-built loop prompt.
- *
- * `build_next_loop_prompt` (commands.rs) wraps the actual step in heavy
- * boilerplate: `You are working on this Selasar project. … The next unchecked
- * step is: "STEP HERE". Implement it. When done, update …`. Showing that
- * verbatim as a "system" row is no better than showing it as a user bubble.
- * This pulls out just the step text (the quoted span after `step is:`), or the
- * fallback "propose the next loop" phrasing, so the row reads like a label.
- */
-function loopPromptSubject(text: string): string {
-  const m = text.match(/next unchecked step is:\s*"([^"]+)"/i);
-  if (m) return m[1];
-  if (/propose and start the next loop/i.test(text))
-    return "Propose & start next loop";
-  // Fallback: trim and elide the long boilerplate to a reasonable preview.
-  const trimmed = text.trim();
-  return trimmed.length > 120 ? trimmed.slice(0, 117) + "…" : trimmed;
-}
-
-/**
- * Group consecutive auto-loop prompts into a single collapsed row.
- *
- * Clicking "Start next loop" multiple times before a turn completes produces
- * several identical auto-prompts in a row (the user re-clicked, or the click
- * fired twice). Each is a few hundred chars of boilerplate — rendering them as
- * separate rows recreates the noise we're trying to eliminate. This collapses
- * runs of consecutive `source: "loop"` turns into one row showing the count.
- *
- * Returns a new array where each element is either the original turn (for
- * user-typed and assistant turns) or a synthetic marker carrying the run.
- */
-type TranscriptItem =
-  | { kind: "turn"; turn: ConversationTurn }
-  | { kind: "loop-run"; subject: string; count: number; ts: string };
-
-function groupLoopRuns(turns: ConversationTurn[]): TranscriptItem[] {
-  const out: TranscriptItem[] = [];
-  let i = 0;
-  while (i < turns.length) {
-    const t = turns[i];
-    if (t.role === "user" && t.source === "loop") {
-      const subject = loopPromptSubject(t.text);
-      // Collect consecutive loop turns with the SAME subject (dedup) — a
-      // different subject means a different step, render separately.
-      let count = 1;
-      while (
-        i + count < turns.length &&
-        turns[i + count].role === "user" &&
-        turns[i + count].source === "loop" &&
-        loopPromptSubject(turns[i + count].text) === subject
-      ) {
-        count++;
-      }
-      out.push({ kind: "loop-run", subject, count, ts: t.ts });
-      i += count;
-    } else {
-      out.push({ kind: "turn", turn: t });
-      i++;
-    }
-  }
-  return out;
-}
-
-/**
- * Render a tool call as a short human-readable summary.
- *
- * Pulls the most useful field out of the tool's input JSON (a file path for
- * Read/Edit/Write, a command for Bash, a query for WebSearch, etc.). Falls
- * back to the raw input string when there's nothing structured to show.
- */
-function describeTool(name: string, rawInput: string): string {
-  let input: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(rawInput);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      input = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // Not JSON — fall through to the raw-input fallback below.
-  }
-
-  const str = (v: unknown): string =>
-    typeof v === "string" ? v : JSON.stringify(v);
-
-  // Order matters: check the most informative field for each tool shape.
-  const candidate =
-    input.file_path ??
-    input.path ??
-    input.command ??
-    input.pattern ??
-    input.query ??
-    input.url;
-  const detail = candidate
-    ? str(candidate)
-    : rawInput && rawInput !== "{}"
-      ? rawInput
-      : "";
-
-  return detail ? `${name} · ${detail}` : name;
-}
-
-/**
- * Build a Claude Code permission allow-rule string for "always allow".
- *
- * Mirrors the `CURATED_ALLOW` format in `src-tauri/src/skills.rs` so the rule
- * matches Claude Code's own `--setting-sources` allow-list semantics:
- *
- * - `Bash` → `Bash(<first-command-token>:*)`. We take only the leading command
- *   word (not the full argv), so `git push --force origin main` becomes
- *   `Bash(git:*)` — same granularity as the curated `Bash(git status:*)` /
- *   `Bash(cargo:*)` entries. The `:*` is the wildcard terminator Claude Code's
- *   matcher expects (NOT a glob over the remainder).
- * - File tools (`Read`/`Edit`/`Write`/`Glob`/`Grep`) → `Tool(*)`. The path is
- *   irrelevant for "always allow this tool" intent, and a path-pinned rule
- *   would be too narrow to be useful.
- * - `mcp__server__tool` → the bare tool name (MCP convention — no parens).
- * - Anything else → `Tool(*)` as a safe permissive default.
- *
- * Used by the "Always allow" button on the approval card. The result is sent
- * to `agent_add_allow_rule`, which dedups it into `settings.local.json`.
- */
-export function buildAllowRule(toolName: string, rawInput: string): string {
-  if (toolName.startsWith("mcp__")) return toolName;
-  if (toolName === "Bash") {
-    // Extract the command field and take its first whitespace token.
-    let command = "";
-    try {
-      const parsed = JSON.parse(rawInput);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const cmd = (parsed as Record<string, unknown>).command;
-        if (typeof cmd === "string") command = cmd;
-      }
-    } catch {
-      // Not JSON — fall back to the raw input trimmed.
-      command = rawInput;
-    }
-    const firstToken = command.trim().split(/\s+/)[0];
-    return firstToken ? `Bash(${firstToken}:*)` : "Bash(*)";
-  }
-  // Read/Edit/Write/Glob/Grep and anything else: allow the whole tool.
-  return `${toolName}(*)`;
-}
-
 // ── Sub-components ───────────────────────────────────────────────────────────
 
 /**
@@ -411,8 +243,8 @@ function OverloadBanner({ onRetry }: { onRetry: () => void }) {
         <span>Gateway was overloaded</span>
       </div>
       <p className="mt-1 leading-relaxed text-foreground/80">
-        The service was overloaded long enough to exhaust automatic retries.
-        It may have recovered — try again now.
+        The service was overloaded long enough to exhaust automatic retries. It
+        may have recovered — try again now.
       </p>
       <button
         type="button"
@@ -433,7 +265,11 @@ function OverloadBanner({ onRetry }: { onRetry: () => void }) {
  * left-aligned card bubbles with optional error flag, duration, and token usage
  * meta.  This component is used for turns loaded from disk — it does not stream.
  */
-function TurnBubble({ turn, onRetryOverload, autonomous = false }: {
+function TurnBubble({
+  turn,
+  onRetryOverload,
+  autonomous = false,
+}: {
   turn: ConversationTurn;
   /** Re-send the last user prompt when the user clicks Retry on an overload
    *  error bubble. Optional — only TurnBubble needs it; absent in read-only
@@ -481,7 +317,9 @@ function TurnBubble({ turn, onRetryOverload, autonomous = false }: {
             {isError && (
               <span
                 className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
-                  isOverload ? "text-amber-600 dark:text-amber-400" : "text-destructive"
+                  isOverload
+                    ? "text-amber-600 dark:text-amber-400"
+                    : "text-destructive"
                 }`}
               >
                 {/* Truthful label per interrupt_kind: the recurring "error"
@@ -530,7 +368,9 @@ function TurnBubble({ turn, onRetryOverload, autonomous = false }: {
             Rendered above the (still-truthful) body text. The Retry button
             re-sends the last user prompt, which runs the full retry loop
             again — giving the gateway another window to recover. */}
-        {isOverload && onRetryOverload && <OverloadBanner onRetry={onRetryOverload} />}
+        {isOverload && onRetryOverload && (
+          <OverloadBanner onRetry={onRetryOverload} />
+        )}
 
         {/* Assistant body. Prefer the ordered `blocks` view (arrival-order
             rendering) when the turn recorded it; otherwise fall back to the
@@ -694,32 +534,6 @@ function ToolUseBlock({
 }
 
 /**
- * Normalize legacy/provider transcripts that persisted one content block per
- * streamed token. Only adjacent blocks of the same prose kind are merged;
- * tool calls remain hard ordering boundaries.
- */
-function coalesceContentBlocks(blocks: ContentBlock[]): ContentBlock[] {
-  const coalesced: ContentBlock[] = [];
-  for (const block of blocks) {
-    const last = coalesced[coalesced.length - 1];
-    if (block.type === "text" && last?.type === "text") {
-      coalesced[coalesced.length - 1] = {
-        type: "text",
-        text: last.text + block.text,
-      };
-    } else if (block.type === "thinking" && last?.type === "thinking") {
-      coalesced[coalesced.length - 1] = {
-        type: "thinking",
-        thinking: last.thinking + block.thinking,
-      };
-    } else {
-      coalesced.push(block);
-    }
-  }
-  return coalesced;
-}
-
-/**
  * Render an ordered sequence of assistant content blocks in **arrival order**.
  *
  * This is the order-preserving counterpart to the legacy fixed grouping
@@ -845,7 +659,9 @@ function StreamingBubble({
             {isError && (
               <span
                 className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider ${
-                  isOverload ? "text-amber-600 dark:text-amber-400" : "text-destructive"
+                  isOverload
+                    ? "text-amber-600 dark:text-amber-400"
+                    : "text-destructive"
                 }`}
               >
                 {isOverload ? (
@@ -877,7 +693,11 @@ function StreamingBubble({
 
         {/* Ordered content blocks — rendered exactly as they arrived. */}
         {hasContent ? (
-          <BlockList blocks={blocks} streaming={!isComplete} autonomous={autonomous} />
+          <BlockList
+            blocks={blocks}
+            streaming={!isComplete}
+            autonomous={autonomous}
+          />
         ) : (
           <p className="text-sm text-muted-foreground italic">
             {isComplete ? "(empty response)" : "Waiting for response…"}
@@ -909,192 +729,6 @@ function StreamingBubble({
  * Optional reason text is forwarded on a deny (surfaced to the model as the
  * denial message); allows ignore it. Mirrors `AskUserQuestionCard`'s visual
  * language so the two parking states read consistently.
- */
-export function PermissionApprovalCard({
-  toolName,
-  input,
-  disabled,
-  onDecide,
-  onAlwaysAllow,
-}: {
-  toolName: string;
-  input: string;
-  disabled?: boolean;
-  onDecide: (decision: ApprovalDecision) => void;
-  /**
-   * "Always allow": allow this call AND persist a rule so future calls of the
-   * same tool/command auto-allow. The parent resolves the current approval
-   * (same as Allow) and writes the rule to `.claude/settings.local.json`.
-   * Optional — when omitted, the Always-allow button is hidden.
-   */
-  onAlwaysAllow?: () => void;
-}) {
-  const [reason, setReason] = useState("");
-  const summary = describeTool(toolName, input);
-
-  return (
-    <div className="my-2 rounded-lg border border-primary/30 bg-[color-mix(in_oklab,var(--primary)_5%,transparent)] p-3 space-y-3">
-      <div className="flex items-center gap-2 text-xs font-medium text-primary">
-        <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
-        <span>The agent needs your approval</span>
-      </div>
-
-      <div className="rounded-md border border-border bg-input/60 px-3 py-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-0.5">
-          {toolName}
-        </div>
-        <div className="font-mono text-xs text-foreground/90 break-all leading-relaxed">
-          {sanitise(summary)}
-        </div>
-      </div>
-
-      <details className="text-xs text-muted-foreground">
-        <summary className="cursor-pointer hover:text-foreground transition-colors select-none">
-          Add a reason (optional, deny only)
-        </summary>
-        <textarea
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          disabled={disabled}
-          rows={2}
-          placeholder="Why deny? (shown to the agent)"
-          className="mt-2 w-full resize-none rounded-md border border-border bg-input px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-        />
-      </details>
-
-      <div className="flex justify-end gap-2 pt-1">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() =>
-            onDecide({
-              allow: false,
-              reason: reason.trim() || undefined,
-            })
-          }
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-[color-mix(in_oklab,var(--destructive)_40%,transparent)] text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_10%,transparent)] transition disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <ShieldX className="size-3.5" />
-          Deny
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => onDecide({ allow: true })}
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-primary/40 text-primary text-xs font-medium hover:bg-primary/10 transition disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <ShieldCheck className="size-3.5" />
-          Allow once
-        </button>
-        {onAlwaysAllow && (
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={onAlwaysAllow}
-            title="Allow now + remember this tool/command for future sessions (writes a rule to .claude/settings.local.json, takes effect on the next agent session)"
-            className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <ShieldPlus className="size-3.5" />
-            Always allow
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * The plan-approval card — pinned above the composer when the agent has
- * finished planning (`ExitPlanMode`) and is waiting for the human to review
- * before it starts executing.
- *
- * Structurally mirrors `PermissionApprovalCard` (pending strip, optional
- * feedback-on-reject textarea, action row) but renders the plan as markdown
- * rather than a raw tool-input summary, and uses Approve/Reject language
- * instead of Allow/Deny to match the mental model (this is a go/no-go on a
- * multi-step plan, not a single tool call).
- */
-export function PlanApprovalCard({
-  plan,
-  disabled,
-  onDecide,
-}: {
-  plan: string;
-  disabled?: boolean;
-  onDecide: (decision: PlanApprovalDecision) => void;
-}) {
-  const [feedback, setFeedback] = useState("");
-
-  return (
-    <div className="my-2 rounded-lg border border-primary/30 bg-[color-mix(in_oklab,var(--primary)_5%,transparent)] p-3 space-y-3">
-      <div className="flex items-center gap-2 text-xs font-medium text-primary">
-        <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
-        <span>The agent has a plan ready for review</span>
-      </div>
-
-      <div className="rounded-md border border-border bg-input/60 px-3 py-2 max-h-64 overflow-y-auto text-sm">
-        <Markdown>{plan}</Markdown>
-      </div>
-
-      <details className="text-xs text-muted-foreground">
-        <summary className="cursor-pointer hover:text-foreground transition-colors select-none">
-          Add feedback (optional, reject only)
-        </summary>
-        <textarea
-          value={feedback}
-          onChange={(e) => setFeedback(e.target.value)}
-          disabled={disabled}
-          rows={2}
-          placeholder="What should the agent change? (shown to the agent)"
-          className="mt-2 w-full resize-none rounded-md border border-border bg-input px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-        />
-      </details>
-
-      <div className="flex justify-end gap-2 pt-1">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() =>
-            onDecide({
-              approve: false,
-              feedback: feedback.trim() || undefined,
-            })
-          }
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-[color-mix(in_oklab,var(--destructive)_40%,transparent)] text-destructive text-xs font-medium hover:bg-[color-mix(in_oklab,var(--destructive)_10%,transparent)] transition disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <XCircle className="size-3.5" />
-          Reject
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => onDecide({ approve: true })}
-          className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <CheckCircle2 className="size-3.5" />
-          Approve & execute
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Streaming-aware chat UI component.
- *
- * Renders a conversation transcript with:
- * - Completed turns as styled chat bubbles (user / assistant / error)
- * - A live-updating streaming bubble during active requests
- * - A collapsible thinking block for model reasoning
- * - Auto-scroll that sticks to the bottom
- * - Empty state when there are no turns and nothing is streaming
- * - Error banner at the top with an optional dismiss button
- * - Composer (textarea + send button) for follow-up messages
- *
- * This component is **presentational** — the parent manages the Tauri
- * `Channel<ClaudeEvent>` and passes down streaming state, leaving this
- * component to focus purely on rendering.  The composer fires `onSend` so
- * the parent can set up a new streaming Channel.
  */
 export function Chat({
   projectPath,
@@ -1166,7 +800,9 @@ export function Chat({
         accepted.push(await fileToAttachment(image));
       } catch (e) {
         setAttachError(
-          e instanceof AttachmentError ? e.message : "Could not attach that image.",
+          e instanceof AttachmentError
+            ? e.message
+            : "Could not attach that image.",
         );
       }
     }
@@ -1213,7 +849,9 @@ export function Chat({
               blobs.push(await base64ToBlob(read.data, read.media_type));
             } catch (e) {
               setAttachError(
-                e instanceof Error ? e.message : String(e ?? "Could not read that file."),
+                e instanceof Error
+                  ? e.message
+                  : String(e ?? "Could not read that file."),
               );
             }
           }
@@ -1251,7 +889,12 @@ export function Chat({
     // Disable while parked on an approval/question, busy, read-only, etc. —
     // mirrors the composer's own `composerDisabled` gate below.
     disabled:
-      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission || !!pendingPlan,
+      disabled ||
+      busy ||
+      readOnly ||
+      !!pendingQuestion ||
+      !!pendingPermission ||
+      !!pendingPlan,
   });
 
   // ── `/`-skill discovery ──
@@ -1266,7 +909,12 @@ export function Chat({
     setDraft,
     setCaret,
     disabled:
-      disabled || busy || readOnly || !!pendingQuestion || !!pendingPermission || !!pendingPlan,
+      disabled ||
+      busy ||
+      readOnly ||
+      !!pendingQuestion ||
+      !!pendingPermission ||
+      !!pendingPlan,
   });
 
   // Whether auto-scroll is armed — i.e. the user is parked at the bottom and
@@ -1434,11 +1082,16 @@ export function Chat({
                   ? () => {
                       const lastUser = [...turns]
                         .reverse()
-                        .find((t) => t.role === "user" && (t.text ?? "").trim());
+                        .find(
+                          (t) => t.role === "user" && (t.text ?? "").trim(),
+                        );
                       // Re-send the images too — a retry that silently dropped
                       // them would ask the model about an image it can't see.
                       if (lastUser)
-                        onSend(lastUser.text.trim(), lastUser.attachments ?? []);
+                        onSend(
+                          lastUser.text.trim(),
+                          lastUser.attachments ?? [],
+                        );
                     }
                   : undefined
               }
@@ -1496,8 +1149,9 @@ export function Chat({
           <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 pl-1">
             <Loader2 className="size-3.5 animate-spin" />
             <span>
-              Gateway overloaded — retrying {retrying.attempt}/{retrying.maxAttempts}{" "}
-              in {Math.round(retrying.backoffMs / 1000)}s&hellip;
+              Gateway overloaded — retrying {retrying.attempt}/
+              {retrying.maxAttempts} in {Math.round(retrying.backoffMs / 1000)}
+              s&hellip;
             </span>
           </div>
         )}
@@ -1615,135 +1269,136 @@ export function Chat({
             )}
 
             <div className="relative flex items-end gap-2">
-            {/* `@`-mention popup — anchored to the textarea caret. Rendered as
+              {/* `@`-mention popup — anchored to the textarea caret. Rendered as
                 a child of this `relative` row so the caret-local coordinates
                 from caretCoords (whose origin is the textarea's top-left, which
                 coincides with this row's top-left) line up directly. The popup
                 is absolute-positioned so it doesn't disturb the flex layout. */}
-            <FileMentionMenu
-              open={mention.open}
-              items={mention.items}
-              loading={mention.loading}
-              selectedIndex={mention.selectedIndex}
-              position={mention.position}
-              onHover={mention.setSelectedIndex}
-              onPick={mention.pick}
-            />
-            {/* `/`-skill discovery popup — same anchoring as the `@`-mention
+              <FileMentionMenu
+                open={mention.open}
+                items={mention.items}
+                loading={mention.loading}
+                selectedIndex={mention.selectedIndex}
+                position={mention.position}
+                onHover={mention.setSelectedIndex}
+                onPick={mention.pick}
+              />
+              {/* `/`-skill discovery popup — same anchoring as the `@`-mention
                 popup above. The two never open at the same caret at once. */}
-            <SkillMenu
-              open={skills.open}
-              items={skills.items}
-              loading={skills.loading}
-              selectedIndex={skills.selectedIndex}
-              onHover={skills.setSelectedIndex}
-              onPick={skills.pick}
-            />
-            {onTogglePlanMode && (
-              <button
-                type="button"
-                onClick={onTogglePlanMode}
-                disabled={composerDisabled}
-                title={
-                  planMode
-                    ? "Plan mode is ON — the next message runs read-only until you approve the agent's plan. Click to turn off."
-                    : "Plan mode — have the agent propose a plan and wait for your approval before it edits anything."
-                }
-                className={`inline-flex items-center justify-center size-9 shrink-0 rounded-md border transition disabled:opacity-50 disabled:cursor-not-allowed ${
-                  planMode
-                    ? "bg-primary/15 border-primary/40 text-primary"
-                    : "bg-muted border-border text-muted-foreground hover:bg-accent hover:text-foreground"
-                }`}
-              >
-                <ListChecks className="size-4" />
-              </button>
-            )}
-            {/* A plain hidden file input rather than the Tauri dialog plugin:
+              <SkillMenu
+                open={skills.open}
+                items={skills.items}
+                loading={skills.loading}
+                selectedIndex={skills.selectedIndex}
+                onHover={skills.setSelectedIndex}
+                onPick={skills.pick}
+              />
+              {onTogglePlanMode && (
+                <button
+                  type="button"
+                  onClick={onTogglePlanMode}
+                  disabled={composerDisabled}
+                  title={
+                    planMode
+                      ? "Plan mode is ON — the next message runs read-only until you approve the agent's plan. Click to turn off."
+                      : "Plan mode — have the agent propose a plan and wait for your approval before it edits anything."
+                  }
+                  className={`inline-flex items-center justify-center size-9 shrink-0 rounded-md border transition disabled:opacity-50 disabled:cursor-not-allowed ${
+                    planMode
+                      ? "bg-primary/15 border-primary/40 text-primary"
+                      : "bg-muted border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                  }`}
+                >
+                  <ListChecks className="size-4" />
+                </button>
+              )}
+              {/* A plain hidden file input rather than the Tauri dialog plugin:
                 the dialog returns a path, which would then need a backend read
                 to get bytes, while the input hands us a `File` directly. */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
-              multiple
-              hidden
-              onChange={(e) => {
-                void addImages(Array.from(e.target.files ?? []));
-                // Reset so picking the same file twice in a row still fires.
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={composerDisabled}
-              title="Attach an image — you can also paste or drag one in"
-              className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Paperclip className="size-4" />
-            </button>
-            <textarea
-              ref={inputRef}
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                setCaret(e.target.selectionStart);
-              }}
-              onPaste={(e) => {
-                const files = Array.from(e.clipboardData.files);
-                // Only swallow the paste when it actually carried an image;
-                // otherwise let the normal text paste through untouched.
-                if (files.some(isAttachableImage)) {
-                  e.preventDefault();
-                  void addImages(files);
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                hidden
+                onChange={(e) => {
+                  void addImages(Array.from(e.target.files ?? []));
+                  // Reset so picking the same file twice in a row still fires.
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={composerDisabled}
+                title="Attach an image — you can also paste or drag one in"
+                className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Paperclip className="size-4" />
+              </button>
+              <textarea
+                ref={inputRef}
+                value={draft}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  setCaret(e.target.selectionStart);
+                }}
+                onPaste={(e) => {
+                  const files = Array.from(e.clipboardData.files);
+                  // Only swallow the paste when it actually carried an image;
+                  // otherwise let the normal text paste through untouched.
+                  if (files.some(isAttachableImage)) {
+                    e.preventDefault();
+                    void addImages(files);
+                  }
+                }}
+                onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
+                onClick={(e) => setCaret(e.currentTarget.selectionStart)}
+                onSelect={(e) =>
+                  setCaret((e.target as HTMLTextAreaElement).selectionStart)
                 }
-              }}
-              onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
-              onClick={(e) => setCaret(e.currentTarget.selectionStart)}
-              onSelect={(e) =>
-                setCaret((e.target as HTMLTextAreaElement).selectionStart)
-              }
-              onKeyDown={(e) => {
-                // Mention/skill nav consume the key first (arrows, Enter, Esc,
-                // Tab). Only when neither does (returns false) do we fall
-                // through to the normal Enter-to-send — so an open popup's
-                // Enter inserts the selection instead of sending the message.
-                if (mention.onKeyDown(e)) return;
-                if (skills.onKeyDown(e)) return;
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
+                onKeyDown={(e) => {
+                  // Mention/skill nav consume the key first (arrows, Enter, Esc,
+                  // Tab). Only when neither does (returns false) do we fall
+                  // through to the normal Enter-to-send — so an open popup's
+                  // Enter inserts the selection instead of sending the message.
+                  if (mention.onKeyDown(e)) return;
+                  if (skills.onKeyDown(e)) return;
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder={
+                  planMode
+                    ? "Describe what you want planned… (the agent will propose a plan for your approval before editing anything)"
+                    : turns.length === 0
+                      ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
+                      : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
                 }
-              }}
-              placeholder={
-                planMode
-                  ? "Describe what you want planned… (the agent will propose a plan for your approval before editing anything)"
-                  : turns.length === 0
-                    ? "Start a new conversation… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
-                    : "Send a follow-up message… (Enter to send, Shift+Enter for newline, @ for files, / for skills)"
-              }
-              rows={2}
-              disabled={composerDisabled}
-              onBlur={() => {
-                mention.close();
-                skills.close();
-              }}
-              className="flex-1 resize-none rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-            />
-            <button
-              onClick={handleSend}
-              disabled={
-                composerDisabled || (!draft.trim() && attachments.length === 0)
-              }
-              className="inline-flex items-center justify-center size-9 shrink-0 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Send message"
-            >
-              {busy ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Send className="size-4" />
-              )}
-            </button>
+                rows={2}
+                disabled={composerDisabled}
+                onBlur={() => {
+                  mention.close();
+                  skills.close();
+                }}
+                className="flex-1 resize-none rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+              />
+              <button
+                onClick={handleSend}
+                disabled={
+                  composerDisabled ||
+                  (!draft.trim() && attachments.length === 0)
+                }
+                className="inline-flex items-center justify-center size-9 shrink-0 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Send message"
+              >
+                {busy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+              </button>
             </div>
           </div>
         )}
