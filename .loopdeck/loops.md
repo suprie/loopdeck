@@ -10,6 +10,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Next Steps
 
+- [ ] Review & merge the memory-hygiene draft PR: https://github.com/suprie/loopdeck/pull/94
+
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through to the morning report
 - [ ] `prd-process-discipline` owns automated budget enforcement if ever wanted (resolved: document-only here)
 
