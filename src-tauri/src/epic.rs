@@ -2698,12 +2698,12 @@ description: >
 
     /// Round-trips `assign_loop_id` against this repo's own real PRD file
     /// (not a synthetic fixture) — `docs/epics/optimization/prd-memory-hygiene.md`,
-    /// which has an id-less unchecked item ("Confirm both active files are
-    /// under the new budget.") sitting among wrapped list items, prose,
-    /// headers, and blank lines. Copies the real file into a temp repo (so
-    /// the actual tracked file is never mutated) and asserts every line
-    /// except the target is byte-for-byte identical, and the target line
-    /// only gains the id prefix with its checked state unchanged.
+    /// whose unchecked items sit among wrapped list items, prose, headers,
+    /// and blank lines. Copies the real file into a temp repo (so the actual
+    /// tracked file is never mutated), doctors the first unchecked item to be
+    /// id-less, and asserts every line except the target is byte-for-byte
+    /// identical, and the target line only gains the id prefix with its
+    /// checked state unchanged.
     #[test]
     fn test_assign_loop_id_round_trips_against_real_repo_prd() {
         let real_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2714,21 +2714,30 @@ description: >
             .join("prd-memory-hygiene.md");
         let original = std::fs::read_to_string(&real_path)
             .expect("this repo's own prd-memory-hygiene.md must exist");
-        assert!(
-            original.contains("- [ ] Confirm both active files are under the new budget."),
-            "fixture assumption drifted — target line no longer present verbatim"
-        );
+        // Pick the first unchecked item and strip any existing `` `epic/slug` ``
+        // id prefix, so the fixture is id-less whatever state the real file is
+        // in (items gain ids as loops are queued). ponytail: panics if the PRD
+        // ever ends up with no unchecked items left — add one back then.
+        let (doctored, title) = original
+            .lines()
+            .find_map(|l| {
+                let rest = l.strip_prefix("- [ ] ")?;
+                let title = match rest.strip_prefix('`') {
+                    Some(after) => after.split('`').nth(1)?.trim_start(),
+                    None => rest,
+                };
+                (!title.is_empty()).then(|| {
+                    let doctored = original.replacen(l, &format!("- [ ] {title}"), 1);
+                    (doctored, title.to_string())
+                })
+            })
+            .expect("real PRD must contain at least one unchecked checklist item");
 
         let dir = create_temp_repo();
-        write_prd(&dir, "optimization", "prd-memory-hygiene.md", &original);
+        write_prd(&dir, "optimization", "prd-memory-hygiene.md", &doctored);
 
-        let assigned = assign_loop_id(
-            &dir,
-            "optimization",
-            "prd-memory-hygiene.md",
-            "Confirm both active files are under the new budget.",
-        )
-        .expect("should assign an id to the real, id-less checklist line");
+        let assigned = assign_loop_id(&dir, "optimization", "prd-memory-hygiene.md", &title)
+            .expect("should assign an id to the real, id-less checklist line");
 
         let new_content = std::fs::read_to_string(
             dir.join("docs")
@@ -2738,9 +2747,10 @@ description: >
         )
         .unwrap();
 
-        let expected = original.replace(
-            "- [ ] Confirm both active files are under the new budget.",
-            &format!("- [ ] `{assigned}` Confirm both active files are under the new budget."),
+        let expected = doctored.replacen(
+            &format!("- [ ] {title}"),
+            &format!("- [ ] `{assigned}` {title}"),
+            1,
         );
         assert_eq!(
             new_content, expected,
