@@ -907,13 +907,6 @@
 - **Context**: Detecting a mid-run `AskUserQuestion`/permission/plan stall requires the executor's phase turns to run through the streaming pipeline (the non-streaming path auto-denies these cards instead of parking), and `claude_session.rs`'s park site can't be cancelled early — it isn't selected against any interrupt once entered, only against its own 30-minute `TURN_DEADLINE` backstop.
 - **Consequences**: `execute_run` now sends each phase via `start_fresh_and_record_streaming` with a no-op sink channel and catches the new `AppError::TurnParked` (fired at `TURN_DEADLINE`) to mark the phase `Parked` instead of `Failed`; a pure `run_executor::phases_blocked_by_park` then applies the plan's `StallPolicy` to the remaining `Queued` phases. A stall is unavoidably a ~30-minute-worst-case cost per phase in this codebase's current single-session-per-project architecture — shortening it needs a session-model change out of this PRD's sequencing/state scope.
 - **Detail**: `.loopdeck/loops.md` `## Current` (2026-07-28 `prd-run-queue` Phase 4 entry) has the full file/symbol breakdown.
-## 2026-07-28 — `prd-run-queue` Phase 4: stalls only detectable via streaming + `TURN_DEADLINE`, not interrupted early
-
-- **Status**: accepted
-- **Context**: Detecting a mid-run `AskUserQuestion`/permission/plan stall requires the executor's phase turns to run through the streaming pipeline (the non-streaming path auto-denies these cards instead of parking), and `claude_session.rs`'s park site can't be cancelled early — it isn't selected against any interrupt once entered, only against its own 30-minute `TURN_DEADLINE` backstop.
-- **Consequences**: `execute_run` now sends each phase via `start_fresh_and_record_streaming` with a no-op sink channel and catches the new `AppError::TurnParked` (fired at `TURN_DEADLINE`) to mark the phase `Parked` instead of `Failed`; a pure `run_executor::phases_blocked_by_park` then applies the plan's `StallPolicy` to the remaining `Queued` phases. A stall is unavoidably a ~30-minute-worst-case cost per phase in this codebase's current single-session-per-project architecture — shortening it needs a session-model change out of this PRD's sequencing/state scope.
-- **Detail**: `.loopdeck/loops.md` `## Current` (2026-07-28 `prd-run-queue` Phase 4 entry) has the full file/symbol breakdown.
-
 ## 2026-07-29 — Fix unscrollable AskUserQuestionCard in ProjectDetail's stuck-prompt callout
 - **Status**: accepted
 - **Context**: `Chat.tsx` already wraps `AskUserQuestionCard` in `max-h-[45vh] overflow-y-auto` so a question with many options/questions stays reachable. `ProjectDetail.tsx`'s `StuckQuestionCallout` (the tab-agnostic banner) mounted the same card with no scroll constraint, so 5+ questions overflowed the callout with no way to reach the Submit button.
@@ -1035,3 +1028,117 @@
 - **Context**: `docs/PRD.md` froze at V1 and listed non-goals the shipped code violates (agents, Claude/Codex, loops, decisions); `CLAUDE.md` described a single `commands.rs` (now a `commands/` dir) with stale file-size callouts.
 - **Consequences**: New audit deliverable `docs/epics/optimization/docs-accuracy-audit.md` (contradictions D1–D8, C1–C5). Both docs rewritten — `docs/PRD.md` gained an Amendments section marking shipped non-goals historical with cross-links to the shipping epic (`multi-model-agents` for Claude/Codex integration, per the actual git history), `CLAUDE.md` tree + Context Discipline rewritten to the actual tree (32 modules + `commands/`, 81 commands, verified line counts). Re-audit zero contradictions; verifier PASS; PRD `status` flipped `proposed` → `accepted`, all phase boxes checked.
 
+
+---
+
+<!-- Archived 2026-08-30 by prd-memory-hygiene Phase 2 compaction.
+     Header dates only; full-fidelity copies, nothing deleted.
+     Includes the repaired orphaned 2026-08-26 parked-inbox entry
+     (its '## ' heading was restored before archiving). -->
+
+## 2026-08-12 — Rail pin state is a plain per-machine bool; night-run badge is a run-plan-derived placeholder
+
+- **Status**: accepted
+- **Context**: `prd-rail-corridor-shell` Phase 1's two open questions (pin trigger UI, pin storage) and its dependency on `prd-detail-drawer`'s not-yet-run night-run spike were pre-answered at run queue time, not left for this loop to guess.
+- **Consequences**: Pin/unpin lives on the door itself as a right-click context menu (no room card exists until Phase 2) — a plain `pinned: bool` on `ProjectEntry` (`config.rs`), mirroring the existing `autonomous` flag exactly, no new storage design. The night-run badge derives from whether the project has an active/queued `.loopdeck/run-plan.yaml` (`hasActiveOrQueuedRun` in `src/lib/rail.ts`) — an explicit placeholder, not the real `RunState` variant `prd-night-run-surfaces` may eventually add once its drawer spike lands.
+- **Detail**: `.loopdeck/loops.md` `## Current` (2026-08-12 entry) has the full file/symbol breakdown.
+
+
+## 2026-08-05 — Worktree cleanup script
+- **Status**: accepted
+- **Context**: 13 stale `git worktree`s had piled up under `.claude/worktrees/` from prior loop/agent sessions, all with branches already merged into `main`.
+- **Consequences**: Added `scripts/prune-worktrees.sh` — force-removes every worktree except the main tree and deletes each worktree's local branch. Ran it once this session, removing all 13 (3 had uncommitted code changes, discarded per user confirmation).
+
+
+## 2026-08-05 — Selasar Phase-1 palette derived from the 3 documented anchors only
+- **Status**: accepted
+- **Context**: The `selasar-revamp` rebrand mockup (artifact d43c98ab) and its full brass/amber/blue/moss/indigo/violet/danger + dark-pair hexes exist nowhere offline; only paper `#F5F1E8`, ink `#241E17`, teak `#8A5A3A` are documented. The unattended run's interview settled "minimal 3-anchor only".
+- **Consequences**: `src/styles.css` light+dark values replaced so `--background`/`--foreground`/`--primary` map to the literal anchors in both schemes, all neutrals are warm oklch interpolations at hue ≈73–87 derived from the anchors, functional colors (destructive/success/warning) keep their semantic hue warmed to the family, `--hljs-*` keyword/name/tag re-map to teak, and `--shadow-*` go ink-tinted (light) / border-based (dark). `--color-*` names unchanged.
+
+
+## 2026-08-05 — `--font-display` application mapping for the icon-only brand tile
+- **Status**: accepted
+- **Context**: The PRD criterion "apply `--font-display` to the wordmark, rail mark, and project-name treatments" had no literal rail-mark text — AppShell's brand tile is an icon-only gradient (Command icon, no wordmark text), and the run interview mapped "rail mark" to the sidebar subtitle.
+- **Consequences**: New `--font-display: ui-serif, Charter, "Iowan Old Style", "Palatino Linotype", Georgia, serif` token (Tailwind v4 `font-display` utility). Applied to the wordmark + subtitle in `AppShell.tsx`, and to project names at all 3 render sites: `ProjectList.tsx` row, `ProjectDetail.tsx` breadcrumb header, `ProjectDetail.tsx` tab-rail label.
+
+
+## 2026-08-05 — Selasar Phase-2 copy audit + rename: full-repo tagged list in the PRD, rename scope incl. bundle id
+- **Status**: accepted
+- **Context**: `prd-rebrand-tokens` Phase 2 (3 loops, one combined overnight run): audit every user-visible "LoopDeck" occurrence, then rename window title, wordmark, and in-app copy to "Selasar". The run interview resolved the PRD's open questions: rename the macOS bundle identifier too, and update Rust test assertions that assert on renamed copy.
+- **Consequences**: Full-repo audit recorded in the PRD (`## Phase 2 Audit — "LoopDeck" occurrences`), every occurrence tagged user-visible / comment / test-assertion / left-intact. Renamed all user-visible copy + comments to "Selasar" (wordmark, error/empty/settings/import copy, agent initial prompts, chat truncation marker, Codex clientInfo title + turn errors, run-queue notification titles, schema/deny error strings, export header, 5 hook templates), updated test assertions + smoke-test-release.sh artifact names in lockstep, and changed the bundle `identifier` to `com.selasar.app`. Left untouched: `.loopdeck/` dir, `project.yaml` schema, `config.rs` `ProjectDirs::from("com","loopdeck","LoopDeck")`, log dir `~/Library/Logs/LoopDeck/`, all lowercase `loopdeck` identifiers, and docs/ (P2 goal, deferred).
+
+
+## 2026-08-05 — Selasar Phase-3 visual pass: 6 token tweaks to clear WCAG AA (>=4.5:1)
+- **Status**: accepted
+- **Context**: Phase-3 verification — computed WCAG contrast for all 34 token pairs plus the real-usage `/10`-tinted blends (StatusBadge/Alert/badges) in light and dark, since no human could eyeball screenshots overnight — found sub-4.5:1 ratios on warning/success/destructive status text and dark-mode destructive labels, exactly the states the PRD names.
+- **Consequences**: In `src/styles.css`, light `--warning`/`--success`/`--destructive` darkened (`oklch` 0.7→0.51, 0.6→0.49, 0.55→0.525), dark `--muted-foreground` and `--primary`/`--ring` lightened (0.7→0.72, 0.65→0.66), and dark `--destructive-foreground` flipped paper→ink `#241E17` to match the dark-primary ink-on-teak button pattern. Result: 0 WCAG normal-text failures across both palettes; the sole residual is dark `text-destructive` on a `/10` tint at 4.14:1 (pre-existing, above the 3:1 large-text bar). Eyeball and destructive/focus deep interaction deferred to the human per the run interview.
+
+
+## 2026-08-06 — Explicit PRD delivery order (`order:` frontmatter), not README-table inference
+- **Status**: accepted
+- **Context**: `epic::read_prds` sorted PRDs by filename, so a PRD authored out of alphabetical order (e.g. `prd-rebrand-tokens` meant to ship first) rendered in the wrong sequence everywhere — the epics view, the per-project Epics tab, the run-queue picker. A first pass inferred order from the epic README's `## PRD Index` table position, but the user flagged that as fragile (depends on a human keeping a prose table in sync) and asked for something more durable, with a migration path for PRDs that predate the field.
+- **Consequences**: Added an optional `order: u32` PRD frontmatter field (`epic.rs`). Sort key is `order` (if present) → README `## PRD Index` table position → filename, in that priority — so old PRDs keep working via the existing fallback while new ones get an explicit, user-editable rank. `read_prds` stays read-only (never writes) — an earlier version auto-backfilled missing `order:` values as a side effect of every read, which corrupted `docs/epics/**/*.md` the moment `cargo test`'s own dogfood test (`test_dogfood_parses_this_repos_epic`) parsed this repo's real epics; reverted and redesigned as two explicit, user-triggered commands instead: `migrate_prd_order` (backfill only what's missing, idempotent) and `set_prd_order` (full drag-to-reorder rewrite — validates the given file list is exactly a permutation of the epic's real PRDs, which doubles as path-traversal protection since a bogus filename simply fails that check before any write). `EpicsPanel.tsx` gained a reorder button (before the edit pencil) opening `PrdReorderDialog`.
+- Also fixed two real epic-ordering bugs found along the way, both now backed by a shared `sortEpics` helper (`lib/utils.ts`) instead of duplicated per-view logic: (1) `EpicsView.tsx`'s cross-project milestone grouping claimed to be "already sorted" from the backend's `BTreeMap`, which is only true per-project — merging multiple projects' results preserved first-seen insertion order instead, so `0.5.0` could render above `0.4.0`; (2) `EpicsPanel.tsx`'s per-project epic list had no sort at all (raw backend slug order), so a `completed` epic could sit above an active `proposed` one. Both views now sort epics status-primary (`in_progress` → `proposed` → `abandoned` → `completed`) then milestone ascending (numeric, not lexicographic — `0.10.0` sorts after `0.9.0`).
+- The PRD drag-to-reorder UI initially used HTML5 `draggable`/`dragover`/`drop`, which visually dragged but never persisted — Tauri's window-level native drag-drop handling (already relied on elsewhere in this app, `Chat.tsx` attachments and `ImportFlow.tsx` repo import) intercepts real OS drag gestures before they reach the webview's JS, so `dragover`/`drop` silently never fire. Rewrote `PrdReorderDialog.tsx` on plain pointer events (`pointerdown`/`pointermove`/`pointerup` with `setPointerCapture`) instead, which aren't touched by that interception. Disabling `dragDropEnabled` app-wide was not an option since the other two features depend on it.
+
+
+
+## 2026-08-17 — Loops graph targeted at 0.7.0; 0.6.0 handoff ledger must be graph-native
+- **Status**: accepted
+- **Context**: Graph engineering reframed as the continuation of loops engineering — the loop is the node, 0.6.0 (`role-based-orchestration`) adds edge types per run plan — but the north star (edges authored in the spec layer, one unified execution graph, invalidation propagation on re-run) needs its own milestone.
+- **Consequences**: Loops-graph epic targeted at 0.7.0 (Parking Lot in `.loopdeck/loops.md`); `prd-agent-handoff` must persist its handoff ledger as nodes/links from day one so 0.7.0 extends it without a migration.
+
+
+## 2026-08-23 — `prd-detail-drawer` spike: drawer is pure UI state, Epics/Graph nest under Loops/Decisions
+- **Status**: accepted
+- **Context**: `prd-detail-drawer` Phase 1 spike. Converting the routed, 6-tab `/project/$projectPath` full page into a slide-over overlay risked silently dropping deep-linking/back-button behavior and stranding the Epics and Graph tabs, which the mockup's 4-tab drawer has no room for. The clarifying question ("how much weight should bookmark/deep-link/back-button behavior get") was pre-answered as "let spike decide freely."
+- **Consequences**: Recorded as three ADRs in `docs/epics/selasar-revamp/README.md` (ADR-1/2/3, replacing its placeholder). (1) The drawer is pure UI state (`appStore.drawerOpen` + `selectedProjectPath`), not URL/route-backed — this Tauri app's router runs in-memory with no visible address bar, so a real route bought no bookmark/back-button value a web app would get; `/project/$projectPath` and `ProjectDetail.tsx` are deleted, replaced by an app-wide `ProjectDrawer.tsx` overlay (shadcn `Sheet`) mounted in `AppShell.tsx`. (2) `EpicsPanel.tsx` (incl. `RunQueuePanel`) and `KnowledgeGraphPanel.tsx` relocate as nested sub-tabs under the drawer's Loops and Decisions top-level tabs respectively, keeping the drawer at the mockup's literal 4-tab width with both panels reused unchanged — no functionality dropped. (3) Phase 1's third item (confirm with `prd-night-run-surfaces`'s owner whether "night run" needs a real `RunState` variant) resolved as not this spike's blocker — that PRD already owns the question in its own Phase 1, and this PRD's Phase 2 build introduces no variant-selection logic that would need an answer yet. Every call site that used to `navigate({ to: "/project/$projectPath" })` (rail doors, corridor cards, the attention panel, command palette, `useStuckSessions`, `useProjects`) now calls `appStore.openDrawer(path)` instead.
+
+
+## 2026-08-26 — Wizard-wiring loop blocked on run-plan dependency order, not re-scoped
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 2 item 2 (wire the wizard's final action to queue-run) was queued before item 1 (build the wizard), so no wizard existed to wire; the run's pre-answered clarification directed blocking rather than guessing scope.
+- **Consequences**: Loop recorded BLOCKED with zero code — the entry-point stub (`PlanTonightButton`, open/close-only) remains the wizard's mount point, and a run-plan reorder (wizard loop first) is parked as a human question in `loops.md ## Next Steps`.
+
+
+## 2026-08-26 — "Plan tonight" gate is the picker's `!done && !noId` condition extracted to a shared helper; the button is open/close-only until the wizard ships
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 2 item 3 asked for a "Plan tonight" entry point in the drawer header, gated on "queueable PRD phases (mirroring whatever gate `EpicsPanel.tsx` currently uses)". That gate lives inline in `EpicsPanel`'s render (`!done && noId` on the overnight-run picker checkbox at the time of writing), duplicated nowhere else — and the run plan queues the wizard (items 1-2) separately from this entry point, with a pre-answered clarification pinning the interim behavior.
+- **Consequences**: The gate is extracted as a pure `hasQueueablePhases(epics)` (`src/lib/nightRun.ts`) implementing the picker's exact condition (`loop.id && !loop.checked && !loop.done_in_history`) — one tested single source shared by the header button and the picker, so the two can't drift when the wizard later replaces the picker as the queueing surface. `PlanTonightButton` (`ProjectDrawer.tsx`) fetches epics via the existing `get_epics` IPC only while the drawer is open (Radix `Sheet` mounts content conditionally) and renders null when nothing qualifies or the fetch fails — the entry point is simply absent, not disabled. Until items 1-2's wizard exists, the button toggles local open/close state only (`aria-expanded` + primary highlight when open, no modal content), per the run's pre-answered clarification; the wizard mounts into that open state.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 2 item 3 entry) has the full file/symbol breakdown.
+
+
+## 2026-08-26 — Night-variant auto-selection is a once-per-open latch, not a forced re-render; rail badge confirmed as the spike's representation
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 1 item 3 asked the drawer to "switch to this variant automatically when a project has an active `RunPlan`, per `prd-detail-drawer`'s spike decision." The spike's ADR-3 had already resolved "night run" as the derived `hasActiveOrQueuedRun` flag (no new `RunState` variant), which made the rail door's moon badge — built as an explicit placeholder in `prd-rail-corridor-shell` Phase 1 — the confirmed indicator, needing only doc de-placeholdering. The open judgment call was how the drawer's auto-switch behaves against a user who's mid-navigation.
+- **Consequences**: `ProjectDrawer.tsx` auto-selects the Agent tab (swapped for `NightRunTab` by item 1's render) via new pure `shouldAutoSelectNightVariant` (`src/lib/nightRun.ts`): fires at most once per continuous drawer-open span per project (local `switchedForPath` ref, reset on drawer close, re-armed on project switch), latching even when the user was already on the Agent tab. So opening a moon-badged rail door lands on the night variant, and a run that starts while the drawer is open still triggers the one-time switch — but a user who then navigates to Loops/Epics mid-run is never yanked back (queueing happens on the Epics tab; a re-switch per poll would fight the user). The latch is the *whole* policy, so it lives in one tested pure function rather than inline effect state.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 1 item 3 entry) has the full file/symbol breakdown.
+
+
+## 2026-08-26 — Parked-question inbox is status-gated (`parkedInbox`); the shared card gains a submit-label prop
+
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 1 item 2 asked for an inline parked-question card with "Answer & requeue", and the run's pre-answered clarification pinned placement (stacked below the rail/gauges, mirroring `RunQueuePanel`'s inbox) and told this loop to reuse the existing structure/component boundary. Two open implementation questions: build a new card component, and how to select which phases get one.
+- **Consequences**: No new card component — the shared `AskUserQuestionCard` gains an optional `submitLabel` prop so the night variant's submit button reads "Answer & requeue"; `RunQueuePanel`'s two existing call sites pass no label and render unchanged. The PRD's "wired to the existing requeue IPC command" resolves to *both* requeue paths `RunQueuePanel` already uses: structured `__QUESTIONS__` payloads → `answerParkedQuestion` (pin + requeue in one call), raw payloads → `requeueRunPhase` + `queueRun` (`handleRetry`'s flow verbatim). Card selection is `parkedInbox(plan)` gated on `status === "parked"` *and* `park_payload` — payload-only gating (what item 1's read-only rendering used) would re-show open questions for phases that later completed or were requeued, since `park_payload` persists on the phase. `NightRunTab` doesn't own plan state (the drawer's `useRunStatus` poll does), so an answered card hides optimistically via a local `resolved` set until the next poll, rather than a `setPlan` the component can't perform.
+- **Detail**: `.loopdeck/loops.md` `## History` (2026-08-26 Phase 1 item 2 entry) has the full file/symbol breakdown.
+
+
+---
+
+## 2026-08-26 — Night-variant gauges hardcode limits.rs defaults in TS; run-plan presentation single-sourced in lib/nightRun.ts
+- **Status**: accepted
+- **Context**: `RunBudgets` caps are `Option<u64>` where None means "backend applies `limits::DEFAULT_RUN_*` at execute time," no IPC exposes those constants, and adding one is a `prd-night-run-surfaces` Non-Goal — run-queue clarification picked hardcoded TS mirrors purely for display math.
+- **Consequences**: `src/lib/nightRun.ts` carries `DEFAULT_RUN_PHASE_TOKEN_CAP/_WALL_CLOCK_SECS/_TOTAL_WALL_CLOCK_SECS` literals (sync-commented to `limits.rs:102-108`) so the 3 gauges always show a real fill; `RunQueuePanel.tsx`'s `STATUS_LABEL`/`STATUS_COLOR`/`parseParkedQuestions` relocated there as the single source shared with `NightRunTab.tsx`, fixing a pre-existing `slice(start + 14)` off-by-one (marker is 13 chars) that dropped the JSON's leading `[` and silently disabled structured `__QUESTIONS__` parked-question parsing in `RunQueuePanel`'s morning report.
+---
+
+<!-- Appended 2026-08-30 (memory-hygiene compaction, rebased onto
+     origin/main post-#92): entries below were in the active file on the
+     origin/main lineage and fell outside the keep window. -->
+
+## 2026-08-30 — Morning report renders in the Agent-tab slot with a stay-on-report latch; parked inbox single-sourced
+- **Status**: accepted
+- **Context**: `prd-night-run-surfaces` Phase 3. The PRD predates Phase 1's outcome — the "night variant of the drawer" turned out to be a swap inside the Agent tab (`NightRunTab` replaces `AgentPanel` while a run is active), not a whole-drawer variant, so the morning report needed a mount decision. Its "collapsible audit-log tail" also assumed raw log lines, but `AuditSlice` only carries `auto_allow_count` + `floor_denials` and the PRD's Non-Goals forbid new endpoints. Three more pre-answered clarifications: rail-door-only indicator (no `RoomCard` exists yet), badge clears once the report is opened, and "Answer & requeue" must run both night-variant requeue paths while the report stays mounted and refetches.
+- **Consequences**: `MorningReportTab.tsx` mounts in the same Agent-tab slot (`ProjectDrawer` render priority: latched report → night variant → `AgentPanel`). Readiness is `morningReportReady` (`lib/rail.ts`): plan exists, nothing active/queued, ≥1 terminal phase — a halt-on-stall plan with queued phases left stays on the night variant's parked inbox, so the two surfaces never fight over one state. A latch in `ProjectDrawer` keeps the report mounted after a requeue reactivates the run (same plan id) until the drawer closes or a new plan appears; the tab's 5s `getRunReport` poll refetches so requeued phases show fresh verdicts. NightRunTab's parked card + both requeue handlers were extracted verbatim into shared `ParkedQuestionInbox.tsx`, which is why the report's requeue wiring cannot drift from the night variant's. The audit tail is a native `<details>` rendering only what `AuditSlice` carries. The rail sun badge is gated by transient `appStore.morningReportSeen` (path → plan id): clear-once-opened, re-armed by a new plan; transient by the store's documented policy, so it legitimately returns after an app restart.
