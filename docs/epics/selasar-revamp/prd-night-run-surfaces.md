@@ -137,15 +137,43 @@ restructuring for the drawer's layout._
 
 ### Phase 3 — Morning report drawer
 
-- [ ] Build the morning-report drawer (verdict table, parked-questions
+- [x] Build the morning-report drawer (verdict table, parked-questions
       section reusing Phase 1's inline card, kill callout rows, collapsible
       audit-log tail) sourced from the real `RunReport`/`AuditSlice` types,
       reusing `RunQueuePanel.tsx`'s existing morning-report rendering where
       possible.
-- [ ] Wire the room card's/rail door's "morning report ready" indicator to
+      (2026-08-30: `MorningReportTab.tsx` in the Agent-tab slot — the same
+      swap `NightRunTab` uses, per the run's pre-answered clarification.
+      Verdict table reuses `RunQueuePanel`'s rendering via `VERDICT_LABEL`/
+      `VERDICT_COLOR` relocated to `lib/nightRun.ts`; parked section is
+      Phase 1's inbox extracted into shared `ParkedQuestionInbox.tsx`; kill
+      callouts pulled out of the table into their own destructive rows;
+      collapsible tail is a native `<details>` rendering the existing
+      `AuditSlice` — auto-allow count + floor denials, no raw log lines, per
+      the run's pre-answered clarification. "Report ready" = `morningReportReady`
+      in `lib/rail.ts`: plan exists, nothing active/queued, ≥1 terminal
+      phase — a halt-on-stall plan with queued phases stays on the night
+      variant's parked inbox.)
+- [x] Wire the room card's/rail door's "morning report ready" indicator to
       open this drawer.
-- [ ] Wire the report's "Answer & requeue" button to the same requeue
+      (2026-08-30: rail door only — `RoomCard` doesn't exist yet
+      (`prd-rail-corridor-shell` Phase 2 unchecked), per the run's
+      pre-answered clarification. `useNightRunStatuses` now returns a sun
+      badge flag (+ the ready plan's id) alongside the moon badge; the badge
+      hides via `appStore.morningReportSeen` once the report has rendered
+      once ("clear once opened", the PRD's deferred Open Question), re-arms
+      for a new plan id. Clicking the door opens the drawer, which
+      auto-selects the Agent tab the report renders in.)
+- [x] Wire the report's "Answer & requeue" button to the same requeue
       command as the night variant's inline parked card.
+      (2026-08-30: both paths identical to the night variant because it IS
+      the same component — `ParkedQuestionInbox` extracted from
+      `NightRunTab.tsx` handles structured `__QUESTIONS__` payloads via
+      `answerParkedQuestion` and raw payloads via `requeueRunPhase` +
+      `queueRun`. After a requeue the drawer stays on the report (a latch in
+      `ProjectDrawer` holds it mounted while the plan id is unchanged) and
+      the tab's 5s `getRunReport` poll refetches, so requeued phases show
+      their new verdicts inline.)
 
 ### Phase 4 — Verification
 
@@ -166,3 +194,5 @@ restructuring for the drawer's layout._
 - Should the "morning report ready" indicator auto-clear once the report's
   been opened once, or stay until every parked question in it is resolved?
   Resolve in Phase 3.
+  (Resolved 2026-08-30: clear once opened — `appStore.morningReportSeen`
+  latches the opened plan id; a new plan re-arms the badge.)

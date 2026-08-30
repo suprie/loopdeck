@@ -55,3 +55,18 @@ export function hasActiveOrQueuedRun(status: RunQueueStatus | undefined): boolea
   if (status.active) return true;
   return status.plan?.phases.some((p) => p.status === "queued" || p.status === "running") ?? false;
 }
+
+/**
+ * Whether the project's latest run plan holds a finished-but-unreviewed
+ * morning report — the rail doors' "morning report ready" badge and the
+ * drawer's report-slot signal (prd-night-run-surfaces Phase 3). True when a
+ * plan exists, nothing is active/queued (that state belongs to the night
+ * variant — a halt-on-stall plan with queued phases left shows its parked
+ * inbox there instead), and at least one phase reached a terminal state: a
+ * freshly authored plan (all `queued`, interviews pending) is not a report.
+ */
+export function morningReportReady(status: RunQueueStatus | undefined): boolean {
+  if (!status?.plan) return false;
+  if (hasActiveOrQueuedRun(status)) return false;
+  return status.plan.phases.some((p) => p.status !== "queued");
+}
