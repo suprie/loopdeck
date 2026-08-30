@@ -19,9 +19,9 @@ orchestrator (`loopdeck:orchestrator`) and the single-loop runner
 |------|---------|---------------|
 | `.loopdeck/current-loop.md` | Active loop snapshot (one-line dashboard label) | When the active loop's high-level summary changes |
 | `.loopdeck/decisions.md` | **Index** of decisions — one short entry each, most recent ~15 live | After any significant design/architecture decision |
-| `.loopdeck/decisions-archive.md` | Overflow for `decisions.md` beyond the live window | When `decisions.md` exceeds ~15 live entries |
+| `.loopdeck/decisions-archive.md` | Overflow for `decisions.md` beyond the live window | When `decisions.md` would cross the token trigger (or ~15 live entries) |
 | `.loopdeck/loops.md` | Current loop status, next steps, history | At the end of every session / loop |
-| `.loopdeck/loops-archive.md` | Overflow for `loops.md ## History` beyond the live window | When `## History` exceeds ~5 live entries |
+| `.loopdeck/loops-archive.md` | Overflow for `loops.md ## History` beyond the live window | When `loops.md` would cross the token trigger (or `## History` exceeds ~5 live entries) |
 | `docs/decisions/<slug>.md` or `docs/epics/<epic>/adr-<n>.md` | Long-form rationale for a decision — alternatives considered, judgment calls, verification detail | When a decision's Context or Consequences can't fit in 1-2 sentences each |
 
 **decisions.md and loops.md are an index, not a diary.** They exist to be
@@ -33,6 +33,29 @@ inline in these two files. This is not a style preference: an earlier
 incident burned ~30M tokens/hour because these files grew unbounded and were
 re-read every turn (see the 2026-07-19 decision in `decisions.md`). The caps
 below are the fix; they are enforced by you, the writer, not by a parser.
+
+## Token budget (authoritative)
+
+Both active files carry a hard token budget (defined 2026-08-30,
+`prd-memory-hygiene`; measurement in `.loopdeck/memory-budget-report.md`).
+Estimate tokens offline as **chars/4** (`wc -c <file>`, divide by 4) — the
+method the budget was measured with.
+
+| Rule | Value |
+|---|---|
+| Budget per active file (`loops.md`, `decisions.md`) | **3,000 tokens (~12KB), whole file** |
+| Archive trigger | the write that would push the active file past **2,400 tokens (~9.6KB)** |
+| New `decisions.md` entry | ≤ **60 words** (the 3 bullets + optional `Detail` link) |
+| New `loops.md` History `**Summary**` | ≤ **50 words**, one sentence |
+| Live-entry ceiling | no entry remaining in an active file over **~300 words / ~400 tokens** |
+
+**The token budget supersedes the count windows** (~15 decisions / ~5 history
+entries) wherever they conflict: 15 long entries can bust the budget — archive
+early; short entries sitting under budget don't force archiving on count alone.
+An over-ceiling entry is archived (full text) or split to a `Detail` doc — its
+content is never rewritten in place just to fit. Enforcement is document-only;
+if automated enforcement is ever wanted, that belongs to
+`prd-process-discipline.md`, not here.
 
 ## decisions.md Format
 
@@ -65,11 +88,12 @@ before you write it into `decisions.md`.** Instead:
   paragraphs, no inline verification notes, no "also confirmed X, Y, Z" lists.
   If you're tempted to add a fourth sentence to `Context` or `Consequences`,
   that's the signal to write a `Detail` doc instead.
-- **When `decisions.md` holds more than ~15 entries**, move the oldest ones
+- **When `decisions.md` would cross the 2,400-token trigger** (or holds more
+  than ~15 entries), move the oldest ones
   to `decisions-archive.md` (create it with a `# Decisions Archive` heading
   if absent), leaving a pointer at the top of `decisions.md`:
   `_Older decisions archived to [decisions-archive.md](./decisions-archive.md)._`
-  Do this as part of the same write that would push the count over 15 —
+  Do this as part of the same write that would cross the trigger —
   don't wait for someone to notice the file is huge.
 
 ## current-loop.md Format
@@ -178,10 +202,12 @@ field that drives your work.
   from the same context) or the commit message, not here. If a `**Summary**`
   is growing past one sentence, that's the signal to trim it and let the PR
   carry the rest.
-- **When `## History` holds more than ~5 entries**, move the older ones to
+- **When `loops.md` would cross the 2,400-token trigger** (or `## History`
+  holds more than ~5 entries), move the older entries to
   `loops-archive.md` (append under its existing heading, oldest-first as
-  already established there), leaving the 5 most recent live in `loops.md`.
-  Do this in the same write that would push the count over 5.
+  already established there), leaving a pointer near the top of `loops.md`:
+  `_Older loops archived to [loops-archive.md](./loops-archive.md)._`
+  Do this in the same write that would cross the trigger.
 
 ### On completion: check the origin PRD box
 
@@ -202,8 +228,9 @@ removed), skip silently — the human can check it manually in the UI.
   Steps; move completed loops to History as a `**Summary**` one-liner (and
   check the origin PRD box)
 - **When the active-loop summary changes** → update `current-loop.md`
-- **Whenever a write would push `decisions.md` past ~15 live entries or
-  `loops.md ## History` past ~5** → archive the overflow in the same write
+- **Whenever a write would push `decisions.md` or `loops.md` past the
+  2,400-token trigger (or the ~15/~5 count windows)** → archive the overflow
+  in the same write
 
 These files are read by humans, AI agents, and LoopDeck's parser on every
 session start — every line is a token cost paid repeatedly, not once. Treat
