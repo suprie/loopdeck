@@ -278,6 +278,21 @@ pub fn find_loop_by_id(repo_path: &Path, loop_id: &str) -> Option<LoopLocation> 
     None
 }
 
+pub fn find_replacement_loop_id(repo_path: &Path, prior: &LoopLocation) -> Option<String> {
+    let matches: Vec<String> = parse_epics(repo_path)
+        .into_iter()
+        .filter(|epic| epic.slug == prior.epic)
+        .flat_map(|epic| epic.prds.into_iter())
+        .filter(|prd| prd.slug == prior.prd)
+        .flat_map(|prd| prd.phases.into_iter())
+        .filter(|phase| phase.name == prior.phase)
+        .flat_map(|phase| phase.loops.into_iter())
+        .filter(|item| item.title == prior.title)
+        .filter_map(|item| item.id)
+        .collect();
+    (matches.len() == 1).then(|| matches.into_iter().next().expect("one match"))
+}
+
 // ── Promote-to-loop bridge (spec → runtime) ─────────────────────────
 
 /// Promote a PRD checklist item into `.loopdeck/loops.md ## Current`.
@@ -1640,6 +1655,39 @@ another: 123
     }
 
     #[test]
+    fn replacement_lookup_requires_exact_origin_and_title() {
+        let dir = create_temp_repo();
+        write_epic(
+            &dir,
+            "e",
+            &VALID_EPIC_README.replace("support-project-management", "e"),
+        );
+        write_prd(
+            &dir,
+            "e",
+            "prd-a.md",
+            "---\nprd: prd-a\nepic: e\nstatus: proposed\ndescription: d\n---\n\n# A\n\n## Phases\n\n### Phase 1 — Build\n- [ ] `new-id/task` Do it\n",
+        );
+        let prior = LoopLocation {
+            epic: "e".into(),
+            prd: "prd-a".into(),
+            phase: "Phase 1 — Build".into(),
+            title: "Do it".into(),
+        };
+        assert_eq!(
+            find_replacement_loop_id(&dir, &prior).as_deref(),
+            Some("new-id/task")
+        );
+
+        let renamed = LoopLocation {
+            title: "Old title".into(),
+            ..prior
+        };
+        assert_eq!(find_replacement_loop_id(&dir, &renamed), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn test_parse_prd_missing_phases_section_is_lenient() {
         let dir = create_temp_repo();
         let body = "\
@@ -2674,7 +2722,9 @@ description: >
         let (doctored, title) = original
             .lines()
             .find_map(|l| {
-                let rest = l.strip_prefix("- [ ] ").or_else(|| l.strip_prefix("- [x] "))?;
+                let rest = l
+                    .strip_prefix("- [ ] ")
+                    .or_else(|| l.strip_prefix("- [x] "))?;
                 let title = match rest.strip_prefix('`') {
                     Some(after) => after.split('`').nth(1)?.trim_start(),
                     None => rest,

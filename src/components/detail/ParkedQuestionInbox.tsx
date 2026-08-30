@@ -58,9 +58,12 @@ export function ParkedQuestionInbox({
     setAnsweringId(executionId);
     try {
       await api.answerParkedQuestion(projectPath, executionId, answers);
+      useStreamingState.getState().beginTurn(projectPath);
+      await api.queueRun(projectPath);
       resolve(executionId);
-      toast.success("Answers pinned — phase requeued");
+      toast.success("Answers pinned — run resumed");
     } catch (err) {
+      useStreamingState.getState().clear(projectPath);
       const appErr = err as AppError;
       toast.error("Failed to answer parked question", {
         description: appErr.message ?? String(err),

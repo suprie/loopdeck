@@ -208,6 +208,7 @@ pub fn run() {
             commands::run_queue::get_run_report,
             commands::run_queue::answer_parked_question,
             commands::run_queue::requeue_run_phase,
+            commands::run_queue::relink_delivered_phase,
             commands::run_queue::requeue_failed_run_phases,
             // Run queue pre-flight interview — prd-run-queue Phase 3
             commands::run_queue::run_phase_interview,

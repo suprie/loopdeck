@@ -421,6 +421,7 @@ export type RunPhaseStatus =
   | "queued"
   | "running"
   | "parked"
+  | "delivered"
   | "completed"
   | "failed"
   | "interrupted"

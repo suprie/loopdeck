@@ -1,5 +1,14 @@
 schema_version: 1
-revision: 18
+revision: 22
+current:
+  id: selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
+  title: Build the morning-report drawer (verdict table, parked-questions
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 3 — Morning report drawer
+  started_at: 2026-08-30T03:20:23.291827Z
+  attempt: 1
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -84,3 +93,14 @@ history:
   started_at: 2026-08-27T23:09:05.945887Z
   completed_at: 2026-08-27T23:19:08.443271Z
   attempt: 1
+- id: selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
+  title: Build the morning-report drawer (verdict table, parked-questions
+  origin:
+    epic: selasar-revamp
+    prd: prd-night-run-surfaces
+    phase: Phase 3 — Morning report drawer
+  outcome: abandoned
+  started_at: 2026-08-28T03:20:28.317927Z
+  completed_at: 2026-08-28T03:20:28.341555Z
+  attempt: 1
+  reason: 'Agent error: claude closed stdout before sending a result event'
