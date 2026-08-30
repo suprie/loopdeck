@@ -2714,14 +2714,17 @@ description: >
             .join("prd-memory-hygiene.md");
         let original = std::fs::read_to_string(&real_path)
             .expect("this repo's own prd-memory-hygiene.md must exist");
-        // Pick the first unchecked item and strip any existing `` `epic/slug` ``
-        // id prefix, so the fixture is id-less whatever state the real file is
-        // in (items gain ids as loops are queued). ponytail: panics if the PRD
-        // ever ends up with no unchecked items left — add one back then.
+        // Pick the first checklist item (checked or not) and strip any
+        // existing `` `epic/slug` `` id prefix, so the fixture is an id-less
+        // unchecked item whatever state the real file is in (items gain ids
+        // and check off as loops are queued and run). ponytail: panics if the
+        // PRD ever loses all checklist items — add one back then.
         let (doctored, title) = original
             .lines()
             .find_map(|l| {
-                let rest = l.strip_prefix("- [ ] ")?;
+                let rest = l
+                    .strip_prefix("- [ ] ")
+                    .or_else(|| l.strip_prefix("- [x] "))?;
                 let title = match rest.strip_prefix('`') {
                     Some(after) => after.split('`').nth(1)?.trim_start(),
                     None => rest,
@@ -2731,7 +2734,7 @@ description: >
                     (doctored, title.to_string())
                 })
             })
-            .expect("real PRD must contain at least one unchecked checklist item");
+            .expect("real PRD must contain at least one checklist item");
 
         let dir = create_temp_repo();
         write_prd(&dir, "optimization", "prd-memory-hygiene.md", &doctored);
