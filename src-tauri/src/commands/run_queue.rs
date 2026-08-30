@@ -388,6 +388,27 @@ pub async fn create_run_plan(
         })?;
     }
 
+    if let Some(existing) = runplan::load(&root)? {
+        for phase in &existing.phases {
+            let has_draft_pr = phase
+                .park_payload
+                .as_deref()
+                .is_some_and(|payload| payload.starts_with("draft PR: https://github.com/"));
+            if has_draft_pr
+                && execution_ids.iter().any(|id| id == &phase.execution_id)
+                && matches!(
+                    phase.status,
+                    RunPhaseStatus::Completed | RunPhaseStatus::Delivered
+                )
+            {
+                return Err(AppError::RunPlan(format!(
+                    "phase \"{}\" already has recorded draft-PR delivery; relink or review that PR instead of rerunning it",
+                    phase.execution_id
+                )));
+            }
+        }
+    }
+
     let mut plan = run_executor::build_run_plan(
         format!("run-{}", Uuid::new_v4()),
         root.clone(),
@@ -752,7 +773,9 @@ fn reconcile_inactive_execution_state(
     };
 
     let next = match phase.status {
-        RunPhaseStatus::Completed => state.complete_current(now, None, false)?,
+        RunPhaseStatus::Completed | RunPhaseStatus::Delivered => {
+            state.complete_current(now, None, false)?
+        }
         RunPhaseStatus::Parked
         | RunPhaseStatus::Failed
         | RunPhaseStatus::Interrupted
@@ -792,6 +815,142 @@ pub async fn requeue_run_phase(
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
     requeue_terminal_phase(&mut plan, &execution_id)?;
+    runplan::save(&root, &plan)?;
+    Ok(plan)
+}
+
+#[tauri::command]
+pub async fn relink_delivered_phase(
+    path: String,
+    execution_id: String,
+    replacement_id: String,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    let root = resolve_root(&state, &path)?;
+    if state
+        .run_handles
+        .lock()
+        .map_err(|_| AppError::LockError)?
+        .contains_key(&root)
+    {
+        return Err(AppError::RunPlan(
+            "cannot relink a phase while the run is still active".into(),
+        ));
+    }
+    if execution_id == replacement_id {
+        return Err(AppError::RunPlan(
+            "choose a different PRD item to relink".into(),
+        ));
+    }
+    let replacement = epic::find_loop_by_id(&root, &replacement_id).ok_or_else(|| {
+        AppError::RunPlan(format!(
+            "no PRD checklist loop with id \"{replacement_id}\" found under docs/epics/"
+        ))
+    })?;
+
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
+    let phase_index = plan
+        .phases
+        .iter()
+        .position(|phase| phase.execution_id == execution_id)
+        .ok_or_else(|| {
+            AppError::RunPlan(format!("phase \"{execution_id}\" is not part of this run"))
+        })?;
+    if plan.phases[phase_index].status != RunPhaseStatus::Delivered {
+        return Err(AppError::RunPlan(format!(
+            "phase \"{execution_id}\" is not awaiting PRD relinking"
+        )));
+    }
+    if plan
+        .phases
+        .iter()
+        .any(|phase| phase.execution_id == replacement_id)
+    {
+        return Err(AppError::RunPlan(format!(
+            "PRD item \"{replacement_id}\" already belongs to this run"
+        )));
+    }
+
+    let loaded = execution::load(&root)?;
+    let revision = loaded.state.revision;
+    let mut execution_state = loaded.state;
+    if execution_state
+        .current
+        .as_ref()
+        .is_some_and(|current| current.id == replacement_id)
+        || execution_state
+            .queue
+            .iter()
+            .any(|queued| queued.id == replacement_id)
+        || execution_state
+            .history
+            .iter()
+            .any(|history| history.id == replacement_id)
+    {
+        return Err(AppError::RunPlan(format!(
+            "PRD item \"{replacement_id}\" already has execution history"
+        )));
+    }
+    let mut relinked_execution = false;
+    if let Some(current) = execution_state
+        .current
+        .as_mut()
+        .filter(|current| current.id == execution_id)
+    {
+        current.id = replacement_id.clone();
+        current.title = replacement.title.clone();
+        current.origin = LoopOrigin {
+            epic: replacement.epic.clone(),
+            prd: replacement.prd.clone(),
+            phase: replacement.phase.clone(),
+        };
+        relinked_execution = true;
+    }
+    for queued in execution_state
+        .queue
+        .iter_mut()
+        .filter(|queued| queued.id == execution_id)
+    {
+        queued.id = replacement_id.clone();
+        queued.title = replacement.title.clone();
+        queued.origin = LoopOrigin {
+            epic: replacement.epic.clone(),
+            prd: replacement.prd.clone(),
+            phase: replacement.phase.clone(),
+        };
+        relinked_execution = true;
+    }
+    for history in execution_state
+        .history
+        .iter_mut()
+        .filter(|history| history.id == execution_id)
+    {
+        history.id = replacement_id.clone();
+        history.title = replacement.title.clone();
+        history.origin = LoopOrigin {
+            epic: replacement.epic.clone(),
+            prd: replacement.prd.clone(),
+            phase: replacement.phase.clone(),
+        };
+        relinked_execution = true;
+    }
+    if relinked_execution {
+        execution_state.validate()?;
+    }
+
+    plan.phases[phase_index].execution_id = replacement_id.clone();
+    plan.phases[phase_index].status = RunPhaseStatus::Completed;
+    for phase in &mut plan.phases {
+        for dependency in &mut phase.depends_on {
+            if *dependency == execution_id {
+                *dependency = replacement_id.clone();
+            }
+        }
+    }
+    if relinked_execution {
+        execution::save(&root, &execution_state, revision)?;
+    }
     runplan::save(&root, &plan)?;
     Ok(plan)
 }
@@ -1363,18 +1522,70 @@ async fn execute_run(
                         execution::save(root, &abandoned, loaded.state.revision)?;
                         continue;
                     };
-                    for &idx in &batch {
-                        plan.phases[idx].status = RunPhaseStatus::Completed;
-                        plan.phases[idx].park_payload = Some(format!("draft PR: {url}"));
+                    let mut automatic_relinks = Vec::new();
+                    for (&idx, (execution_id, original, _)) in batch.iter().zip(&locs) {
+                        let replacement = if epic::find_loop_by_id(root, execution_id).is_some() {
+                            None
+                        } else {
+                            epic::find_replacement_loop_id(root, original)
+                        };
+                        if let Some(replacement_id) = replacement {
+                            automatic_relinks.push((
+                                execution_id.clone(),
+                                replacement_id.clone(),
+                                original.clone(),
+                            ));
+                            plan.phases[idx].execution_id = replacement_id;
+                        }
+                        plan.phases[idx].status = if epic::find_loop_by_id(
+                            root,
+                            &plan.phases[idx].execution_id,
+                        )
+                        .is_some()
+                        {
+                            RunPhaseStatus::Completed
+                        } else {
+                            RunPhaseStatus::Delivered
+                        };
+                        plan.phases[idx].park_payload = Some(
+                            if plan.phases[idx].status == RunPhaseStatus::Completed {
+                                format!("draft PR: {url}")
+                            } else {
+                                format!("draft PR: {url}\ndelivered — PRD link needs repair before this can appear in progress")
+                            },
+                        );
+                    }
+                    for (old_id, new_id, _) in &automatic_relinks {
+                        for phase in &mut plan.phases {
+                            for dependency in &mut phase.depends_on {
+                                if dependency == old_id {
+                                    *dependency = new_id.clone();
+                                }
+                            }
+                        }
                     }
                     runplan::save(root, &plan)?;
 
                     let loaded = execution::load(root)?;
+                    let revision = loaded.state.revision;
+                    let mut execution_state = loaded.state;
+                    if let Some(current) = execution_state.current.as_mut() {
+                        if let Some((_, replacement_id, location)) = automatic_relinks
+                            .iter()
+                            .find(|(old_id, _, _)| *old_id == current.id)
+                        {
+                            current.id = replacement_id.clone();
+                            current.title = location.title.clone();
+                            current.origin = LoopOrigin {
+                                epic: location.epic.clone(),
+                                prd: location.prd.clone(),
+                                phase: location.phase.clone(),
+                            };
+                        }
+                    }
                     let completed =
-                        loaded
-                            .state
-                            .complete_current(chrono::Utc::now(), None, false)?;
-                    execution::save(root, &completed, loaded.state.revision)?;
+                        execution_state.complete_current(chrono::Utc::now(), None, false)?;
+                    execution::save(root, &completed, revision)?;
                 } else {
                     let reason = match verdict {
                         Some(RunVerdict::Pass) => "green verification passed, but queue-time consent for an unattended draft PR is required".to_string(),
@@ -1470,10 +1681,12 @@ async fn execute_run(
     finalize_worktree(root, &worktree, &mut plan);
     runplan::save(root, &plan)?;
 
-    let all_completed = plan
-        .phases
-        .iter()
-        .all(|p| p.status == RunPhaseStatus::Completed);
+    let all_completed = plan.phases.iter().all(|p| {
+        matches!(
+            p.status,
+            RunPhaseStatus::Completed | RunPhaseStatus::Delivered
+        )
+    });
     let any_parked = plan
         .phases
         .iter()
@@ -1504,11 +1717,12 @@ async fn execute_run(
 /// — prune vs. keep, and keep-on-prune-failure — is testable against a real
 /// worktree without needing a live `claude_session` turn.
 fn finalize_worktree(root: &Path, worktree: &Path, plan: &mut RunPlan) {
-    if plan
-        .phases
-        .iter()
-        .all(|phase| phase.status == RunPhaseStatus::Completed)
-    {
+    if plan.phases.iter().all(|phase| {
+        matches!(
+            phase.status,
+            RunPhaseStatus::Completed | RunPhaseStatus::Delivered
+        )
+    }) {
         if let Err(error) = git::worktree_remove(root, worktree) {
             plan.environment.worktree_kept = true;
             if let Some(phase) = plan.phases.last_mut() {
@@ -1690,6 +1904,19 @@ mod unattended_tests {
             assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
             assert!(plan.phases[0].park_payload.is_none());
         }
+    }
+
+    #[test]
+    fn delivered_phase_is_never_retryable() {
+        let mut plan = parked_chain();
+        plan.phases[0].status = RunPhaseStatus::Delivered;
+        plan.phases[0].park_payload = Some("draft PR: https://github.com/acme/repo/pull/42".into());
+
+        let error = requeue_terminal_phase(&mut plan, "phase-a")
+            .expect_err("delivered work must be relinked, never rerun");
+        assert!(error.to_string().contains("not retryable"));
+        assert_eq!(plan.phases[0].status, RunPhaseStatus::Delivered);
+        assert_eq!(requeue_all_terminal_phases(&mut plan), 0);
     }
 
     #[test]

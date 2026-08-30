@@ -101,18 +101,14 @@ export function ProjectDrawer() {
   const [isEditing, setIsEditing] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
 
-  // Night-variant selection (prd-night-run-surfaces Phase 1): while the
-  // project has a run in flight or queued, the Agent tab swaps for the night
-  // variant (phase-chip rail + budget gauges). Derived from the same
-  // getRunStatus poll the rail doors use — no new backend concept.
+  // A run in flight or queued adds a compact status companion to the Agent
+  // tab. The conversation itself remains the primary agent surface.
   const runStatus = useRunStatus(drawerOpen && project ? project.path : null);
   const nightPlan =
     runStatus && hasActiveOrQueuedRun(runStatus) && runStatus.plan ? runStatus.plan : null;
 
-  // prd-night-run-surfaces Phase 1 item 3: while the project has an
-  // active/queued run, the drawer auto-selects the Agent tab (swapped for the
-  // night variant below) — so opening a moon-badged rail door lands on the
-  // night variant, not whatever tab was last persisted. Once per continuous
+  // While the project has an active/queued run, the drawer auto-selects the
+  // Agent tab so opening a moon-badged rail door lands on its activity. Once per continuous
   // drawer-open span per project (`shouldAutoSelectNightVariant`'s latch): a
   // user who navigates away mid-run isn't yanked back, and closing the drawer
   // (or switching project) re-arms it.
@@ -239,11 +235,8 @@ export function ProjectDrawer() {
                 the inner scroll. */}
             {topLevelTab(activeTab) === "agent" ? (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
-                {nightPlan ? (
-                  <NightRunTab projectPath={project.path} plan={nightPlan} />
-                ) : (
-                  <AgentPanel projectPath={project.path} />
-                )}
+                {nightPlan && <NightRunTab projectPath={project.path} plan={nightPlan} />}
+                <AgentPanel projectPath={project.path} />
               </div>
             ) : (
               <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-6">

@@ -70,9 +70,12 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
     setAnsweringId(executionId);
     try {
       await api.answerParkedQuestion(projectPath, executionId, answers);
+      useStreamingState.getState().beginTurn(projectPath);
+      await api.queueRun(projectPath);
       resolve(executionId);
-      toast.success("Answers pinned — phase requeued");
+      toast.success("Answers pinned — run resumed");
     } catch (err) {
+      useStreamingState.getState().clear(projectPath);
       const appErr = err as AppError;
       toast.error("Failed to answer parked question", {
         description: appErr.message ?? String(err),
@@ -106,7 +109,7 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
   const cards = parkedInbox(plan).filter((c) => !resolved.has(c.phase.execution_id));
 
   return (
-    <div className="mx-auto min-h-0 w-full max-w-2xl flex-1 overflow-y-auto pb-6">
+    <section className="mx-auto mb-4 w-full max-w-3xl shrink-0 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
       <div className="mb-5 flex items-center gap-2">
         <Moon size={14} className="text-[var(--primary)]" />
         <h2 className="text-sm font-semibold tracking-tight">Night run</h2>
@@ -117,6 +120,11 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
         </span>
       </div>
 
+      <details className="mt-3 text-xs">
+        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+          Run details: phases and budgets
+        </summary>
+        <div className="mt-3 space-y-4 border-t border-border pt-3">
       {/* Phase-chip rail: one chip per phase, colored by status via the same
           map RunQueuePanel's phase rows use. Tooltip carries the loop title. */}
       <div className="rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
@@ -189,12 +197,14 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
           })}
         </div>
       </div>
+        </div>
+      </details>
 
       {/* Inline parked-question inbox (Phase 1, item 2): stacked below the
           rail/gauges, one card per currently-parked phase — same shape as
           RunQueuePanel's "Parked questions" inbox. */}
       {cards.length > 0 && (
-        <div className="mt-4 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
+        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
           <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             Parked questions ({cards.length})
           </div>
@@ -238,6 +248,6 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
           </ul>
         </div>
       )}
-    </div>
+    </section>
   );
 }

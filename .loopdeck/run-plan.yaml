@@ -1,6 +1,6 @@
-id: run-1b0a1aa4-26a0-468c-8fe1-43032107d22b
+id: run-8dc9e98b-4ecc-4480-a96d-d949b97396f6
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-27T22:59:27.664417Z
+created: 2026-08-28T09:33:26.443850Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -8,34 +8,49 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
+  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-8dc9e98b-4ecc-4480-a96d-d949b97396f6
+  worktree_branch: run/selasar-revamp-build-the-morning-report-drawer-verdict-table-parked-questions-plus2-d949b97396f6
   worktree_kept: false
-wall_clock_secs: 607
+wall_clock_secs: 616
 stall_policy: continue_independent
 phases:
-- execution_id: selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall
+- execution_id: selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
   status: completed
   interview:
-  - question: Wizard step 2 says 'pre-flight interview text inputs with skip checkboxes'. The existing IPC has no 'submit typed answers' command — `runPhaseInterview` runs a live agent session that may park AskUserQuestion cards (answered via `answerParkedQuestion`), and `skipPhaseInterview` just marks a phase skipped. What should step 2 actually do?
-    answer: Live interviews inline (Recommended) — Step 2 lists each selected phase with Run-interview / Skip controls (like RunQueuePanel's Answer/Skip). Running an interview streams the agent turn inside the wizard; if it parks a question, the question card renders inline and answers pin via answerParkedQuestion. 'Text inputs' = the answer fields on parked cards.
-  - question: Consent (`draftPrAuthorized`) is a `createRunPlan` argument, but the consent checkbox is wizard step 3 — after step 2's interviews, which can only run against an already-created plan. When does the wizard call `createRunPlan`?
-    answer: Create entering step 2, checkbox gates start (Recommended) — createRunPlan fires on the step 1→2 transition with the checkbox pre-checked (RunQueuePanel defaults it true); step 3's required checkbox then gates only the final queue-run action. If the user abandons the wizard mid-way, the created plan simply sits queued-but-unstarted (same state the current panel leaves).
+  - question: The PRD asks for a "collapsible audit-log tail" sourced from real RunReport/AuditSlice types — but AuditSlice only carries auto_allow_count + floor_denials (no raw log lines), and the PRD's Non-Goals forbid new backend endpoints. What should the collapsible tail render?
+    answer: Existing AuditSlice (Recommended)
+  - question: Where does the morning-report surface mount in the drawer? Phase 1's night variant turned out to be a swap inside the Agent tab (NightRunTab replaces AgentPanel while a run is active), not a whole-drawer variant.
+    answer: Agent-tab slot (Recommended)
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/89'
-  token_usage: 67741
-  wall_clock_secs: 301
-- execution_id: selasar-revamp/wire-the-wizard-s-final-action-to-the-existing-queue-run-command
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/92'
+  token_usage: 51649
+  wall_clock_secs: 204
+- execution_id: selasar-revamp/wire-the-room-card-s-rail-door-s-morning-report-ready-indicator-to
   status: completed
   interview:
-  - question: 'Tonight''s run worktree branches from the main tree''s HEAD, which lacks the wizard''s mount point (`PlanTonightButton`) and the Phase 1 night variant — they live only in draft PRs #87/#88, and the run-plan reorder (wizard-build before wiring) is uncommitted on this chore branch. What should the run start from?'
-    answer: 'Merge #87/#88 first (Recommended)'
-  - question: When the wizard's final action calls queueRun and it resolves, what should the UI do? (PRD is silent.)
-    answer: Close wizard, auto-switch (Recommended)
-  - question: The wizard-build loop runs first tonight and builds all 3 steps including the final consent+start button. How should the work be split so this loop's criterion ('wire the final action to queue-run') doesn't end up a duplicate or a no-op?
-    answer: Loop 1 leaves stub (Recommended)
+  - question: The RoomCard component doesn't exist yet (prd-rail-corridor-shell Phase 2 is unchecked — only the rail door ships today). What should this loop wire the "morning report ready" indicator to?
+    answer: Rail door only (Recommended)
+  - question: 'PRD Open Question deferred to Phase 3: should the "morning report ready" indicator auto-clear once the report''s been opened once, or stay until every parked question in it is resolved?'
+    answer: Clear once opened (Recommended)
   interview_status: answered
   depends_on:
-  - selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/89'
-  token_usage: 67741
-  wall_clock_secs: 301
+  - selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/92'
+  token_usage: 51649
+  wall_clock_secs: 204
+- execution_id: selasar-revamp/wire-the-report-s-answer-requeue-button-to-the-same-requeue
+  status: completed
+  interview:
+  - question: 'The night variant''s inline parked card has TWO requeue paths: structured __QUESTIONS__ payloads go through answerParkedQuestion (no queueRun after), raw payloads get requeueRunPhase + queueRun. What should the report''s parked-question section wire?'
+    answer: Both paths, identical to night variant (Recommended)
+  - question: After a successful requeue from the morning report, the run becomes active again and the report is stale. What should the drawer do?
+    answer: Stay on report, refetch it (Recommended)
+  - question: This loop depends on Phase 3 item 1 (build the report drawer), which hasn't run yet. If it runs tonight in the same queue but item 1 fails or is missing, what should this loop do?
+    answer: Abort cleanly (Recommended)
+  interview_status: answered
+  depends_on:
+  - selasar-revamp/wire-the-room-card-s-rail-door-s-morning-report-ready-indicator-to
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/92'
+  token_usage: 51649
+  wall_clock_secs: 204

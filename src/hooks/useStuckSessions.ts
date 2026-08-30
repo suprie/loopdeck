@@ -1,19 +1,6 @@
 import { useCallback } from "react";
-import { toast } from "sonner";
 import * as api from "../lib/tauri";
-import { useAppStore } from "../store/appStore";
 import { usePendingInteractions } from "../store/pendingInteractions";
-
-/**
- * Sonner's default `duration` (~4s) auto-dismisses the toast — but a stuck
- * prompt is, by definition, something the user hasn't seen yet (they were on
- * another view, or the Mac was locked). Letting the only cross-view nudge
- * vanish after 4s defeats its purpose. Pin these to `Infinity` (Sonner's
- * documented "never auto-dismiss" value) so the toast stays on screen until
- * the user clicks Answer/Approve or dismisses it. The card pill and the
- * detail-view callout already persist until answered; this matches them.
- */
-const STUCK_TOAST_DURATION = Infinity;
 
 /**
  * Reconcile "stuck" parked prompts across the whole registry —
@@ -70,60 +57,12 @@ export function useStuckSessions() {
       }),
     ]);
 
-    // Resolve project names for the toast labels. The registry is already
-    // loaded by useProjects on mount; fall back to the raw path.
-    const projects = useAppStore.getState().projects;
-    const nameFor = (path: string) =>
-      projects.find((p) => p.path === path)?.name ?? path;
-
-    // Helper to open the stuck project's drawer, where the tab-agnostic
-    // callouts (question + approval) render regardless of which tab is
-    // active.
-    const goTo = (path: string) => useAppStore.getState().openDrawer(path);
-
-    // ── Questions ──
-    const newlyStuckQuestions = usePendingInteractions
-      .getState()
-      .reconcileQuestions(questions);
-    for (const path of newlyStuckQuestions) {
-      const entry = questions.find((e) => e.path === path);
-      const firstQ = entry?.questions[0]?.question;
-      toast.warning(`Agent in ${nameFor(path)} is waiting for your answer`, {
-        description: firstQ,
-        duration: STUCK_TOAST_DURATION,
-        action: { label: "Answer", onClick: () => goTo(path) },
-      });
-    }
-
-    // ── Permissions ──
-    const newlyStuckPermissions = usePendingInteractions
-      .getState()
-      .reconcilePermissions(permissions);
-    for (const path of newlyStuckPermissions) {
-      const entry = permissions.find((e) => e.path === path);
-      // Tool name + a short snippet of the input so the user can tell at a
-      // glance what's being asked (e.g. "Bash: npm install …"). Capped to keep
-      // the toast body to one line.
-      const tool = entry?.toolName ?? "tool";
-      const inputSnippet = (entry?.input ?? "").trim().slice(0, 120);
-      toast.warning(`Agent in ${nameFor(path)} needs your approval`, {
-        description: inputSnippet ? `${tool}: ${inputSnippet}` : tool,
-        duration: STUCK_TOAST_DURATION,
-        action: { label: "Approve", onClick: () => goTo(path) },
-      });
-    }
-
-    // ── Plan approvals ──
-    const newlyStuckPlans = usePendingInteractions.getState().reconcilePlans(plans);
-    for (const path of newlyStuckPlans) {
-      const entry = plans.find((e) => e.path === path);
-      const planSnippet = (entry?.plan ?? "").trim().slice(0, 120);
-      toast.warning(`Agent in ${nameFor(path)} has a plan ready for review`, {
-        description: planSnippet || undefined,
-        duration: STUCK_TOAST_DURATION,
-        action: { label: "Review", onClick: () => goTo(path) },
-      });
-    }
+    // The drawer callout and dashboard attention list are persistent and
+    // sufficient. Reconcile them without raising an interruption-style popup.
+    const interactions = usePendingInteractions.getState();
+    interactions.reconcileQuestions(questions);
+    interactions.reconcilePermissions(permissions);
+    interactions.reconcilePlans(plans);
   }, []);
 
   return { reconcileStuckSessions };

@@ -69,14 +69,14 @@ restructuring for the drawer's layout._
 
 ### Phase 1 — Night drawer variant
 
-- [x] Build the drawer's night variant (phase-chip rail + 3 budget gauges)
+- [x] `selasar-revamp/build-the-drawer-s-night-variant-phase-chip-rail-3-budget-gauges` Build the drawer's night variant (phase-chip rail + 3 budget gauges)
       sourced from the real `RunPlan`/`RunPhase`/`RunBudgets` types,
       reusing `RunQueuePanel.tsx`'s existing phase-row and
       parked-question-parsing logic rather than re-deriving shapes.
       (2026-08-26: `NightRunTab.tsx` + `src/lib/nightRun.ts`; status maps +
       parser relocated to a single shared source; `None` budget caps fall
       back to TS mirrors of `limits.rs` defaults per run clarification.)
-- [x] Build the inline parked-question card (question text + "Answer &
+- [x] `selasar-revamp/build-the-inline-parked-question-card-question-text-answer` Build the inline parked-question card (question text + "Answer &
       requeue" button) wired to the existing requeue IPC command already
       used by `RunQueuePanel.tsx`.
       (2026-08-26: `NightRunTab.tsx` parked-question inbox below the
@@ -86,7 +86,7 @@ restructuring for the drawer's layout._
       payloads get a plain "Answer & requeue" button → `requeueRunPhase` +
       `queueRun`, the exact `RunQueuePanel` Retry flow. New
       `parkedInbox(plan)` in `lib/nightRun.ts` status-gates the cards.)
-- [x] Wire the rail door's night-run indicator and the drawer's variant
+- [x] `selasar-revamp/wire-the-rail-door-s-night-run-indicator-and-the-drawer-s-variant` Wire the rail door's night-run indicator and the drawer's variant
       selection to switch to this variant automatically when a project has
       an active `RunPlan`, per `prd-detail-drawer`'s spike decision on how
       "night run" is represented.
@@ -101,7 +101,7 @@ restructuring for the drawer's layout._
 
 ### Phase 2 — Plan-tonight wizard
 
-- [x] Build the 3-step wizard (phase picker with dependency labels + stall
+- [x] `selasar-revamp/build-the-3-step-wizard-phase-picker-with-dependency-labels-stall` Build the 3-step wizard (phase picker with dependency labels + stall
       policy toggle + budget inputs → pre-flight interview text inputs with
       skip checkboxes → consent summary + required checkbox), reusing the
       existing pre-flight-interview and queue-time-consent IPC commands.
@@ -115,7 +115,8 @@ restructuring for the drawer's layout._
       inline by polling the shared pending-question slot, answer fields are
       the "text inputs"); step 3's required checkbox gates only the final
       action.)
-- [x] Wire the wizard's final action to the existing queue-run command,
+- [x] `selasar-revamp/wire-the-wizard-s-final-action-to-the-existing-queue-run-command
+` Wire the wizard's final action to the existing queue-run command,
       confirming the phase/budget/consent payload shape matches what
       `run_executor.rs` expects.
       (2026-08-28: Start button calls the same `queueRun` IPC
@@ -126,7 +127,7 @@ restructuring for the drawer's layout._
       mirrors `queue_run`'s pending-interview guard; on resolve the wizard
       closes and auto-switches to the Agent tab, which the runStatus poll
       swaps for the night variant.)
-- [x] Add the "Plan tonight" entry point to the drawer header, gated on the
+- [x] `selasar-revamp/add-the-plan-tonight-entry-point-to-the-drawer-header-gated-on-the` Add the "Plan tonight" entry point to the drawer header, gated on the
       project having queueable PRD phases (mirroring whatever gate
       `EpicsPanel.tsx` currently uses).
       (2026-08-26: `PlanTonightButton` in `ProjectDrawer.tsx`'s header, gated
@@ -137,22 +138,22 @@ restructuring for the drawer's layout._
 
 ### Phase 3 — Morning report drawer
 
-- [ ] Build the morning-report drawer (verdict table, parked-questions
+- [ ] `selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions` Build the morning-report drawer (verdict table, parked-questions
       section reusing Phase 1's inline card, kill callout rows, collapsible
       audit-log tail) sourced from the real `RunReport`/`AuditSlice` types,
       reusing `RunQueuePanel.tsx`'s existing morning-report rendering where
       possible.
-- [ ] Wire the room card's/rail door's "morning report ready" indicator to
+- [ ] `selasar-revamp/wire-the-room-card-s-rail-door-s-morning-report-ready-indicator-to` Wire the room card's/rail door's "morning report ready" indicator to
       open this drawer.
-- [ ] Wire the report's "Answer & requeue" button to the same requeue
+- [ ] `selasar-revamp/wire-the-report-s-answer-requeue-button-to-the-same-requeue` Wire the report's "Answer & requeue" button to the same requeue
       command as the night variant's inline parked card.
 
 ### Phase 4 — Verification
 
-- [ ] Manual smoke test against a real queued run: plan tonight, let (or
+- [ ] `selasar-revamp/manual-smoke-test-against-a-real-queued-run-plan-tonight-let-or` Manual smoke test against a real queued run: plan tonight, let (or
       simulate) a phase complete, confirm the morning report shows verdicts/
       parked/kills matching the actual `RunReport`.
-- [ ] `npx tsc --noEmit` clean; `cd src-tauri && cargo test` clean, confirming
+- [ ] `selasar-revamp/npx-tsc-noemit-clean-cd-src-tauri-cargo-test-clean-confirming` `npx tsc --noEmit` clean; `cd src-tauri && cargo test` clean, confirming
       no accidental backend edits broke existing `runplan`/`run_executor`
       tests.
 

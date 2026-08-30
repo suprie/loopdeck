@@ -133,3 +133,28 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: `prd-night-run-surfaces` Phase 2's wizard needed `createRunPlan` (which takes queue-time draft-PR consent) before its step 2 could run interviews, yet the consent UX sits at step 3 — a circular ordering. Separately, the run's pre-answered clarification said a parked interview question "answers pin via `answerParkedQuestion`", but that command requires `phase.status === "parked"` (mid-run park), while a *pre-flight* interview phase stays `queued` and parks its `AskUserQuestion` on the shared pending-question slot that chat's callouts already consume.
 - **Consequences**: `createRunPlan` fires on the wizard's step 1→2 transition with the draft-PR consent checkbox pre-checked (matching `RunQueuePanel`'s default); step 3's required checkbox gates only the final `queueRun` action. Abandoning the wizard mid-way leaves the plan queued-but-unstarted — the same state the existing panel leaves, and re-entering replaces it (`createRunPlan`'s existing replace semantics, no new backend behavior). For parked interview questions, the wizard polls `listPendingQuestions` at 1s while a turn runs, renders the shared `AskUserQuestionCard` inline, and submits via `agentAnswerQuestion` — the slot's answer path — which unblocks the turn so `runPhaseInterview` resolves with the answers pinned. Documented deviation from the clarification's literal wording, honoring its intent (inline card, pinned answers) with the command that actually resolves the state it finds. The wizard's final action passes only the project path to `queueRun`, which re-reads `run-plan.yaml` — so the phase/budget/consent payload shape is exactly what `createRunPlan` (and through it `build_run_plan`) wrote, with no frontend-reconstructed payload to drift.
+
+## 2026-08-29 — Chat support code is isolated by responsibility
+- **Status**: accepted
+- **Context**: `Chat.tsx` mixed chat orchestration with reusable formatting, transcript normalization, and both parked-approval controls, making a high-churn surface hard to scan safely.
+- **Consequences**: Moved pure chat helpers into `chatUtils.ts` and approval UI into `ApprovalCards.tsx`; `Chat.tsx` preserves its existing public exports as re-exports and remains the composer/transcript coordinator.
+
+## 2026-08-29 — Harness parking contract is separate from the Claude process
+- **Status**: accepted
+- **Context**: The Claude and Codex harnesses both depend on the pending-question, permission, plan, and interrupt-slot types, but they were defined inside the 2,800-line Claude session implementation.
+- **Consequences**: Moved that shared contract to `claude_session/parking.rs` and re-exported it through `claude_session`, leaving downstream imports and runtime behavior unchanged.
+
+## 2026-08-30 — Night-run status supports, rather than replaces, the agent conversation
+- **Status**: accepted
+- **Context**: The night-run Agent tab replaced the chat transcript with phases and budgets, and answering a structured parked question requeued it without restarting execution.
+- **Consequences**: The Agent tab now keeps chat mounted with a compact, collapsible run-status companion; Answer starts the requeued run so agent activity resumes visibly.
+
+## 2026-08-30 — Multi-agent detail is on demand
+- **Status**: accepted
+- **Context**: The launcher and historical sub-run cards occupied much of the Agent tab even when the user only needed the conversation.
+- **Consequences**: A compact agent-name row now opens each sub-run in a popover, and profile selection plus launch live in a separate Run popover.
+
+## 2026-08-30 — Draft-PR delivery is terminal even when its PRD ID drifts
+- **Status**: accepted
+- **Context**: An agent could verify PASS and create a draft PR after changing/removing the queued stable ID, causing the completed work to look unmatched and tempting a costly rerun.
+- **Consequences**: Verification auto-relinks only an exact epic/PRD/phase/title match; otherwise the phase remains non-retryable `delivered` with PR evidence and a guided fallback relink.

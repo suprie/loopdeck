@@ -47,6 +47,7 @@ pub enum RunPhaseStatus {
     Queued,
     Running,
     Parked,
+    Delivered,
     Completed,
     Failed,
     Interrupted,
@@ -297,6 +298,15 @@ fn derive_verdict(p: &RunPhase) -> (PhaseVerdict, Option<String>) {
                 .map(|s| s.to_string());
             (PhaseVerdict::Pass, url)
         }
+        RunPhaseStatus::Delivered => {
+            let url = p
+                .park_payload
+                .as_deref()
+                .and_then(|payload| payload.strip_prefix("draft PR: "))
+                .and_then(|payload| payload.split('\n').next())
+                .map(str::to_string);
+            (PhaseVerdict::Pass, url)
+        }
         RunPhaseStatus::Parked => {
             let payload = p.park_payload.as_deref().unwrap_or_default();
             if payload.contains("verdict: BLOCK") {
@@ -518,6 +528,23 @@ phases:
 
         // Failed → Failed
         assert_eq!(report.phases[4].verdict, PhaseVerdict::Failed);
+    }
+
+    #[test]
+    fn report_keeps_delivered_pr_as_pass_with_its_url() {
+        let mut plan = sample_plan();
+        plan.phases[0].status = RunPhaseStatus::Delivered;
+        plan.phases[0].park_payload = Some(
+            "draft PR: https://github.com/acme/repo/pull/42\ndelivered — PRD link needs repair"
+                .into(),
+        );
+
+        let report = RunReport::from_plan(plan, AuditSlice::default());
+        assert_eq!(report.phases[0].verdict, PhaseVerdict::Pass);
+        assert_eq!(
+            report.phases[0].draft_pr_url.as_deref(),
+            Some("https://github.com/acme/repo/pull/42")
+        );
     }
 
     #[test]

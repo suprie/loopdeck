@@ -55,6 +55,8 @@ export function RunQueuePanel({
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [retryingAll, setRetryingAll] = useState(false);
   const [answeringId, setAnsweringId] = useState<string | null>(null);
+  const [relinkingId, setRelinkingId] = useState<string | null>(null);
+  const [replacementIds, setReplacementIds] = useState<Record<string, string>>({});
   const [runActive, setRunActive] = useState(false);
   const [report, setReport] = useState<RunReport | null>(null);
   const live = useStreamingState((s) => s.byPath[projectPath] ?? null);
@@ -173,6 +175,35 @@ export function RunQueuePanel({
       toast.error("Failed to retry phases", { description: appErr.message ?? String(err) });
     } finally {
       setRetryingAll(false);
+    }
+  };
+
+  const handleRelink = async (executionId: string) => {
+    const replacementId = replacementIds[executionId];
+    if (!replacementId) {
+      toast.error("Choose the PRD item that this delivered work belongs to");
+      return;
+    }
+    setRelinkingId(executionId);
+    try {
+      const updated = await api.relinkDeliveredPhase(projectPath, executionId, replacementId);
+      setPlan(updated);
+      setReplacementIds((previous) => {
+        const next = { ...previous };
+        delete next[executionId];
+        return next;
+      });
+      toast.success("Delivered work linked to the PRD", {
+        description: "The agent will not be run again.",
+      });
+      await loadReport();
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to relink delivered work", {
+        description: appErr.message ?? String(err),
+      });
+    } finally {
+      setRelinkingId(null);
     }
   };
 
@@ -390,9 +421,16 @@ export function RunQueuePanel({
                 interviewing={interviewingId === phase.execution_id}
                 skipping={skippingId === phase.execution_id}
                 retrying={retryingId === phase.execution_id}
+                relinking={relinkingId === phase.execution_id}
+                replacementId={replacementIds[phase.execution_id] ?? ""}
+                replacementOptions={Object.entries(idToTitle).filter(([id]) => id !== phase.execution_id)}
                 onAnswer={() => handleAnswer(phase.execution_id)}
                 onSkip={() => handleSkip(phase.execution_id)}
                 onRetry={() => handleRetry(phase.execution_id)}
+                onReplacementChange={(replacementId) =>
+                  setReplacementIds((previous) => ({ ...previous, [phase.execution_id]: replacementId }))
+                }
+                onRelink={() => handleRelink(phase.execution_id)}
               />
             ))}
           </ul>
@@ -616,18 +654,28 @@ function RunPhaseRow({
   interviewing,
   skipping,
   retrying,
+  relinking,
+  replacementId,
+  replacementOptions,
   onAnswer,
   onSkip,
   onRetry,
+  onReplacementChange,
+  onRelink,
 }: {
   phase: RunPhase;
   title: string;
   interviewing: boolean;
   skipping: boolean;
   retrying: boolean;
+  relinking: boolean;
+  replacementId: string;
+  replacementOptions: Array<[string, string]>;
   onAnswer: () => void;
   onSkip: () => void;
   onRetry: () => void;
+  onReplacementChange: (replacementId: string) => void;
+  onRelink: () => void;
 }) {
   const needsInterview = phase.status === "queued" && phase.interview_status === "pending";
   const busy = interviewing || skipping;
@@ -683,6 +731,33 @@ function RunPhaseRow({
         )
       )}
       </div>
+      {phase.status === "delivered" && (
+        <div className="mt-1.5 rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[11px] text-muted-foreground">
+          <p className="mb-1.5 text-foreground">
+            Draft PR was created and verification passed. Link it to the matching PRD item; this will not rerun the agent.
+          </p>
+          <div className="flex gap-1.5">
+            <select
+              value={replacementId}
+              onChange={(event) => onReplacementChange(event.target.value)}
+              disabled={relinking}
+              className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-1 text-[11px]"
+            >
+              <option value="">Choose PRD item…</option>
+              {replacementOptions.map(([id, candidateTitle]) => (
+                <option key={id} value={id}>{candidateTitle} ({id})</option>
+              ))}
+            </select>
+            <button
+              onClick={onRelink}
+              disabled={relinking || !replacementId}
+              className="rounded bg-[var(--primary)] px-2 py-1 text-[11px] font-medium text-[var(--primary-foreground)] disabled:opacity-50"
+            >
+              {relinking ? <Loader2 size={11} className="animate-spin" /> : "Link"}
+            </button>
+          </div>
+        </div>
+      )}
       {phase.park_payload && (
         <div className="mt-1 flex items-start gap-1.5 rounded bg-amber-500/5 px-2 py-1.5 text-[11px] leading-relaxed text-[var(--warning)]">
           <AlertTriangle size={11} className="mt-0.5 shrink-0" />
