@@ -5,6 +5,7 @@ import {
   sortByLastActive,
   selectRailDoors,
   hasActiveOrQueuedRun,
+  morningReportReady,
   RAIL_DOOR_LIMIT,
 } from "../../src/lib/rail.ts";
 
@@ -95,6 +96,38 @@ test("hasActiveOrQueuedRun is true when active or a phase is queued/running", ()
   assert.equal(
     hasActiveOrQueuedRun({
       plan: { phases: [{ status: "completed" }, { status: "failed" }] },
+      active: false,
+    }),
+    false,
+  );
+});
+
+test("morningReportReady needs a plan with at least one terminal phase", () => {
+  assert.equal(morningReportReady(undefined), false);
+  assert.equal(morningReportReady({ plan: null, active: false }), false);
+  // Freshly authored plan, never started — not a report.
+  assert.equal(
+    morningReportReady({ plan: { phases: [{ status: "queued" }] }, active: false }),
+    false,
+  );
+  // Finished run: terminal phases, nothing active/queued.
+  assert.equal(
+    morningReportReady({ plan: { phases: [{ status: "completed" }, { status: "parked" }] }, active: false }),
+    true,
+  );
+});
+
+test("morningReportReady is false while the night variant owns the state", () => {
+  // Active run.
+  assert.equal(
+    morningReportReady({ plan: { phases: [{ status: "completed" }] }, active: true }),
+    false,
+  );
+  // Halt-on-stall: parked phase but queued phases remain — night variant's
+  // parked inbox covers it, not the report.
+  assert.equal(
+    morningReportReady({
+      plan: { phases: [{ status: "parked" }, { status: "queued" }] },
       active: false,
     }),
     false,

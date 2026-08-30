@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Play, RotateCcw, Shield, Square as StopIcon, XCircle, Zap } from "lucide-react";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { toast } from "sonner";
-import type { AppError, ContentBlock, PhaseVerdict, RunBudgets, RunPhase, RunPlan, RunReport, StallPolicy } from "../../types";
+import type { AppError, ContentBlock, RunBudgets, RunPhase, RunPlan, RunReport, StallPolicy } from "../../types";
 import * as api from "../../lib/tauri";
 import {
   parseParkedQuestions,
   STATUS_COLOR,
   STATUS_LABEL,
+  VERDICT_COLOR,
+  VERDICT_LABEL,
 } from "../../lib/nightRun";
 import { useStreamingState } from "../../store/streamingState";
 import {
@@ -419,26 +421,8 @@ export function RunQueuePanel({
 }
 
 // ── Morning Report (prd-wake-up Phase 2) ────────────────────────────────────
-
-const VERDICT_LABEL: Record<PhaseVerdict, string> = {
-  pass: "PASS",
-  warn: "WARN",
-  block: "BLOCK",
-  killed: "KILLED",
-  failed: "FAILED",
-  parked: "PARKED",
-  running: "RUNNING",
-};
-
-const VERDICT_COLOR: Record<PhaseVerdict, string> = {
-  pass: "var(--success)",
-  warn: "var(--warning)",
-  block: "var(--destructive)",
-  killed: "var(--destructive)",
-  failed: "var(--destructive)",
-  parked: "var(--warning)",
-  running: "var(--primary)",
-};
+// Verdict label/color maps relocated to lib/nightRun.ts, shared with the
+// drawer's MorningReportTab (prd-night-run-surfaces Phase 3).
 
 function MorningReport({
   report,

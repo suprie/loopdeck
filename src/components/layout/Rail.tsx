@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutGrid, Moon, Pin, PinOff, Settings } from "lucide-react";
+import { LayoutGrid, Moon, Pin, PinOff, Settings, Sun } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/appStore";
@@ -42,11 +42,16 @@ function Door({
   project,
   active,
   nightRun,
+  morningReport,
   onSelect,
 }: {
   project: ProjectEntry;
   active: boolean;
   nightRun: boolean;
+  /** "Morning report ready" — true only while the finished plan's report is
+   *  still unopened (`morningReportSeen` latch in appStore: clears once the
+   *  report drawer has rendered it once, re-arms for a new plan id). */
+  morningReport: boolean;
   onSelect: () => void;
 }) {
   const { setPinned } = useProjects();
@@ -92,6 +97,20 @@ function Door({
               <Moon className="size-2.5 text-white" />
             </span>
           )}
+          {/* prd-night-run-surfaces Phase 3 item 2: the distinct "morning
+           *  report ready" indicator. Clicking the door opens the drawer,
+           *  which auto-selects the Agent tab — the slot the report renders
+           *  in — so the badge IS the "opens the report drawer" affordance.
+           *  Mutually exclusive with the moon badge by derivation. */}
+          {morningReport && (
+            <span
+              className="absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-surface"
+              style={{ background: "var(--primary)" }}
+              title="Morning report ready — click to read it"
+            >
+              <Sun className="size-2.5 text-white" />
+            </span>
+          )}
         </button>
       </div>
       <DropdownMenuContent align="start" side="right">
@@ -122,6 +141,10 @@ export function Rail() {
   const drawerOpen = useAppStore((s) => s.drawerOpen);
   const selectedProjectPath = useAppStore((s) => s.selectedProjectPath);
   const openDrawer = useAppStore((s) => s.openDrawer);
+  // "Clear once opened" latch (Phase 3 open question): the sun badge hides
+  // once the report has been opened for that plan id — appStore, so the
+  // drawer rendering the report clears it here too.
+  const morningReportSeen = useAppStore((s) => s.morningReportSeen);
   const { doors, overflow } = selectRailDoors(projects);
   const nightRunStatuses = useNightRunStatuses(doors.map((p) => p.path));
 
@@ -133,7 +156,11 @@ export function Rail() {
             key={project.path}
             project={project}
             active={drawerOpen && selectedProjectPath === project.path}
-            nightRun={nightRunStatuses[project.path] ?? false}
+            nightRun={nightRunStatuses[project.path]?.night ?? false}
+            morningReport={
+              (nightRunStatuses[project.path]?.reportReady ?? false) &&
+              morningReportSeen[project.path] !== nightRunStatuses[project.path]?.reportPlanId
+            }
             onSelect={() => openDrawer(project.path)}
           />
         ))}

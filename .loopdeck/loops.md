@@ -2,14 +2,13 @@
 
 ## Current
 
-- **Started**: 2026-08-28
-- **Goal**: `selasar-revamp` / `prd-night-run-surfaces` Phase 2 — complete. Both queued loops (`build-the-3-step-wizard-phase-picker-with-dependency-labels-stall`, `wire-the-wizard-s-final-action-to-the-existing-queue-run-command`) implemented in one session on a branch that first merged draft PRs #87/#88 (per the run's pre-answered clarification): `PlanTonightWizard.tsx` (3-step modal mounted from `PlanTonightButton`) + final action wired to `queueRun` (close wizard + auto-switch to the Agent tab's night variant). Verifier: PASS (2/2 criteria).
+- **Started**: 2026-08-30
+- **Goal**: `selasar-revamp` / `prd-night-run-surfaces` Phase 3 — complete. All three queued loops (`build-the-morning-report-drawer-verdict-table-parked-questions`, `wire-the-room-card-s-rail-door-s-morning-report-ready-indicator-to`, `wire-the-report-s-answer-requeue-button-to-the-same-requeue`) implemented in one session: `MorningReportTab.tsx` (verdict table + kill callouts + collapsible `AuditSlice` tail, Agent-tab slot), the rail door's sun "morning report ready" badge (clear-once-opened via `appStore.morningReportSeen`), and the report's parked-questions requeue via the shared `ParkedQuestionInbox.tsx` extracted from `NightRunTab.tsx` (both paths: `answerParkedQuestion` / `requeueRunPhase`+`queueRun`; stay-on-report latch + 5s report refetch).
 - **Status**: completed
 
 ## Next Steps
-- [ ] Review & merge the wizard's draft PR (supersedes #87/#88): https://github.com/suprie/loopdeck/pull/89
-- [ ] `prd-night-run-surfaces` Phase 3: morning-report drawer (verdict table, parked questions via Phase 1's inline card, kill callouts, audit tail)
-- [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the new wizard, through the drawer's night variant
+- [ ] Review & merge the Phase 3 draft PR
+- [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
 
 ## History
 

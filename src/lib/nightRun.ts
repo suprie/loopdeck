@@ -1,4 +1,4 @@
-import type { AskUserQuestionSpec, Epic, RunPhase, RunPhaseStatus, RunPlan } from "../types";
+import type { AskUserQuestionSpec, Epic, PhaseVerdict, RunPhase, RunPhaseStatus, RunPlan } from "../types";
 
 // ── Shared run-plan presentation (relocated from RunQueuePanel.tsx) ─────────
 // Single source for both run surfaces — RunQueuePanel's phase rows and the
@@ -198,3 +198,27 @@ export function formatDuration(secs: number): string {
   if (secs >= 60) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
   return `${secs}s`;
 }
+
+// ── Morning-report presentation (relocated from RunQueuePanel.tsx) ──────────
+// Shared by RunQueuePanel's inline MorningReport and the drawer's
+// MorningReportTab (prd-night-run-surfaces Phase 3).
+
+export const VERDICT_LABEL: Record<PhaseVerdict, string> = {
+  pass: "PASS",
+  warn: "WARN",
+  block: "BLOCK",
+  killed: "KILLED",
+  failed: "FAILED",
+  parked: "PARKED",
+  running: "RUNNING",
+};
+
+export const VERDICT_COLOR: Record<PhaseVerdict, string> = {
+  pass: "var(--success)",
+  warn: "var(--warning)",
+  block: "var(--destructive)",
+  killed: "var(--destructive)",
+  failed: "var(--destructive)",
+  parked: "var(--warning)",
+  running: "var(--primary)",
+};
