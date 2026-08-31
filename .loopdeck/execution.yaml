@@ -1,14 +1,5 @@
 schema_version: 1
-revision: 25
-current:
-  id: delivery-bookkeeping/reconciliation-model
-  title: Define persisted delivery links and mismatch states for a loop, branch, PRD, rubric result, and PR.
-  origin:
-    epic: reliable-delivery-bookkeeping
-    prd: prd-verified-delivery-reconciliation
-    phase: Phase 1 — Reconciliation model and visible state
-  started_at: 2026-08-31T05:02:58.004058Z
-  attempt: 1
+revision: 26
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing

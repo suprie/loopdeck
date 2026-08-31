@@ -86,17 +86,21 @@ tokens — entry length, not count, dominates cost._
       distribution of entry lengths (shortest/median/longest) to set a
       realistic target budget.
 - [x] `optimization/write-the-token-budget-entry-length-convention-and-new-archive` Write the token budget, entry-length convention, and new archive
+      trigger into the `loopdeck-memory` skill's format rules.
 
 ### Phase 2 — Compact
 
 - [x] `optimization/archive-older-completed-loops-md-entries-down-to-the-new-budget` Archive older/completed `loops.md` entries down to the new budget,
       preserving them in the existing archive location (not deleting).
 - [x] `optimization/archive-older-decisions-md-entries-the-same-way-keeping-recent` Archive older `decisions.md` entries the same way, keeping recent/
+      still-relevant decisions in the active file.
 
 ### Phase 3 — Verification
 
 - [x] `optimization/confirm-both-active-files-are-under-the-new-budget` Confirm both active files are under the new budget.
 - [x] `optimization/confirm-the-archived-content-is-still-readable-and-findable-an` Confirm the archived content is still readable and findable (an
+      index or pointer from the active file, matching whatever pattern
+      `loopdeck-memory` already documents for archives).
 
 ## Open Questions
 
