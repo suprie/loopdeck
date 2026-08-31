@@ -269,11 +269,14 @@ fn emit_snapshot(channel: &Channel<MultiAgentEvent>, run_id: &str, sub_run: Mult
 }
 
 fn worktree_path(root: &Path, run_id: &str, agent_id: &str) -> Result<PathBuf, AppError> {
-    let parent = root
-        .parent()
-        .ok_or_else(|| AppError::RunPlan("project root has no parent".into()))?;
-    Ok(parent
-        .join(".loopdeck-agent-worktrees")
+    // Contained under the project like every other managed worktree
+    // (`prd-verified-delivery-reconciliation` Phase 2) — the legacy
+    // sibling-of-repo `.loopdeck-agent-worktrees/` location is only
+    // recognized by the external-worktree detector now.
+    Ok(root
+        .join(".loopdeck")
+        .join("runs")
+        .join("multi")
         .join(run_id)
         .join(agent_id))
 }

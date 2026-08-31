@@ -8,12 +8,14 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
+  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-d80622dd-46b6-4420-abf5-d2b59c2992a1
+  worktree_branch: run/delivery-bookkeeping-reconciliation-model-plus6-d2b59c2992a1
   worktree_kept: false
-wall_clock_secs: 1509
+wall_clock_secs: 2
 stall_policy: continue_independent
 phases:
 - execution_id: delivery-bookkeeping/reconciliation-model
-  status: completed
+  status: running
   interview:
   - question: Where should the persisted delivery links live? execution.yaml already holds loop state (ActiveLoop/HistoryLoop, GitEvidence on completion), but the PRD never names a file for delivery records (branch, PRD, rubric report, PR URL).
     answer: Extend execution.yaml (Recommended)
@@ -23,11 +25,10 @@ phases:
     answer: Optional provider field (Recommended)
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0
 - execution_id: delivery-bookkeeping/reconciliation-report
-  status: completed
+  status: running
   interview:
   - question: Where should the verification/discrepancy report surface in the UI?
     answer: New DeliveryReportTab
@@ -38,11 +39,10 @@ phases:
   interview_status: answered
   depends_on:
   - delivery-bookkeeping/reconciliation-model
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0
 - execution_id: delivery-bookkeeping/runs-directory
-  status: completed
+  status: running
   interview:
   - question: Worktrees under `.loopdeck/runs/` show as untracked content in the main worktree (this repo's .gitignore does not cover it). How should the run handle ignoring?
     answer: Auto-add to .gitignore
@@ -53,11 +53,10 @@ phases:
   interview_status: answered
   depends_on:
   - delivery-bookkeeping/reconciliation-report
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0
 - execution_id: delivery-bookkeeping/existing-worktree-safety
-  status: completed
+  status: running
   interview:
   - question: 'Which linked worktrees should be flagged as external legacy? This repo currently has four kinds outside `.loopdeck/runs/`: old run worktrees (`.loopdeck-runs/run-*`, no code reference remains), multi-agent worktrees (`.loopdeck-agent-worktrees/`), Claude harness worktrees (`.claude/worktrees/*`, possibly in active use tonight), and a user-manual one (`/tmp/loopdeck-pr93`).'
     answer: All external, classified (Recommended)
@@ -68,11 +67,10 @@ phases:
   interview_status: answered
   depends_on:
   - delivery-bookkeeping/runs-directory
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0
 - execution_id: delivery-bookkeeping/delivery-gates
-  status: completed
+  status: running
   interview:
   - question: At gate time, how is the PRD rubric evaluated? "Run the PRD rubric" has no existing implementation anywhere in the repo — Phase 1's reconciliation-report was answered as "Report triggers rubric run" but the mechanism itself was never pinned down.
     answer: Gate runs it fresh (Recommended)
@@ -85,11 +83,10 @@ phases:
   interview_status: answered
   depends_on:
   - delivery-bookkeeping/existing-worktree-safety
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0
 - execution_id: delivery-bookkeeping/commit-push-pr
-  status: completed
+  status: running
   interview:
   - question: 'Rubric scope at delivery time: the gate verifies against "epic PRD acceptance criteria, all must pass" — but this PRD has 5 phases and only Phase 3 is in flight. If the gate runs the whole-PRD rubric, tonight''s branch fails its own delivery (Phases 1/2/4/5 unchecked) and the loop blocks. What does "passing branch" mean for this loop''s commit-push-pr step?'
     answer: This loop's criteria only (Recommended)
@@ -100,11 +97,10 @@ phases:
   interview_status: answered
   depends_on:
   - delivery-bookkeeping/delivery-gates
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0
 - execution_id: delivery-bookkeeping/complete-after-pr
-  status: completed
+  status: running
   interview:
   - question: The checklist completion mutates tracked files (PRD checkbox `- [ ]` to `- [x]` in docs/epics/.../prd-verified-delivery-reconciliation.md, plus the delivery record in execution.yaml) AFTER the PR was already created. What happens to those edits?
     answer: Commit + push to same PR (Recommended)
@@ -115,6 +111,5 @@ phases:
   interview_status: answered
   depends_on:
   - delivery-bookkeeping/commit-push-pr
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/95'
-  token_usage: 36455
-  wall_clock_secs: 215
+  token_usage: 0
+  wall_clock_secs: 0

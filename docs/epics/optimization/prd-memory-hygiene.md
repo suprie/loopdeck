@@ -57,9 +57,26 @@ and does a one-time compaction.
 
 ## Design
 
-_Stub — the exact token budget number and entry-length target should be
-picked against the actual current file contents (Phase 1 output), not
-guessed in advance._
+_Numbers picked against Phase 1's measurement (`.loopdeck/memory-budget-report.md`),
+not guessed: pre-compaction `loops.md` ~40.0K tokens / `decisions.md` ~8.2K
+tokens (chars/4); median entry 252-297 tokens; worst single entry 4,322
+tokens — entry length, not count, dominates cost._
+
+- **Token estimate method**: chars/4 (`wc -c`, offline) — pinned by the
+  run's pre-answered clarification (no tokenizer, must work offline).
+- **Active-file budget**: 3,000 tokens (~12KB) per file, whole file —
+  matches the proven post-2026-07-19-incident healthy size (~11KB).
+- **Archive trigger**: the write that would push an active file past
+  2,400 tokens (~9.6KB) — ~10x below the retired de-facto 90KB trigger.
+- **Entry-length convention**: new decisions entries ≤ 60 words (3 bullets
+  + optional `Detail` link); new loops History `**Summary**` ≤ 50 words;
+  live-entry ceiling ~300 words / ~400 tokens (over → archive or split to a
+  `Detail` doc, never rewrite in place).
+- **Conflict rule**: the token budget supersedes the skill's count windows
+  (~15 decisions / ~5 history) wherever they conflict.
+- **Enforcement**: document-only (run's pre-answered clarification);
+  automated enforcement, if ever wanted, belongs to
+  `prd-process-discipline.md`.
 
 ## Phases
 
@@ -87,7 +104,9 @@ guessed in advance._
 
 ## Open Questions
 
-- Should the entry-length convention be enforced automatically (a
-  Stop-hook check) or just documented and trusted? If automated, that
-  belongs in `prd-process-discipline.md` rather than duplicated here —
-  resolve which PRD owns it before Phase 1 writes the skill rules.
+- ~~Should the entry-length convention be enforced automatically (a
+  Stop-hook check) or just documented and trusted?~~ **Resolved 2026-08-30**
+  (run's pre-answered clarification): **document-only** — the convention
+  lives in the `loopdeck-memory` skill's format rules and is enforced by the
+  writer. If automated enforcement is ever wanted, `prd-process-discipline.md`
+  owns it, not this PRD.

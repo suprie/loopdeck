@@ -105,13 +105,3 @@ history:
   started_at: 2026-08-30T07:49:50.771259Z
   completed_at: 2026-08-30T08:19:55.323397Z
   attempt: 1
-- id: delivery-bookkeeping/reconciliation-model
-  title: Define persisted delivery links and mismatch states for a loop, branch, PRD, rubric result, and PR.
-  origin:
-    epic: reliable-delivery-bookkeeping
-    prd: prd-verified-delivery-reconciliation
-    phase: Phase 1 — Reconciliation model and visible state
-  outcome: completed
-  started_at: 2026-08-31T05:02:58.004058Z
-  completed_at: 2026-08-31T05:28:04.833582Z
-  attempt: 1

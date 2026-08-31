@@ -337,6 +337,8 @@ export interface ActiveLoop {
   origin: LoopOrigin;
   started_at: string;
   attempt: number;
+  /** In-flight delivery links (branch, rubric). */
+  delivery?: DeliveryLinks;
 }
 
 /** A planned-but-not-started loop (`queue:`). */
@@ -357,6 +359,8 @@ export interface HistoryLoop {
   completed_at: string;
   attempt: number;
   git?: GitEvidence;
+  /** Terminal delivery record (branch, commit, PR, rubric). */
+  delivery?: DeliveryLinks;
   /** Present only for abandoned loops. */
   reason?: string;
 }
@@ -372,6 +376,83 @@ export interface ExecutionState {
 
 /** Where a loaded ExecutionState came from. Mirrors Rust `LoadSource` (PascalCase). */
 export type LoadSource = "Default" | "Primary" | "BackupRecovered";
+
+// Mirrors Rust `delivery.rs` — verified-delivery reconciliation
+// (`prd-verified-delivery-reconciliation`). Enums serialize snake_case.
+
+/** One per-criterion row of a PRD-verifier report. */
+export type CriterionStatus = "pass" | "partial" | "fail";
+
+export interface CriterionResult {
+  criterion: string;
+  status: CriterionStatus;
+  note?: string;
+}
+
+export type RubricVerdict = "pass" | "warn" | "fail";
+
+export interface RubricResult {
+  verdict: RubricVerdict;
+  checked_at: string;
+  criteria: CriterionResult[];
+}
+
+/** Persisted delivery links for a loop (branch, commit, PR, rubric). */
+export interface DeliveryLinks {
+  branch?: string;
+  commit?: string;
+  pr_url?: string;
+  pr_provider?: string;
+  rubric?: RubricResult;
+}
+
+/** serde `rename_all = "snake_case"`. */
+export type MismatchKind =
+  | "branch_missing"
+  | "commit_diverged"
+  | "wrong_branch"
+  | "pr_link_missing"
+  | "rubric_missing"
+  | "rubric_not_passing"
+  | "checklist_incomplete"
+  | "checklist_premature";
+
+export type GateBlock =
+  | "loop_not_pending"
+  | "branch_mismatch"
+  | "prd_link_missing"
+  | "rubric_missing"
+  | "rubric_not_passing";
+
+/** One loop's reconciliation slice. Mirrors Rust `LoopDeliveryReport`. */
+export interface LoopDeliveryReport {
+  loop_id: string;
+  title: string;
+  in_progress: boolean;
+  links?: DeliveryLinks;
+  mismatches: MismatchKind[];
+  gate_blocks: GateBlock[];
+}
+
+export interface DeliveryReportResponse {
+  loops: LoopDeliveryReport[];
+}
+
+/** serde `rename_all = "snake_case"`. */
+export type WorktreeClass =
+  | "managed"
+  | "legacy_run"
+  | "legacy_multi_agent"
+  | "claude_harness"
+  | "user_manual";
+
+/** One detected external linked worktree (detect-only). */
+export interface ExternalWorktree {
+  path: string;
+  branch?: string;
+  classification: WorktreeClass;
+  label: string;
+}
 
 export interface LoadedExecution {
   state: ExecutionState;

@@ -15,6 +15,7 @@ use super::agent::{
 };
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::{ClaudeEvent, TokenBudget};
+use crate::delivery;
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionState, LoopOrigin};
@@ -170,6 +171,13 @@ fn run_branch_name(plan: &RunPlan) -> String {
 /// Create the one isolated worktree used by every phase in a run. The path and
 /// branch are persisted before a turn begins, so a failed/terminated run stays
 /// inspectable and a restart does not create a second branch.
+///
+/// Resume behavior (`prd-verified-delivery-reconciliation` Phase 2): when the
+/// persisted worktree is gone from Git's inventory but its **branch still
+/// exists** (user deleted the tree, or `git worktree prune` ran), the
+/// worktree is recreated at the same path from the surviving branch instead
+/// of hard-stopping — no second branch, no lost work. Only a missing branch
+/// (nothing left to resume from) preserves the run for inspection.
 fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError> {
     if let Some(path) = &plan.environment.worktree_path {
         if git::worktree_list(root)
@@ -179,8 +187,25 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
         {
             return Ok(path.clone());
         }
+        let branch = plan.environment.worktree_branch.as_deref().ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "run worktree {} is missing and no branch was recorded; \
+                 preserving the run for inspection",
+                path.display()
+            ))
+        })?;
+        if git::branch_exists(root, branch) {
+            let worktree =
+                git::worktree_add_existing(root, path, branch).map_err(AppError::RunPlan)?;
+            info!(
+                "recreated run worktree {} from surviving branch {branch}",
+                worktree.path.display()
+            );
+            return Ok(worktree.path);
+        }
         return Err(AppError::RunPlan(format!(
-            "run worktree {} is missing; preserving the run for inspection",
+            "run worktree {} and branch {branch} are both missing; \
+             preserving the run for inspection",
             path.display()
         )));
     }
@@ -191,6 +216,27 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
     plan.environment.worktree_path = Some(worktree.path.clone());
     plan.environment.worktree_branch = Some(worktree.branch);
     Ok(worktree.path)
+}
+
+/// Managed run worktrees live inside the repo (`.loopdeck/runs/`), so without
+/// an ignore rule every run shows up as untracked noise in the main worktree.
+/// Idempotently append the rule to `.gitignore` — the only file this touches.
+fn ignore_managed_runs_dir(root: &Path) {
+    const RULE: &str = ".loopdeck/runs/";
+    let gitignore = root.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == RULE) {
+        return;
+    }
+    let mut next = existing;
+    if !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(RULE);
+    next.push('\n');
+    if std::fs::write(&gitignore, next).is_err() {
+        warn!("could not add {RULE} to .gitignore — runs will show as untracked");
+    }
 }
 
 /// Fresh worktrees intentionally contain no ignored build artifacts. Bootstrap
@@ -1590,7 +1636,17 @@ async fn execute_run(
                 }
                 let verdict = extract_verdict(&response.result);
                 if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
-                    let Some(url) = extract_draft_pr_url(&response.result) else {
+                    // The PR link: the turn's own report first; then — the
+                    // crash-retry path — an already-open PR for this run's
+                    // branch (PR creation succeeded on a previous attempt
+                    // before the bookkeeping ran).
+                    let url = extract_draft_pr_url(&response.result).or_else(|| {
+                        plan.environment
+                            .worktree_branch
+                            .as_deref()
+                            .and_then(|branch| git::open_pr_for_branch(&worktree, branch))
+                    });
+                    let Some(url) = url else {
                         let reason = "green verification passed, but no unattended draft PR URL was recorded";
                         park_batch(&mut plan, &batch, reason);
                         plan.environment.worktree_kept = true;
@@ -1606,6 +1662,55 @@ async fn execute_run(
                         execution::save(root, &abandoned, loaded.state.revision)?;
                         continue;
                     };
+
+                    // Delivery gates (Phase 3), evaluated fresh from this
+                    // turn's own verifier report — never a stale persisted
+                    // verdict. Idempotent finish is exempt: when every
+                    // checklist item is already checked and an open PR claims
+                    // the branch, this is a retry completing bookkeeping a
+                    // previous attempt already delivered, not a new delivery.
+                    let rubric =
+                        delivery::extract_rubric_result(&response.result, chrono::Utc::now());
+                    let already_delivered = locs.iter().all(|(execution_id, _, _)| {
+                        epic::loop_checked(root, execution_id) == Some(true)
+                    });
+                    if !already_delivered {
+                        let recorded_branch =
+                            plan.environment.worktree_branch.clone().unwrap_or_default();
+                        let branch_matches = git::current_branch(&worktree)
+                            .map(|live| live == recorded_branch)
+                            .unwrap_or(false);
+                        let lead_checked = epic::loop_checked(root, &locs[0].0);
+                        let blocks = delivery::evaluate_delivery_gates(
+                            lead_checked.map(|checked| !checked),
+                            branch_matches,
+                            lead_checked.is_some(),
+                            rubric.as_ref(),
+                        );
+                        if !blocks.is_empty() {
+                            let reason = format!(
+                                "delivery gate blocked: {}",
+                                blocks
+                                    .iter()
+                                    .map(std::string::ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            );
+                            park_batch(&mut plan, &batch, &reason);
+                            plan.environment.worktree_kept = true;
+                            for (execution_id, _, _) in &locs {
+                                park_blocked_dependents(&mut plan, execution_id);
+                            }
+                            runplan::save(root, &plan)?;
+                            let loaded = execution::load(root)?;
+                            let abandoned =
+                                loaded
+                                    .state
+                                    .abandon_current(reason, chrono::Utc::now(), false)?;
+                            execution::save(root, &abandoned, loaded.state.revision)?;
+                            continue;
+                        }
+                    }
                     let mut automatic_relinks = Vec::new();
                     for (&idx, (execution_id, original, _)) in batch.iter().zip(&locs) {
                         let replacement = if epic::find_loop_by_id(root, execution_id).is_some() {
@@ -1678,6 +1783,20 @@ async fn execute_run(
                                 phase: location.phase.clone(),
                             };
                         }
+                        // The terminal delivery record (Phase 3, loop
+                        // `complete-after-pr`): branch, commit, PR, and the
+                        // rubric result that gated it — persisted only now
+                        // that PR creation has actually succeeded.
+                        // `complete_current` carries it into the history
+                        // entry; the checklist (already updated above)
+                        // remains the only completion authority.
+                        current.delivery = Some(delivery::DeliveryLinks {
+                            branch: plan.environment.worktree_branch.clone(),
+                            commit: git::head_commit(&worktree),
+                            pr_url: Some(url.clone()),
+                            pr_provider: url.contains("github.com").then(|| "github".to_string()),
+                            rubric: rubric.clone(),
+                        });
                     }
                     let completed =
                         execution_state.complete_current(chrono::Utc::now(), None, false)?;
@@ -2390,6 +2509,68 @@ mod unattended_tests {
         let err = ensure_worktree(&dir, &mut plan).unwrap_err();
         assert!(err.to_string().contains("missing"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Resume-from-branch (`prd-verified-delivery-reconciliation` Phase 2):
+    /// a recorded worktree removed from Git's inventory while its branch
+    /// survived is recreated at the same path from that branch — no second
+    /// branch, no hard stop.
+    #[test]
+    fn ensure_worktree_recreates_from_surviving_branch() {
+        let dir = temp_git_repo("recreate");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let first = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let branch = plan.environment.worktree_branch.clone().unwrap();
+
+        git::worktree_remove(&dir, &first).expect("remove worktree, keep branch");
+        assert!(!first.exists());
+        assert!(git::branch_exists(&dir, &branch));
+
+        let second = ensure_worktree(&dir, &mut plan).expect("recreate from branch");
+
+        assert_eq!(first, second, "recreated at the same recorded path");
+        assert!(second.exists());
+        assert_eq!(
+            git::worktree_list(&dir)
+                .unwrap()
+                .iter()
+                .filter(|p| **p == second)
+                .count(),
+            1
+        );
+
+        git::worktree_remove(&dir, &second).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// New managed worktrees land under `.loopdeck/runs/` and the ignore rule
+    /// keeping them out of the main worktree's untracked view is appended
+    /// exactly once.
+    #[test]
+    fn ensure_worktree_ignores_managed_runs_dir_once() {
+        let dir = temp_git_repo("ignore");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let second = ensure_worktree(&dir, &mut plan).expect("resume");
+
+        // Git canonicalizes the worktree path (`/var` → `/private/var` on
+        // macOS); compare against the canonical repo dir.
+        let canonical_dir = std::fs::canonicalize(&dir).unwrap();
+        assert!(worktree.starts_with(canonical_dir.join(".loopdeck").join("runs")));
+        assert_eq!(worktree, second);
+        let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(
+            gitignore
+                .lines()
+                .filter(|l| l.trim() == ".loopdeck/runs/")
+                .count(),
+            1,
+            "ignore rule appended exactly once"
+        );
+
+        git::worktree_remove(&dir, &worktree).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 

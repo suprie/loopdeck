@@ -211,7 +211,10 @@ pub(crate) fn build_combined_phase_prompt(
              before invoking `loopdeck-open-pr` at all. Before any push, run the \
              unattended open-pr skill's required staged-diff secret scan; a hit \
              must abort the draft PR and report a parked phase, never be ignored. \
-             The PR body's `## Verify Verdict` section must reproduce, verbatim, \
+             The delivery commit's message must include a concise rubric summary \
+             line (e.g. `Rubric: PASS — 7/7 criteria`) alongside the PR body's \
+             fuller evidence. The PR body's `## Verify Verdict` section must \
+             reproduce, verbatim, \
              the per-criterion table and `**Verdict:**` line from the \
              `loopdeck-prd-verifier` report you already produced earlier in this \
              turn. The PR body's `## Run metadata` section must state this exact \

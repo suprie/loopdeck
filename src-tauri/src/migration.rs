@@ -434,6 +434,7 @@ fn build_preview(legacy: &LegacyLoops, spec: &[SpecEntry], now: DateTime<Utc>) -
                     origin,
                     started_at: parse_legacy_dt(&rec.started, now),
                     attempt: 1,
+                    delivery: None,
                 });
                 current_matched = true;
             }
@@ -481,6 +482,7 @@ fn build_preview(legacy: &LegacyLoops, spec: &[SpecEntry], now: DateTime<Utc>) -
                     completed_at,
                     attempt: 1,
                     git: None,
+                    delivery: None,
                     reason,
                 });
                 matched_history += 1;
