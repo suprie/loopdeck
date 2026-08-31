@@ -1,6 +1,6 @@
-id: run-d80622dd-46b6-4420-abf5-d2b59c2992a1
+id: run-49125dc8-93b0-42f8-a6c3-226058b7ae2d
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-31T02:33:37.898118Z
+created: 2026-08-31T08:12:11.214594Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -8,108 +8,56 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
-  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-d80622dd-46b6-4420-abf5-d2b59c2992a1
-  worktree_branch: run/delivery-bookkeeping-reconciliation-model-plus6-d2b59c2992a1
-  worktree_kept: false
-wall_clock_secs: 2
+  worktree_path: /Users/supriyantop/Workspace/others/loopdeck/.loopdeck/runs/run/delivery-bookkeeping-clean-handoff-plus3-226058b7ae2d
+  worktree_branch: run/delivery-bookkeeping-clean-handoff-plus3-226058b7ae2d
+  worktree_kept: true
+wall_clock_secs: 1870
 stall_policy: continue_independent
 phases:
-- execution_id: delivery-bookkeeping/reconciliation-model
-  status: running
+- execution_id: delivery-bookkeeping/clean-handoff
+  status: failed
   interview:
-  - question: Where should the persisted delivery links live? execution.yaml already holds loop state (ActiveLoop/HistoryLoop, GitEvidence on completion), but the PRD never names a file for delivery records (branch, PRD, rubric report, PR URL).
-    answer: Extend execution.yaml (Recommended)
-  - question: Does this loop include the pure reconciliation function (compute mismatch states from links + live Git/PRD data), or types only? Sibling loop `reconciliation-report` covers the user-facing report, but the PR-line between 'define mismatch states' and 'expose report' is unclear.
-    answer: Model + evaluator fn (Recommended)
-  - question: How should the PR link model providers? The PRD's open questions defer 'which providers beyond GitHub' — but the link record itself needs to know if a provider field exists now.
-    answer: Optional provider field (Recommended)
+  - question: 'PRD Open Question #1 — create the clean next worktree/branch eagerly right after PR creation, or lazily when the next loop starts?'
+    answer: Lazy. Persist the handoff record at delivery; create the `.loopdeck/runs/<next-branch>/` worktree only when the next loop starts. Delivery leaves the user on the delivered branch.
+  - question: What is the next branch based on, and what happens to the delivered worktree (PR stays unmerged)?
+    answer: Base on main (fresh from default branch). Keep the delivered worktree under `.loopdeck/runs/` untouched — branch + PR retained for review.
+  - question: Retry semantics — auto-retry overnight, or record state + idempotent retry only?
+    answer: Idempotent retry command only. No auto-retry. See `retry-recovery` below.
   interview_status: answered
   depends_on: []
+  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
   token_usage: 0
-  wall_clock_secs: 0
-- execution_id: delivery-bookkeeping/reconciliation-report
-  status: running
+  wall_clock_secs: 467
+- execution_id: delivery-bookkeeping/retry-recovery
+  status: failed
   interview:
-  - question: Where should the verification/discrepancy report surface in the UI?
-    answer: New DeliveryReportTab
-  - question: Does the Phase 1 report run the PRD rubric itself, or only display whatever rubric result is already persisted in the delivery links?
-    answer: Report triggers rubric run
-  - question: Where does PR state in the report come from?
-    answer: Persisted link only (Recommended)
+  - question: Should retry-recovery auto-retry push/PR-creation failures overnight (transient errors), or only record recoverable state and expose an idempotent manual retry (PRD P0 says UI "offers the idempotent next action")?
+    answer: 'Idempotent retry command only. On failure, persist the recoverable delivery record (stage: nothing mutated / committed / pushed), expose one idempotent retry command that resumes from the recorded stage, and surface reason + next safe action in the UI. No automatic retries.'
   interview_status: answered
   depends_on:
-  - delivery-bookkeeping/reconciliation-model
+  - delivery-bookkeeping/clean-handoff
+  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
   token_usage: 0
-  wall_clock_secs: 0
-- execution_id: delivery-bookkeeping/runs-directory
-  status: running
+  wall_clock_secs: 467
+- execution_id: delivery-bookkeeping/delivery-integration-tests
+  status: failed
   interview:
-  - question: Worktrees under `.loopdeck/runs/` show as untracked content in the main worktree (this repo's .gitignore does not cover it). How should the run handle ignoring?
-    answer: Auto-add to .gitignore
-  - question: 'Resume behavior: run plan records worktree path, but worktree is gone from `git worktree list` (user deleted it, or `git worktree prune` ran) while the branch still exists. Current code hard-stops with ''preserving the run for inspection''. What should the overnight run do?'
-    answer: Recreate from branch
-  - question: PRD says 'newly created managed worktrees' live in `.loopdeck/runs/`. `multi_agent.rs` still creates worktrees under `.loopdeck-agent-worktrees/` (root-level, sibling of repo). Include those in this loop's scope?
-    answer: Both
+  - question: Push/PR-failure coverage can't rely on network or `gh` auth overnight — how is PR-creation failure simulated?
+    answer: Stub `gh` (PATH/env override) that exits non-zero or emits no PR URL, plus real git against local bare remotes in temp dirs. Deterministic, no network, no credentials.
   interview_status: answered
   depends_on:
-  - delivery-bookkeeping/reconciliation-report
+  - delivery-bookkeeping/retry-recovery
+  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
   token_usage: 0
-  wall_clock_secs: 0
-- execution_id: delivery-bookkeeping/existing-worktree-safety
-  status: running
+  wall_clock_secs: 467
+- execution_id: delivery-bookkeeping/prd-acceptance-audit
+  status: failed
   interview:
-  - question: 'Which linked worktrees should be flagged as external legacy? This repo currently has four kinds outside `.loopdeck/runs/`: old run worktrees (`.loopdeck-runs/run-*`, no code reference remains), multi-agent worktrees (`.loopdeck-agent-worktrees/`), Claude harness worktrees (`.claude/worktrees/*`, possibly in active use tonight), and a user-manual one (`/tmp/loopdeck-pr93`).'
-    answer: All external, classified (Recommended)
-  - question: What surface should this loop ship for the detection result?
-    answer: Backend + UI section (Recommended)
-  - question: PRD design says the view 'lets the user resume or explicitly relocate them when safe', but the loop title is detect-only. Are user-initiated actions in this loop's scope?
-    answer: Detect only (Recommended)
+  - question: (none)
+    answer: (none) — loop is verification-only per its description; audit reports P0 evidence and documents gaps without fixing them.
   interview_status: answered
   depends_on:
-  - delivery-bookkeeping/runs-directory
+  - delivery-bookkeeping/delivery-integration-tests
+  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
   token_usage: 0
-  wall_clock_secs: 0
-- execution_id: delivery-bookkeeping/delivery-gates
-  status: running
-  interview:
-  - question: At gate time, how is the PRD rubric evaluated? "Run the PRD rubric" has no existing implementation anywhere in the repo — Phase 1's reconciliation-report was answered as "Report triggers rubric run" but the mechanism itself was never pinned down.
-    answer: Gate runs it fresh (Recommended)
-  - question: Who evaluates the criteria when the rubric does run (whatever triggers it)? The PRD says "per-criterion report" but never says what a criterion is or who judges it.
-    answer: Agent verifier (Recommended)
-  - question: What is the pass bar for the rubric gate — what counts as "non-passing"?
-    answer: All criteria pass (Recommended)
-  - question: Where do the gates get wired in — who invokes them?
-    answer: Shared fn + run executor (Recommended)
-  interview_status: answered
-  depends_on:
-  - delivery-bookkeeping/existing-worktree-safety
-  token_usage: 0
-  wall_clock_secs: 0
-- execution_id: delivery-bookkeeping/commit-push-pr
-  status: running
-  interview:
-  - question: 'Rubric scope at delivery time: the gate verifies against "epic PRD acceptance criteria, all must pass" — but this PRD has 5 phases and only Phase 3 is in flight. If the gate runs the whole-PRD rubric, tonight''s branch fails its own delivery (Phases 1/2/4/5 unchecked) and the loop blocks. What does "passing branch" mean for this loop''s commit-push-pr step?'
-    answer: This loop's criteria only (Recommended)
-  - question: What gets committed and PR'd tonight? The main worktree on codex/delivery-reconciliation is dirty with ~13 modified files spanning this epic's docs PLUS unrelated edits (docs/epics/optimization/prd-memory-hygiene.md, selasar-revamp PRDs, .loopdeck bookkeeping, src/ and src-tauri/ changes).
-    answer: Everything on the branch (Recommended)
-  - question: 'PR state when created: draft or ready-for-review? The PRD just says "create a PR". The loopdeck-open-pr skill ships branches as draft PRs, and prior run PR #92 was a draft.'
-    answer: Ready for review
-  interview_status: answered
-  depends_on:
-  - delivery-bookkeeping/delivery-gates
-  token_usage: 0
-  wall_clock_secs: 0
-- execution_id: delivery-bookkeeping/complete-after-pr
-  status: running
-  interview:
-  - question: The checklist completion mutates tracked files (PRD checkbox `- [ ]` to `- [x]` in docs/epics/.../prd-verified-delivery-reconciliation.md, plus the delivery record in execution.yaml) AFTER the PR was already created. What happens to those edits?
-    answer: Commit + push to same PR (Recommended)
-  - question: 'If the run crashes (or gh returns ambiguous success) after PR creation succeeds but before the checklist item is written, and the loop re-runs overnight: what should it do on finding an existing open PR for the branch?'
-    answer: Idempotent finish (Recommended)
-  - question: 'Who writes the loop''s terminal state — does this loop''s code flip the execution to outcome: completed in execution.yaml history, or does it only persist the delivery record and leave loop status to the existing run-executor transition?'
-    answer: Run executor owns it (Recommended)
-  interview_status: answered
-  depends_on:
-  - delivery-bookkeeping/commit-push-pr
-  token_usage: 0
-  wall_clock_secs: 0
+  wall_clock_secs: 467

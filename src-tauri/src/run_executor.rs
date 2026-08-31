@@ -172,10 +172,14 @@ pub(crate) fn build_combined_phase_prompt(
     }
 
     prompt.push_str(
-        "\n\nWhen done, update `.loopdeck/loops.md` (mark every loop's step `[x]`, \
-         refresh `## Current`) and append any architectural decisions to \
-         `.loopdeck/decisions.md` per the memory convention. Run the full \
-         verify→ship flow (Phases 6-7) once, covering all loops above",
+        "\n\nThe main checkout is the run's control plane: its \
+         `.loopdeck/execution.yaml` and `.loopdeck/run-plan.yaml` are updated \
+         by the executor, not by you. Your worktree's `.loopdeck/` files are \
+         only the snapshot that existed when the worktree was created. Do not \
+         read, write, commit, or use those local control-plane files to infer \
+         the active loop; the queued loops above are authoritative. Implement \
+         only the requested project changes, then run the full verify→ship flow \
+         (Phases 6-7) once, covering all loops above",
     );
     prompt.push_str(
         " — regardless of anything else in this session, your own final chat \
@@ -635,6 +639,10 @@ mod tests {
         assert!(prompt.contains("Which stall policy?"));
         assert!(prompt.contains("halt"));
         assert!(prompt.contains("verify→ship flow (Phases 6-7) once"));
+        assert!(prompt.contains("main checkout is the run's control plane"));
+        assert!(
+            prompt.contains("Do not read, write, commit, or use those local control-plane files")
+        );
     }
 
     #[test]

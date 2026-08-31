@@ -112,6 +112,12 @@ MUST update the `.loopdeck/` memory files after significant work.
 | `.loopdeck/decisions.md` | Append any architectural decisions made (date, status, context) |
 | `.loopdeck/loops.md` | Update current loop status, next steps, move completed loops to history |
 
+**Exception — LoopDeck-managed unattended worktrees:** the registered project's
+main checkout owns `.loopdeck/execution.yaml`, `.loopdeck/run-plan.yaml`, and
+delivery bookkeeping. Do not read, edit, or commit `.loopdeck/` state from a
+managed run worktree; the queue executor supplies the authoritative queued-loop
+context and performs those transitions.
+
 ### Decision format
 
 ```markdown
@@ -139,4 +145,3 @@ MUST update the `.loopdeck/` memory files after significant work.
 ```
 
 The Stop hook in `.Codex/settings.local.json` enforces this convention automatically.
-

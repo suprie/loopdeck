@@ -146,3 +146,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: `prd-verified-delivery-reconciliation` Phase 3. Checklist completion could happen without branch/PRD/rubric/PR evidence, and a rerun after a delivered PR risked double-delivering.
 - **Consequences**: `execute_run`'s success path parses the turn's own verifier report into a `RubricResult` and evaluates `evaluate_delivery_gates` fresh (loop pending, branch match, PRD link, rubric all-pass); any block parks the batch before any completion mutation. `DeliveryLinks` (branch, head commit, PR URL, provider, rubric) are persisted onto the loop before `complete_current`, and the PRD checklist items are checked only after the draft PR exists (`epic::complete_prd_loop`, idempotent). An idempotent-finish path (all checklist items already checked + an open PR on the branch) bypasses the gates so a retry after a successful delivery completes instead of re-delivering.
+
+## 2026-09-01 — Session heartbeat
+- **Status**: proposed
+- **Context**: AI session active on Selasar development.
+
