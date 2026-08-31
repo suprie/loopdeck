@@ -418,19 +418,22 @@ pub fn toggle_prd_loop(
 
     for (i, line) in content.lines().enumerate() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-            if rest.trim() == needle {
-                found = Some((i, false));
-                break;
-            }
-        } else if let Some(rest) = trimmed
+        let (rest, checked) = if let Some(r) = trimmed.strip_prefix("- [ ] ") {
+            (r, false)
+        } else if let Some(r) = trimmed
             .strip_prefix("- [x] ")
             .or_else(|| trimmed.strip_prefix("- [X] "))
         {
-            if rest.trim() == needle {
-                found = Some((i, true));
-                break;
-            }
+            (r, true)
+        } else {
+            continue;
+        };
+        // Titles parsed off a checklist line drop a leading `` `id` `` token
+        // (`split_loop_id`), so callers address items by id-less title. Strip
+        // the token here too or every ID-bearing line stops matching.
+        if split_loop_id(rest).1 == needle {
+            found = Some((i, checked));
+            break;
         }
     }
 
@@ -463,25 +466,36 @@ pub fn complete_prd_loop(
     prd_filename: &str,
     loop_title: &str,
 ) -> Result<(), AppError> {
-    let already_complete = parse_epics(repo_path)
+    // Callers address the PRD either by frontmatter slug (`find_loop_by_id`
+    // returns `prd.slug`, no `.md`) or by filename (the interactive UI passes
+    // `prd.file`). Accept both so delivery automation can resolve the file.
+    let prd = parse_epics(repo_path)
         .into_iter()
         .find(|epic| epic.slug == epic_slug)
-        .and_then(|epic| epic.prds.into_iter().find(|prd| prd.slug == prd_filename))
-        .and_then(|prd| {
-            prd.phases
+        .and_then(|epic| {
+            epic.prds
                 .into_iter()
-                .flat_map(|phase| phase.loops)
-                .find(|item| item.title == loop_title)
+                .find(|prd| prd.slug == prd_filename || prd.file == prd_filename)
         })
+        .ok_or_else(|| {
+            AppError::ProjectNotFound(format!("PRD file not found: {epic_slug}/{prd_filename}"))
+        })?;
+
+    let already_complete = prd
+        .phases
+        .into_iter()
+        .flat_map(|phase| phase.loops)
+        .find(|item| item.title == loop_title)
         .map(|item| item.checked)
         .ok_or_else(|| {
             AppError::ProjectNotFound(format!(
-                "checklist item not found in {epic_slug}/{prd_filename}: {loop_title}"
+                "checklist item not found in {epic_slug}/{}: {loop_title}",
+                prd.file
             ))
         })?;
 
     if !already_complete {
-        toggle_prd_loop(repo_path, epic_slug, prd_filename, loop_title)?;
+        toggle_prd_loop(repo_path, epic_slug, &prd.file, loop_title)?;
     }
     Ok(())
 }
@@ -1521,6 +1535,48 @@ Prose here.
 - [ ] Add docs/epics/ to bootstrap
 - [ ] Register Tauri commands
 ";
+
+    #[test]
+    fn complete_prd_loop_accepts_the_slug_without_md() {
+        let dir = create_temp_repo();
+        write_epic(&dir, "support-project-management", VALID_EPIC_README);
+        write_prd(
+            &dir,
+            "support-project-management",
+            "prd-spec-layer.md",
+            VALID_PRD,
+        );
+
+        // `find_loop_by_id` addresses the PRD by frontmatter slug (no `.md`);
+        // delivery automation passes that form straight through.
+        complete_prd_loop(
+            &dir,
+            "support-project-management",
+            "prd-spec-layer",
+            "Write unit tests",
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(
+            dir.join("docs")
+                .join("epics")
+                .join("support-project-management")
+                .join("prd-spec-layer.md"),
+        )
+        .unwrap();
+        assert!(updated.contains("- [x] Write unit tests"));
+        assert!(updated.contains("- [ ] Register Tauri commands"));
+
+        // Idempotent: a second call never reopens or errors.
+        complete_prd_loop(
+            &dir,
+            "support-project-management",
+            "prd-spec-layer.md",
+            "Write unit tests",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     // ── Frontmatter extraction tests ─────────────────────────────
 

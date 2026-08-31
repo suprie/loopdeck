@@ -16,10 +16,12 @@ use super::agent::{
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::{ClaudeEvent, TokenBudget};
 use crate::delivery;
+use crate::delivery_retry;
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
+use crate::handoff;
 use crate::limits;
 use crate::run_executor::{
     self, build_batch_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
@@ -213,10 +215,35 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
     let path = run_worktree_path(root, &branch);
     ignore_managed_runs_dir(root);
     std::fs::create_dir_all(path.parent().expect("worktree path has a parent"))?;
-    let worktree = git::worktree_add(root, &path, &branch).map_err(AppError::RunPlan)?;
+    // Clean handoff (`prd-verified-delivery-reconciliation` Phase 4): every
+    // new run branch is cut from the repo's default branch — fresh, never
+    // stacked on a delivered/stray checkout the main worktree happens to be
+    // on. A fix landing on a *different* branch must not silently ride into
+    // the next run's base.
+    let base = git::default_branch(root).unwrap_or_else(|| "HEAD".to_string());
+    let worktree =
+        git::worktree_add_from(root, &path, &branch, &base).map_err(AppError::RunPlan)?;
     plan.environment.worktree_path = Some(worktree.path.clone());
     plan.environment.worktree_branch = Some(worktree.branch);
     Ok(worktree.path)
+}
+
+/// Persist the clean-handoff record at delivery (Phase 4, `clean-handoff`).
+/// Lazy by design: this records *what was delivered and where the next run
+/// starts from* — the `.loopdeck/runs/<next-branch>/` worktree is only created
+/// when the next loop actually starts. Best-effort: a failed write parks a
+/// note on the last phase, it never fails the delivery itself.
+fn record_handoff(root: &Path, plan: &RunPlan, worktree: &Path, pr_url: &str) {
+    let record = handoff::HandoffRecord {
+        delivered_branch: plan.environment.worktree_branch.clone().unwrap_or_default(),
+        pr_url: pr_url.to_string(),
+        worktree: worktree.to_path_buf(),
+        next_base: git::default_branch(root).unwrap_or_else(|| "main".to_string()),
+        delivered_at: chrono::Utc::now(),
+    };
+    if let Err(error) = handoff::save(root, &record) {
+        warn!("could not persist delivery handoff record: {error}");
+    }
 }
 
 /// Managed run worktrees live inside the repo (`.loopdeck/runs/`), so without
@@ -1037,7 +1064,10 @@ pub async fn requeue_failed_run_phases(
     Ok(plan)
 }
 
-fn requeue_terminal_phase(plan: &mut RunPlan, execution_id: &str) -> Result<(), AppError> {
+pub(crate) fn requeue_terminal_phase(
+    plan: &mut RunPlan,
+    execution_id: &str,
+) -> Result<(), AppError> {
     let Some(phase) = plan
         .phases
         .iter_mut()
@@ -1637,6 +1667,10 @@ async fn execute_run(
                 }
                 let verdict = extract_verdict(&response.result);
                 if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
+                    // Retained before any delivery decision so a recoverable
+                    // record can carry the rubric evidence (retry-recovery).
+                    let rubric =
+                        delivery::extract_rubric_result(&response.result, chrono::Utc::now());
                     // The PR link: the turn's own report first; then — the
                     // crash-retry path — an already-open PR for this run's
                     // branch (PR creation succeeded on a previous attempt
@@ -1649,6 +1683,35 @@ async fn execute_run(
                     });
                     let Some(url) = url else {
                         let reason = "green verification passed, but no unattended draft PR URL was recorded";
+                        // Recoverable delivery record (Phase 4,
+                        // `retry-recovery`): how far the delivery got in Git
+                        // and why it stopped, so one idempotent retry command
+                        // can resume from that stage. No automatic retry.
+                        if let Err(error) = delivery_retry::save(
+                            root,
+                            &delivery_retry::DeliveryRetryRecord {
+                                execution_ids: locs
+                                    .iter()
+                                    .map(|(execution_id, _, _)| execution_id.clone())
+                                    .collect(),
+                                branch: plan
+                                    .environment
+                                    .worktree_branch
+                                    .clone()
+                                    .unwrap_or_default(),
+                                worktree: worktree.clone(),
+                                stage: delivery_retry::detect_stage(&worktree),
+                                reason: reason.to_string(),
+                                rubric: rubric.clone(),
+                                pr_title: locs
+                                    .first()
+                                    .map(|(_, location, _)| location.title.clone())
+                                    .unwrap_or_default(),
+                                recorded_at: chrono::Utc::now(),
+                            },
+                        ) {
+                            warn!("could not persist the recoverable delivery record: {error}");
+                        }
                         park_batch(&mut plan, &batch, reason);
                         plan.environment.worktree_kept = true;
                         for (execution_id, _, _) in &locs {
@@ -1670,8 +1733,6 @@ async fn execute_run(
                     // checklist item is already checked and an open PR claims
                     // the branch, this is a retry completing bookkeeping a
                     // previous attempt already delivered, not a new delivery.
-                    let rubric =
-                        delivery::extract_rubric_result(&response.result, chrono::Utc::now());
                     let already_delivered = locs.iter().all(|(execution_id, _, _)| {
                         epic::loop_checked(root, execution_id) == Some(true)
                     });
@@ -1802,6 +1863,10 @@ async fn execute_run(
                     let completed =
                         execution_state.complete_current(chrono::Utc::now(), None, false)?;
                     execution::save(root, &completed, revision)?;
+                    // Clean handoff (Phase 4): the record that the next run
+                    // starts fresh from the default branch while this branch,
+                    // PR, and worktree stay retained for review.
+                    record_handoff(root, &plan, &worktree, &url);
                 } else {
                     let reason = match verdict {
                         Some(RunVerdict::Pass) => "green verification passed, but queue-time consent for an unattended draft PR is required".to_string(),
@@ -1894,7 +1959,7 @@ async fn execute_run(
     }
 
     plan.wall_clock_secs = run_started.elapsed().as_secs();
-    finalize_worktree(root, &worktree, &mut plan);
+    finalize_worktree(&mut plan);
     runplan::save(root, &plan)?;
 
     let all_completed = plan.phases.iter().all(|p| {
@@ -1928,31 +1993,16 @@ async fn execute_run(
 }
 
 /// Cleanup policy for the run's isolated worktree, applied once every phase
-/// has been attempted (`prd-unattended-ship.md` P0: "prune on success, keep +
-/// flag on failure/kill"). Split out of `execute_run` so the decision itself
-/// — prune vs. keep, and keep-on-prune-failure — is testable against a real
-/// worktree without needing a live `claude_session` turn.
-fn finalize_worktree(root: &Path, worktree: &Path, plan: &mut RunPlan) {
-    if plan.phases.iter().all(|phase| {
-        matches!(
-            phase.status,
-            RunPhaseStatus::Completed | RunPhaseStatus::Delivered
-        )
-    }) {
-        if let Err(error) = git::worktree_remove(root, worktree) {
-            plan.environment.worktree_kept = true;
-            if let Some(phase) = plan.phases.last_mut() {
-                phase.park_payload = Some(format!(
-                    "draft PR succeeded, but worktree cleanup failed: {error}"
-                ));
-            }
-        } else {
-            plan.environment.worktree_path = None;
-            plan.environment.worktree_branch = None;
-        }
-    } else {
-        plan.environment.worktree_kept = true;
-    }
+/// has been attempted. `prd-unattended-ship.md` said "prune on success";
+/// `prd-verified-delivery-reconciliation` Phase 4 (`clean-handoff`)
+/// supersedes that for delivered runs: a fully-delivered worktree is
+/// **retained** under `.loopdeck/runs/` with its branch + unmerged PR for
+/// review, and the *next* run gets a fresh worktree cut from the default
+/// branch instead. Non-delivered endings (parked/failed/killed) keep + flag,
+/// exactly as before. Split out of `execute_run` so the decision is testable
+/// against a real worktree without needing a live `claude_session` turn.
+fn finalize_worktree(plan: &mut RunPlan) {
+    plan.environment.worktree_kept = true;
 }
 
 #[cfg(test)]
@@ -2473,6 +2523,81 @@ mod unattended_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Clean handoff (`prd-verified-delivery-reconciliation` Phase 4): a new
+    /// run branch is cut from the default branch, not from whatever the main
+    /// worktree has checked out. A fix committed to a stray branch must not
+    /// ride into the next run's base.
+    #[test]
+    fn ensure_worktree_bases_new_branch_on_default_branch_not_head() {
+        let dir = temp_git_repo("base");
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        run_git(&["branch", "-m", "main"]);
+        let main_tip = String::from_utf8(run_git(&["rev-parse", "main"]).stdout).unwrap();
+        // Stray branch with a commit the main worktree now sits on.
+        run_git(&["checkout", "-q", "-b", "stray-fix"]);
+        std::fs::write(dir.join("stray.txt"), "not for the next run\n").unwrap();
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "stray fix"]);
+        let stray_tip = String::from_utf8(run_git(&["rev-parse", "HEAD"]).stdout).unwrap();
+
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+
+        let tip = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&worktree)
+                .arg("rev-parse")
+                .arg("HEAD")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(tip.trim(), main_tip.trim(), "run branch must start at main");
+        assert_ne!(tip.trim(), stray_tip.trim());
+        assert!(!worktree.join("stray.txt").exists());
+
+        run_git(&["worktree", "remove", "--force", worktree.to_str().unwrap()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Clean handoff record persists at delivery and reloads with the
+    /// delivered branch, PR URL, retained worktree, and next base.
+    #[test]
+    fn record_handoff_persists_a_loadable_handoff_record() {
+        let dir = temp_git_repo("handoff");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let branch = plan.environment.worktree_branch.clone().unwrap();
+
+        record_handoff(&dir, &plan, &worktree, "https://github.com/o/r/pull/42");
+
+        let record = handoff::load(&dir)
+            .unwrap()
+            .expect("handoff record written");
+        assert_eq!(record.delivered_branch, branch);
+        assert_eq!(record.pr_url, "https://github.com/o/r/pull/42");
+        assert_eq!(record.worktree, worktree);
+        assert_eq!(record.next_base, git::default_branch(&dir).unwrap());
+
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Resume: calling `ensure_worktree` again on a plan whose recorded
     /// worktree still exists is idempotent — no second worktree/branch.
     #[test]
@@ -2575,26 +2700,35 @@ mod unattended_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Prune: every phase `Completed` → the worktree is removed and the
-    /// plan's environment fields are cleared.
+    /// Retain-on-delivery (`clean-handoff`, superseding the old prune-on-
+    /// success): every phase delivered → the worktree stays on disk under
+    /// `.loopdeck/runs/`, flagged kept, with its recorded path/branch intact
+    /// so the branch + PR stay reviewable.
     #[test]
-    fn finalize_worktree_prunes_on_full_success() {
-        let dir = temp_git_repo("prune");
+    fn finalize_worktree_retains_a_delivered_worktree_for_review() {
+        let dir = temp_git_repo("retain");
         let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
         let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
 
-        finalize_worktree(&dir, &worktree, &mut plan);
+        finalize_worktree(&mut plan);
 
-        assert!(!plan.environment.worktree_kept);
-        assert!(plan.environment.worktree_path.is_none());
-        assert!(plan.environment.worktree_branch.is_none());
-        assert!(!worktree.exists());
+        assert!(plan.environment.worktree_kept);
+        assert_eq!(
+            plan.environment.worktree_path.as_deref(),
+            Some(worktree.as_path())
+        );
+        assert!(plan.environment.worktree_branch.is_some());
+        assert!(
+            worktree.exists(),
+            "the delivered worktree must remain on disk"
+        );
 
+        git::worktree_remove(&dir, &worktree).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Keep-on-failure: any phase not `Completed` → the worktree is left on
-    /// disk and flagged, so a failed run stays inspectable.
+    /// Keep-on-failure: any phase not delivered → same retention, so a failed
+    /// run stays inspectable.
     #[test]
     fn finalize_worktree_keeps_on_any_non_completed_phase() {
         let dir = temp_git_repo("keep-failed");
@@ -2604,7 +2738,7 @@ mod unattended_tests {
         );
         let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
 
-        finalize_worktree(&dir, &worktree, &mut plan);
+        finalize_worktree(&mut plan);
 
         assert!(plan.environment.worktree_kept);
         assert_eq!(
@@ -2614,29 +2748,6 @@ mod unattended_tests {
         assert!(worktree.exists(), "a kept worktree must remain on disk");
 
         git::worktree_remove(&dir, &worktree).ok();
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Keep-and-flag: every phase `Completed` but the prune itself fails
-    /// (e.g. the recorded path no longer matches a real linked worktree) —
-    /// the run must not lose track of it silently.
-    #[test]
-    fn finalize_worktree_keeps_and_flags_when_prune_fails() {
-        let dir = temp_git_repo("prune-fails");
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        // No real worktree was ever created at this path — `git worktree
-        // remove` must fail.
-        let bogus = dir.join("never-actually-a-worktree");
-
-        finalize_worktree(&dir, &bogus, &mut plan);
-
-        assert!(plan.environment.worktree_kept);
-        let payload = plan.phases.last().unwrap().park_payload.as_deref();
-        assert!(
-            payload.is_some_and(|p| p.contains("worktree cleanup failed")),
-            "expected a cleanup-failure payload, got {payload:?}"
-        );
-
         std::fs::remove_dir_all(&dir).ok();
     }
 

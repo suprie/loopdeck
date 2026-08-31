@@ -37,10 +37,24 @@ pub struct LoopDeliveryReport {
 
 /// The full pre-mutation report — the "compare before any completion
 /// mutation" surface. PR state inside it comes from the persisted link only;
-/// the report never queries a provider live.
+/// the report never queries a provider live. Also carries the two Phase 4
+/// surfaces: the latest clean-handoff record and any recoverable delivery
+/// awaiting retry.
 #[derive(Serialize)]
 pub struct DeliveryReportResponse {
     pub loops: Vec<LoopDeliveryReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<crate::handoff::HandoffRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryState>,
+}
+
+/// The recoverable-delivery slice the UI renders: the persisted record plus
+/// the next safe action for its stage (PRD Phase 4 `retry-recovery`).
+#[derive(Serialize)]
+pub struct RetryState {
+    pub record: crate::delivery_retry::DeliveryRetryRecord,
+    pub next_action: &'static str,
 }
 
 /// Gather live Git + checklist facts for one loop's links, then reconcile.
@@ -134,7 +148,27 @@ pub fn get_delivery_report(
         ));
     }
 
-    Ok(DeliveryReportResponse { loops })
+    Ok(DeliveryReportResponse {
+        loops,
+        handoff: crate::handoff::load(&root)?,
+        retry: crate::delivery_retry::load(&root)?.map(|record| RetryState {
+            next_action: record.stage.next_action(),
+            record,
+        }),
+    })
+}
+
+/// The one idempotent retry for a failed delivery (Phase 4 `retry-recovery`).
+/// Resumes from the recorded stage — push the committed branch if needed,
+/// adopt or create the draft PR, finish the bookkeeping — and reports what
+/// it did. No automatic retries: only this user-initiated command.
+#[tauri::command]
+pub async fn retry_delivery(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<crate::delivery_retry::RetryOutcome, AppError> {
+    let root = resolve_root(&state, &path)?;
+    crate::delivery_retry::run_retry(&root)
 }
 
 /// Prompt for a fresh, user-initiated PRD-rubric run on the active loop. The
@@ -427,5 +461,86 @@ mod tests {
             ),
             Some(WorktreeClass::UserManual)
         );
+    }
+
+    /// Real-git version of the classification tests above: actual
+    /// `git worktree add` commands, one legacy run tree at the pre-containment
+    /// `../.loopdeck-runs/` location and one managed under `.loopdeck/runs/`,
+    /// both classified through the same inventory the command reads.
+    #[test]
+    fn real_git_worktrees_classify_by_location() {
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-delivery-wt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run_git = |args: &[&str], cwd: &Path| {
+            std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-C"])
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        run_git(&["init", "-b", "main"], &dir);
+        run_git(&["config", "user.email", "test@loopdeck.dev"], &dir);
+        run_git(&["config", "user.name", "LoopDeck Test"], &dir);
+        std::fs::write(dir.join("README.md"), "# test\n").unwrap();
+        run_git(&["add", "."], &dir);
+        run_git(&["commit", "-m", "initial"], &dir);
+
+        let legacy = dir
+            .parent()
+            .unwrap()
+            .join(".loopdeck-runs")
+            .join(format!("run-{}", uuid::Uuid::new_v4()));
+        let managed_branch = format!("run/{}", uuid::Uuid::new_v4());
+        let managed = dir.join(".loopdeck").join("runs").join("run-managed");
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "run/legacy-abc",
+                legacy.to_str().unwrap(),
+            ],
+            &dir,
+        );
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &managed_branch,
+                managed.to_str().unwrap(),
+            ],
+            &dir,
+        );
+
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        let inventory = git::worktree_inventory(&dir).unwrap();
+        let legacy_class = inventory
+            .iter()
+            .find(|e| e.path == legacy || e.path == std::fs::canonicalize(&legacy).unwrap())
+            .and_then(|e| classify_worktree(&canonical, e));
+        let managed_class = inventory
+            .iter()
+            .find(|e| e.path == managed || e.path == std::fs::canonicalize(&managed).unwrap())
+            .and_then(|e| classify_worktree(&canonical, e));
+
+        assert_eq!(legacy_class, Some(WorktreeClass::LegacyRun));
+        assert_eq!(managed_class, Some(WorktreeClass::Managed));
+
+        run_git(
+            &["worktree", "remove", "--force", legacy.to_str().unwrap()],
+            &dir,
+        );
+        run_git(
+            &["worktree", "remove", "--force", managed.to_str().unwrap()],
+            &dir,
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(legacy.parent().unwrap()).ok();
     }
 }

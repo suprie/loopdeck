@@ -413,7 +413,6 @@ mod tests {
 
     #[test]
     fn gates_report_each_blocked_dimension() {
-        let rubric = links().rubric.unwrap();
         let blocks = evaluate_delivery_gates(Some(false), false, false, None);
         assert!(blocks.contains(&GateBlock::LoopNotPending));
         assert!(blocks.contains(&GateBlock::BranchMismatch));
