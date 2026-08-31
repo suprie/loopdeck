@@ -91,19 +91,19 @@ shown as a repairable discrepancy rather than silently rewritten.
 
 ### Phase 1 — Reconciliation model and visible state
 
-- [ ] `delivery-bookkeeping/reconciliation-model` Define persisted delivery links and mismatch states for a loop, branch, PRD, rubric result, and PR.
-- [ ] `delivery-bookkeeping/reconciliation-report` Expose a user-facing verification and discrepancy report before delivery mutations.
+- [x] `delivery-bookkeeping/reconciliation-model` Define persisted delivery links and mismatch states for a loop, branch, PRD, rubric result, and PR.
+- [x] `delivery-bookkeeping/reconciliation-report` Expose a user-facing verification and discrepancy report before delivery mutations.
 
 ### Phase 2 — Managed worktree containment
 
-- [ ] `delivery-bookkeeping/runs-directory` Place newly created managed worktrees in `.loopdeck/runs/` and cover resume behavior.
-- [ ] `delivery-bookkeeping/existing-worktree-safety` Detect external legacy worktrees without moving or deleting them automatically.
+- [x] `delivery-bookkeeping/runs-directory` Place newly created managed worktrees in `.loopdeck/runs/` and cover resume behavior.
+- [x] `delivery-bookkeeping/existing-worktree-safety` Detect external legacy worktrees without moving or deleting them automatically.
 
 ### Phase 3 — Verified delivery pipeline
 
-- [ ] `delivery-bookkeeping/delivery-gates` Implement the branch, loop, PRD, and rubric gates that block mismatched or failing delivery.
-- [ ] `delivery-bookkeeping/commit-push-pr` Commit and push a passing branch, then create a PR that includes the rubric result.
-- [ ] `delivery-bookkeeping/complete-after-pr` Complete the matching checklist item only after PR creation succeeds and persist the delivery record.
+- [x] `delivery-bookkeeping/delivery-gates` Implement the branch, loop, PRD, and rubric gates that block mismatched or failing delivery.
+- [x] `delivery-bookkeeping/commit-push-pr` Commit and push a passing branch, then create a PR that includes the rubric result.
+- [x] `delivery-bookkeeping/complete-after-pr` Complete the matching checklist item only after PR creation succeeds and persist the delivery record.
 
 ### Phase 4 — Clean handoff and recovery
 
