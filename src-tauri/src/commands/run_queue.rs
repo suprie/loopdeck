@@ -211,6 +211,7 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
     }
     let branch = run_branch_name(plan);
     let path = run_worktree_path(root, &branch);
+    ignore_managed_runs_dir(root);
     std::fs::create_dir_all(path.parent().expect("worktree path has a parent"))?;
     let worktree = git::worktree_add(root, &path, &branch).map_err(AppError::RunPlan)?;
     plan.environment.worktree_path = Some(worktree.path.clone());
