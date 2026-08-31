@@ -2,7 +2,7 @@
 prd: prd-rail-corridor-shell
 epic: selasar-revamp
 milestone: "0.5.0"
-status: proposed
+status: completed
 description: >
   Replace the feature-first sidebar (`AppShell.tsx`) with a 72px project
   rail — one door per registered project, glowing by that project's live
@@ -89,24 +89,24 @@ project has an active/queued `RunPlan` (existing run-queue data), pending
 
 ### Phase 2 — Corridor room-card list
 
-- [ ] `selasar-revamp/build-a-roomcard-component-name-path-description-status-line` Build a `RoomCard` component (name, path, description, status line +
+- [x] `selasar-revamp/build-a-roomcard-component-name-path-description-status-line` Build a `RoomCard` component (name, path, description, status line +
       progress bar or phase-tick strip, last commit + relative time + dirty
       badge) replacing `ProjectList.tsx`'s row rendering, reusing its
       existing per-project data shape.
-- [ ] `selasar-revamp/rebuild-dashboard-tsx-s-page-head-toolbar-title-filter-chips` Rebuild `Dashboard.tsx`'s page head/toolbar (title, filter chips,
+- [x] `selasar-revamp/rebuild-dashboard-tsx-s-page-head-toolbar-title-filter-chips` Rebuild `Dashboard.tsx`'s page head/toolbar (title, filter chips,
       "Scan for repos") around the corridor layout, carrying over the
       existing `scanFolder`/`loadProjects` wiring.
-- [ ] `selasar-revamp/decide-and-implement-whether-attentionpanel-tsx-and-todaypanel-tsx` Decide and implement whether `AttentionPanel.tsx` and `TodayPanel.tsx`
+- [x] `selasar-revamp/decide-and-implement-whether-attentionpanel-tsx-and-todaypanel-tsx` Decide and implement whether `AttentionPanel.tsx` and `TodayPanel.tsx`
       fold into room-card status lines/badges or remain a separate corridor
       section.
 
 ### Phase 3 — Verification
 
-- [ ] Manual smoke test: rail-door click and corridor-card click both
+- [x] Manual smoke test: rail-door click and corridor-card click both
       navigate to the same project's (still-routed) detail page.
-- [ ] Manual smoke test: pin/unpin a project and confirm rail overflow
+- [x] Manual smoke test: pin/unpin a project and confirm rail overflow
       behavior at 6+ registered projects.
-- [ ] `npx tsc --noEmit` clean; visual pass against `prd-rebrand-tokens`'s
+- [x] `npx tsc --noEmit` clean; visual pass against `prd-rebrand-tokens`'s
       light/dark tokens.
 
 ## Open Questions

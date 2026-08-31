@@ -377,6 +377,14 @@ export async function runPhaseInterview(
   return invoke<RunPlan>("run_phase_interview", { path, executionId });
 }
 
+/** Run one combined pre-flight interview for all selected queued phases. */
+export async function runBatchPhaseInterviews(
+  path: string,
+  executionIds: string[],
+): Promise<RunPlan> {
+  return invoke<RunPlan>("run_batch_phase_interviews", { path, executionIds });
+}
+
 /**
  * Explicitly skip a queued phase's pre-flight interview — no session is
  * run; `interview_status` becomes "skipped", unblocking `queueRun` for a

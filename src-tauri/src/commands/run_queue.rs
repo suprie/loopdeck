@@ -21,8 +21,9 @@ use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::limits;
 use crate::run_executor::{
-    self, build_combined_phase_prompt, build_interview_prompt, extract_draft_pr_url,
-    extract_interview_answers, extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
+    self, build_batch_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
+    extract_batch_interview_answers, extract_draft_pr_url, extract_interview_answers,
+    extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
 use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
 use chrono::Utc;
@@ -136,11 +137,8 @@ where
     }
 }
 
-fn run_worktree_path(root: &Path, run_id: &str) -> PathBuf {
-    root.parent()
-        .unwrap_or(root)
-        .join(".loopdeck-runs")
-        .join(run_id)
+fn run_worktree_path(root: &Path, branch: &str) -> PathBuf {
+    root.join(".loopdeck").join("runs").join(branch)
 }
 
 /// Branch name for a run's worktree: derived from the first queued phase's
@@ -186,8 +184,9 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
             path.display()
         )));
     }
-    let path = run_worktree_path(root, &plan.id);
     let branch = run_branch_name(plan);
+    let path = run_worktree_path(root, &branch);
+    std::fs::create_dir_all(path.parent().expect("worktree path has a parent"))?;
     let worktree = git::worktree_add(root, &path, &branch).map_err(AppError::RunPlan)?;
     plan.environment.worktree_path = Some(worktree.path.clone());
     plan.environment.worktree_branch = Some(worktree.branch);
@@ -1195,6 +1194,91 @@ pub async fn run_phase_interview(
     Ok(plan)
 }
 
+/// Run one shared pre-flight interview for several queued phases. The agent
+/// receives every selected phase's context in one turn and asks all necessary
+/// questions through the single pending-question slot, avoiding one tap per
+/// phase while preserving phase-specific pinned answers.
+#[tauri::command]
+pub async fn run_batch_phase_interviews(
+    path: String,
+    execution_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    if execution_ids.is_empty() {
+        return Err(AppError::RunPlan(
+            "choose at least one phase to interview".into(),
+        ));
+    }
+
+    let root = resolve_root(&state, &path)?;
+    let plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
+    // Preserve picker order in the shared context; a duplicate ID must not
+    // cause an extra phase heading or a second state mutation.
+    let mut ids = Vec::with_capacity(execution_ids.len());
+    for execution_id in execution_ids {
+        if !ids.contains(&execution_id) {
+            ids.push(execution_id);
+        }
+    }
+    let mut phases = Vec::with_capacity(ids.len());
+    for execution_id in &ids {
+        let phase = plan
+            .phases
+            .iter()
+            .find(|phase| phase.execution_id == *execution_id)
+            .ok_or_else(|| {
+                AppError::RunPlan(format!("phase \"{execution_id}\" is not in the run plan"))
+            })?;
+        if phase.status != RunPhaseStatus::Queued
+            || phase.interview_status != InterviewStatus::Pending
+        {
+            return Err(AppError::RunPlan(format!(
+                "phase \"{execution_id}\" no longer needs a pre-flight interview"
+            )));
+        }
+        let loc = epic::find_loop_by_id(&root, execution_id).ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "queued phase \"{execution_id}\" no longer exists in docs/epics/"
+            ))
+        })?;
+        phases.push((execution_id.clone(), loc));
+    }
+
+    let prompt = build_batch_interview_prompt(&phases);
+    let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
+    let response = start_fresh_and_record_streaming(
+        &state,
+        &root,
+        &prompt,
+        Some(format!("Pre-flight interview ({} phases)", phases.len())),
+        &channel,
+    )
+    .await?;
+    let answers_by_phase = extract_batch_interview_answers(&response.result);
+
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
+    for execution_id in ids {
+        let phase = plan
+            .phases
+            .iter_mut()
+            .find(|phase| phase.execution_id == execution_id)
+            .ok_or_else(|| {
+                AppError::RunPlan(format!(
+                    "phase \"{execution_id}\" was removed from the run plan during its interview"
+                ))
+            })?;
+        phase.interview = answers_by_phase
+            .get(&execution_id)
+            .cloned()
+            .unwrap_or_default();
+        phase.interview_status = InterviewStatus::Answered;
+    }
+    runplan::save(&root, &plan)?;
+    Ok(plan)
+}
+
 /// Explicitly skip a queued phase's pre-flight interview — no session is
 /// run, `interview` is left as-is (typically empty), `interview_status`
 /// becomes `Skipped`. Lets the user unblock `queue_run` for a phase they've
@@ -1554,6 +1638,18 @@ async fn execute_run(
                                 format!("draft PR: {url}\ndelivered — PRD link needs repair before this can appear in progress")
                             },
                         );
+                    }
+                    // The PR URL is the delivery boundary: only now may the
+                    // checklist declare the loop done. Unlike the manual
+                    // toggle, this operation is idempotent and can never
+                    // reopen an already-checked item on a retry.
+                    for (_, location, _) in &locs {
+                        epic::complete_prd_loop(
+                            root,
+                            &location.epic,
+                            &location.prd,
+                            &location.title,
+                        )?;
                     }
                     for (old_id, new_id, _) in &automatic_relinks {
                         for phase in &mut plan.phases {
@@ -2208,12 +2304,9 @@ mod unattended_tests {
 
     fn plan_with_phases(project: &Path, phases: Vec<runplan::RunPhase>) -> RunPlan {
         let mut p = plan();
-        // `run_worktree_path` derives the worktree's destination from
-        // `root.parent()/.loopdeck-runs/<plan.id>` — every temp repo here
-        // shares the OS temp dir as its parent, so a shared `plan.id` (the
-        // `plan()` fixture's fixed "run-budget-test") would make parallel
-        // tests race to create a linked worktree at the identical path. A
-        // unique id per test keeps each worktree lifecycle test isolated.
+        // `run_worktree_path` derives the destination from the branch name,
+        // whose unique run-id suffix keeps lifecycle tests isolated even when
+        // they share a parent directory.
         p.id = format!("run-{}", uuid::Uuid::new_v4());
         p.project = project.to_path_buf();
         p.phases = phases;

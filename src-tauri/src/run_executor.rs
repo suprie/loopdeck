@@ -15,7 +15,7 @@ use crate::runplan::{
     RunPhaseStatus, RunPlan, StallPolicy,
 };
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -270,6 +270,44 @@ pub(crate) fn build_interview_prompt(execution_id: &str, loc: &LoopLocation) -> 
     )
 }
 
+/// Build one shared pre-flight interview for several queued phases. The
+/// individual phase contexts stay explicit so the agent can ask focused
+/// questions while the user only has to answer one combined card.
+pub(crate) fn build_batch_interview_prompt(phases: &[(String, LoopLocation)]) -> String {
+    let contexts = phases
+        .iter()
+        .map(|(execution_id, loc)| {
+            format!(
+                "- `{execution_id}` — \"{}\" (epic `{}`, PRD `{}`, phase `{}`)",
+                loc.title, loc.epic, loc.prd, loc.phase
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let phase_template = phases
+        .iter()
+        .map(|(execution_id, _)| {
+            format!("### Phase `{execution_id}`\n- Q: <question text>\n  A: <answer text>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    format!(
+        "You are preparing these loops to run **unattended, overnight** — no \
+         human will be present once the run starts:\n\n{contexts}\n\n\
+         Read each phase's acceptance criteria in its PRD. Identify only the \
+         ambiguities that would force a guess mid-run, and combine all useful \
+         questions into one `AskUserQuestion` call so the user can answer them \
+         together. Prefix every question's header with its loop ID. If nothing \
+         is ambiguous, ask no questions.\n\n\
+         Do not implement anything — this turn only clarifies. When you are \
+         done (whether or not you asked anything), end your final message with \
+         exactly this block. Put each question and answer under the loop it \
+         applies to; use `(none)` for a loop with no questions:\n\n\
+         ## Batch Pre-flight Answers\n\n{phase_template}\n"
+    )
+}
+
 /// Parse the `## Pre-flight Answers` block [`build_interview_prompt`] asks
 /// for out of a completed interview turn's final response text.
 ///
@@ -300,6 +338,37 @@ pub(crate) fn extract_interview_answers(text: &str) -> Vec<PinnedAnswer> {
                 });
             }
         } else if trimmed.starts_with('#') {
+            break;
+        }
+    }
+    answers
+}
+
+/// Parse the per-phase answer blocks required by [`build_batch_interview_prompt`].
+pub(crate) fn extract_batch_interview_answers(text: &str) -> HashMap<String, Vec<PinnedAnswer>> {
+    const MARKER: &str = "## Batch Pre-flight Answers";
+    let Some(idx) = text.rfind(MARKER) else {
+        return HashMap::new();
+    };
+
+    let mut answers = HashMap::<String, Vec<PinnedAnswer>>::new();
+    let mut phase_id: Option<String> = None;
+    let mut pending_question: Option<String> = None;
+    for line in text[idx + MARKER.len()..].lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("### Phase `") {
+            phase_id = rest.strip_suffix('`').map(str::to_owned);
+            pending_question = None;
+        } else if let Some(rest) = trimmed.strip_prefix("- Q:") {
+            pending_question = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("A:") {
+            if let (Some(id), Some(question)) = (phase_id.as_ref(), pending_question.take()) {
+                answers.entry(id.clone()).or_default().push(PinnedAnswer {
+                    question,
+                    answer: rest.trim().to_string(),
+                });
+            }
+        } else if trimmed.starts_with("## ") {
             break;
         }
     }
@@ -686,6 +755,35 @@ mod tests {
     }
 
     #[test]
+    fn batch_interview_prompt_keeps_every_phase_context_and_one_combined_card_instruction() {
+        let phases = vec![
+            (
+                "prd-a/loop-a".into(),
+                LoopLocation {
+                    epic: "epic-a".into(),
+                    prd: "prd-a".into(),
+                    phase: "Phase 1".into(),
+                    title: "First loop".into(),
+                },
+            ),
+            (
+                "prd-b/loop-b".into(),
+                LoopLocation {
+                    epic: "epic-b".into(),
+                    prd: "prd-b".into(),
+                    phase: "Phase 2".into(),
+                    title: "Second loop".into(),
+                },
+            ),
+        ];
+        let prompt = build_batch_interview_prompt(&phases);
+        assert!(prompt.contains("prd-a/loop-a"));
+        assert!(prompt.contains("prd-b/loop-b"));
+        assert!(prompt.contains("one `AskUserQuestion` call"));
+        assert!(prompt.contains("## Batch Pre-flight Answers"));
+    }
+
+    #[test]
     fn extract_interview_answers_parses_one_pair() {
         let text = "I asked one question.\n\n## Pre-flight Answers\n\
                      - Q: Which port should the server bind?\n  A: 8080\n";
@@ -704,6 +802,18 @@ mod tests {
         assert_eq!(answers.len(), 2);
         assert_eq!(answers[1].question, "Q2?");
         assert_eq!(answers[1].answer, "A2");
+    }
+
+    #[test]
+    fn extract_batch_interview_answers_keeps_answers_with_their_phase() {
+        let text = "## Batch Pre-flight Answers\n\n\
+                    ### Phase `prd-a/loop-a`\n\
+                    - Q: Which API?\n  A: REST\n\n\
+                    ### Phase `prd-b/loop-b`\n\
+                    - Q: Which color?\n  A: Violet\n";
+        let answers = extract_batch_interview_answers(text);
+        assert_eq!(answers["prd-a/loop-a"][0].answer, "REST");
+        assert_eq!(answers["prd-b/loop-b"][0].question, "Which color?");
     }
 
     #[test]
