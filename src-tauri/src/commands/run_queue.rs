@@ -15,10 +15,10 @@ use super::agent::{
 };
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::{ClaudeEvent, TokenBudget};
+use crate::delivery;
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionState, LoopOrigin};
-use crate::delivery;
 use crate::git;
 use crate::limits;
 use crate::run_executor::{
@@ -195,8 +195,8 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
             ))
         })?;
         if git::branch_exists(root, branch) {
-            let worktree = git::worktree_add_existing(root, path, branch)
-                .map_err(AppError::RunPlan)?;
+            let worktree =
+                git::worktree_add_existing(root, path, branch).map_err(AppError::RunPlan)?;
             info!(
                 "recreated run worktree {} from surviving branch {branch}",
                 worktree.path.display()
@@ -1669,10 +1669,8 @@ async fn execute_run(
                     // checklist item is already checked and an open PR claims
                     // the branch, this is a retry completing bookkeeping a
                     // previous attempt already delivered, not a new delivery.
-                    let rubric = delivery::extract_rubric_result(
-                        &response.result,
-                        chrono::Utc::now(),
-                    );
+                    let rubric =
+                        delivery::extract_rubric_result(&response.result, chrono::Utc::now());
                     let already_delivered = locs.iter().all(|(execution_id, _, _)| {
                         epic::loop_checked(root, execution_id) == Some(true)
                     });
@@ -1705,11 +1703,10 @@ async fn execute_run(
                             }
                             runplan::save(root, &plan)?;
                             let loaded = execution::load(root)?;
-                            let abandoned = loaded.state.abandon_current(
-                                reason,
-                                chrono::Utc::now(),
-                                false,
-                            )?;
+                            let abandoned =
+                                loaded
+                                    .state
+                                    .abandon_current(reason, chrono::Utc::now(), false)?;
                             execution::save(root, &abandoned, loaded.state.revision)?;
                             continue;
                         }
@@ -1797,9 +1794,7 @@ async fn execute_run(
                             branch: plan.environment.worktree_branch.clone(),
                             commit: git::head_commit(&worktree),
                             pr_url: Some(url.clone()),
-                            pr_provider: url
-                                .contains("github.com")
-                                .then(|| "github".to_string()),
+                            pr_provider: url.contains("github.com").then(|| "github".to_string()),
                             rubric: rubric.clone(),
                         });
                     }
@@ -2537,7 +2532,11 @@ mod unattended_tests {
         assert_eq!(first, second, "recreated at the same recorded path");
         assert!(second.exists());
         assert_eq!(
-            git::worktree_list(&dir).unwrap().iter().filter(|p| **p == second).count(),
+            git::worktree_list(&dir)
+                .unwrap()
+                .iter()
+                .filter(|p| **p == second)
+                .count(),
             1
         );
 
@@ -2563,7 +2562,10 @@ mod unattended_tests {
         assert_eq!(worktree, second);
         let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert_eq!(
-            gitignore.lines().filter(|l| l.trim() == ".loopdeck/runs/").count(),
+            gitignore
+                .lines()
+                .filter(|l| l.trim() == ".loopdeck/runs/")
+                .count(),
             1,
             "ignore rule appended exactly once"
         );

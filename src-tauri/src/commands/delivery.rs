@@ -94,7 +94,10 @@ fn report_for_loop(
 /// Build the verification and discrepancy report: the active loop plus recent
 /// history entries, each reconciled against live Git and checklist state.
 #[tauri::command]
-pub fn get_delivery_report(path: String, state: State<'_, AppState>) -> Result<DeliveryReportResponse, AppError> {
+pub fn get_delivery_report(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<DeliveryReportResponse, AppError> {
     let root = resolve_root(&state, &path)?;
     let loaded = execution::load(&root)?;
     let current_branch = git::current_branch(&root);
@@ -164,7 +167,9 @@ pub async fn run_delivery_rubric(
     let root = resolve_root(&state, &path)?;
     let loaded = execution::load(&root)?;
     let active = loaded.state.current.clone().ok_or_else(|| {
-        AppError::Conflict("no loop is in progress; nothing to run a delivery rubric against".into())
+        AppError::Conflict(
+            "no loop is in progress; nothing to run a delivery rubric against".into(),
+        )
     })?;
     let loc = epic::find_loop_by_id(&root, &active.id).ok_or_else(|| {
         AppError::ProjectNotFound(format!(
@@ -177,17 +182,21 @@ pub async fn run_delivery_rubric(
     // No-op sink channel: presence is what lets an AskUserQuestion park
     // instead of auto-denying (same trick as `run_phase_interview`).
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-    let response =
-        start_fresh_and_record_streaming(&state, &root, &prompt, Some(active.title.clone()), &channel)
-            .await?;
-    let rubric =
-        extract_rubric_result(&response.result, Utc::now()).ok_or_else(|| {
-            AppError::RunPlan(
-                "the verifier turn produced no rubric report (no criterion table, \
+    let response = start_fresh_and_record_streaming(
+        &state,
+        &root,
+        &prompt,
+        Some(active.title.clone()),
+        &channel,
+    )
+    .await?;
+    let rubric = extract_rubric_result(&response.result, Utc::now()).ok_or_else(|| {
+        AppError::RunPlan(
+            "the verifier turn produced no rubric report (no criterion table, \
                  no verdict line) — nothing retained"
-                    .into(),
-            )
-        })?;
+                .into(),
+        )
+    })?;
 
     // Persist onto the active loop's in-flight links; reload first — the
     // (possibly long) turn may have touched the file.
@@ -292,7 +301,7 @@ fn classify_worktree(root: &Path, entry: &WorktreeEntry) -> Option<WorktreeClass
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.starts_with("run-"))
-            || path.starts_with(".loopdeck-runs")
+        || path.starts_with(".loopdeck-runs")
     {
         return Some(WorktreeClass::LegacyRun);
     }
@@ -400,7 +409,10 @@ mod tests {
         assert_eq!(
             classify_worktree(
                 Path::new("/repo"),
-                &entry("/repo/.loopdeck/runs/multi/r1/a1", Some("loopdeck/multi/r1/x"))
+                &entry(
+                    "/repo/.loopdeck/runs/multi/r1/a1",
+                    Some("loopdeck/multi/r1/x")
+                )
             ),
             Some(WorktreeClass::Managed)
         );
@@ -409,7 +421,10 @@ mod tests {
     #[test]
     fn unknown_tree_is_user_manual() {
         assert_eq!(
-            classify_worktree(Path::new("/repo"), &entry("/tmp/loopdeck-pr93", Some("codex/fix"))),
+            classify_worktree(
+                Path::new("/repo"),
+                &entry("/tmp/loopdeck-pr93", Some("codex/fix"))
+            ),
             Some(WorktreeClass::UserManual)
         );
     }

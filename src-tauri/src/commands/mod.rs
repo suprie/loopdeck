@@ -15,8 +15,8 @@
 
 pub mod agent;
 pub mod composer;
-pub mod delivery;
 pub mod config_cmds;
+pub mod delivery;
 pub mod epics;
 pub mod execution;
 pub mod project;

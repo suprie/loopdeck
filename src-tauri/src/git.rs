@@ -183,7 +183,11 @@ pub fn worktree_inventory(repo_path: &Path) -> Result<Vec<WorktreeEntry>, String
 /// Check out an **existing** branch into a linked worktree — the resume path
 /// for a run whose worktree vanished while its branch survived (`git worktree
 /// prune` or manual deletion). Mirrors [`worktree_add`]'s canonicalization.
-pub fn worktree_add_existing(repo_path: &Path, path: &Path, branch: &str) -> Result<Worktree, String> {
+pub fn worktree_add_existing(
+    repo_path: &Path,
+    path: &Path,
+    branch: &str,
+) -> Result<Worktree, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("worktree path {} has no parent", path.display()))?;
@@ -289,16 +293,7 @@ pub fn commit_on_branch(repo_path: &Path, branch: &str, commit: &str) -> bool {
 pub fn open_pr_for_branch(repo_path: &Path, branch: &str) -> Option<String> {
     let output = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "open",
-            "--json",
-            "url",
-            "--limit",
-            "1",
+            "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--limit", "1",
         ])
         .current_dir(repo_path)
         .output()

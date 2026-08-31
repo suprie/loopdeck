@@ -283,19 +283,15 @@ pub fn find_loop_by_id(repo_path: &Path, loop_id: &str) -> Option<LoopLocation> 
 /// reconciliation (`delivery.rs`) reads this as the authoritative
 /// completed/not-completed record — never the delivery links themselves.
 pub fn loop_checked(repo_path: &Path, loop_id: &str) -> Option<bool> {
-    parse_epics(repo_path)
-        .into_iter()
-        .find_map(|epic| {
-            epic.prds
+    parse_epics(repo_path).into_iter().find_map(|epic| {
+        epic.prds.into_iter().find_map(|prd| {
+            prd.phases
                 .into_iter()
-                .find_map(|prd| {
-                    prd.phases
-                        .into_iter()
-                        .flat_map(|phase| phase.loops)
-                        .find(|item| item.id.as_deref() == Some(loop_id))
-                        .map(|item| item.checked)
-                })
+                .flat_map(|phase| phase.loops)
+                .find(|item| item.id.as_deref() == Some(loop_id))
+                .map(|item| item.checked)
         })
+    })
 }
 
 pub fn find_replacement_loop_id(repo_path: &Path, prior: &LoopLocation) -> Option<String> {

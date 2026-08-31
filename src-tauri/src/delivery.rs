@@ -68,7 +68,10 @@ impl RubricResult {
     /// non-passing — a known-missing edge case must not ship as verified).
     pub fn all_pass(&self) -> bool {
         self.verdict == RubricVerdict::Pass
-            && self.criteria.iter().all(|c| c.status == CriterionStatus::Pass)
+            && self
+                .criteria
+                .iter()
+                .all(|c| c.status == CriterionStatus::Pass)
     }
 }
 
@@ -129,10 +132,10 @@ impl std::fmt::Display for MismatchKind {
             Self::PrLinkMissing => "delivery has no pull-request link",
             Self::RubricMissing => "no PRD rubric result was retained",
             Self::RubricNotPassing => "retained rubric result is not passing",
-            Self::ChecklistIncomplete => "loop is completed but its PRD checklist item is unchecked",
-            Self::ChecklistPremature => {
-                "PRD checklist item is checked but no PR link was recorded"
+            Self::ChecklistIncomplete => {
+                "loop is completed but its PRD checklist item is unchecked"
             }
+            Self::ChecklistPremature => "PRD checklist item is checked but no PR link was recorded",
         };
         f.write_str(text)
     }
@@ -222,7 +225,9 @@ impl std::fmt::Display for GateBlock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
             Self::LoopNotPending => "the loop's checklist item is already complete",
-            Self::BranchMismatch => "current worktree branch is not the branch recorded for the loop",
+            Self::BranchMismatch => {
+                "current worktree branch is not the branch recorded for the loop"
+            }
             Self::PrdLinkMissing => "the loop is not linked to a PRD checklist item",
             Self::RubricMissing => "no PRD rubric result was produced for this delivery",
             Self::RubricNotPassing => "PRD rubric did not pass every criterion",
