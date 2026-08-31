@@ -50,12 +50,26 @@ pub fn git_init(repo_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Create a new branch-backed linked worktree from `repo_path`.
+/// Create a new branch-backed linked worktree from `repo_path`'s `HEAD`.
 ///
 /// The caller chooses a path outside the main worktree and a run-scoped branch
 /// name. Git refuses an already checked-out branch, which is the desired
 /// protection against two runs sharing one mutable tree.
 pub fn worktree_add(repo_path: &Path, path: &Path, branch: &str) -> Result<Worktree, String> {
+    worktree_add_from(repo_path, path, branch, "HEAD")
+}
+
+/// Create a new branch-backed linked worktree based on an explicit start point
+/// (`prd-verified-delivery-reconciliation` Phase 4 `clean-handoff`): new run
+/// branches are cut from the repo's **default branch**, never from whatever
+/// the main worktree happens to have checked out — a delivered or stray
+/// checkout must not leak into the next run's base.
+pub fn worktree_add_from(
+    repo_path: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<Worktree, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("worktree path {} has no parent", path.display()))?;
@@ -66,7 +80,7 @@ pub fn worktree_add(repo_path: &Path, path: &Path, branch: &str) -> Result<Workt
     let output = command
         .args(["worktree", "add", "-b", branch])
         .arg(path)
-        .arg("HEAD")
+        .arg(base)
         .output()
         .map_err(|e| format!("failed to spawn git worktree add: {e}"))?;
     if !output.status.success() {
@@ -240,6 +254,53 @@ pub fn current_branch(repo_path: &Path) -> Option<String> {
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (branch != "HEAD").then_some(branch)
+}
+
+/// The repo's default branch, if one of the conventional names exists.
+/// `clean-handoff` cuts every new run branch from here so deliveries never
+/// stack on each other; `None` falls the caller back to `HEAD`.
+pub fn default_branch(repo_path: &Path) -> Option<String> {
+    ["main", "master"]
+        .into_iter()
+        .find(|name| branch_exists(repo_path, name))
+        .map(str::to_string)
+}
+
+/// Whether HEAD's commit is present on any remote-tracking ref — the cheap
+/// local proof that the branch was pushed (`retry-recovery` stage detection;
+/// no network, mirrors what `git status` shows as ahead/behind).
+pub fn head_on_remote(repo_path: &Path) -> bool {
+    let Some(mut command) = git_command(repo_path) else {
+        return false;
+    };
+    match command
+        .args(["branch", "-r", "--contains", "HEAD"])
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| !line.trim().is_empty()),
+        _ => false,
+    }
+}
+
+/// Push a branch to `origin`, setting its upstream. Used only by the
+/// idempotent delivery retry (`retry-recovery`) to resume from the
+/// `committed` stage — never force, never rewrite.
+pub fn push_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+    let mut command = git_command(repo_path)
+        .ok_or_else(|| "git is unavailable; cannot push delivery branch".to_string())?;
+    let output = command
+        .args(["push", "-u", "origin", branch])
+        .output()
+        .map_err(|e| format!("failed to spawn git push: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git push failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// The commit currently checked out in `repo_path`, if any.

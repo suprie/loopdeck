@@ -1256,7 +1256,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("loopdeck-sm-resume-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut plan = make_plan_with_statuses(vec![
+        let plan = make_plan_with_statuses(vec![
             ("phase1", RunPhaseStatus::Running, vec![]), // crashed mid-run
             ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
         ]);

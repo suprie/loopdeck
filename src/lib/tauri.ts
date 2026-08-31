@@ -21,6 +21,7 @@ import type {
   DeliveryReportResponse,
   RubricResult,
   ExternalWorktree,
+  RetryOutcome,
   MigrationPreview,
   ProgressSnapshot,
   RunBudgets,
@@ -430,6 +431,16 @@ export async function runDeliveryRubric(path: string): Promise<RubricResult> {
  */
 export async function detectExternalWorktrees(path: string): Promise<ExternalWorktree[]> {
   return invoke<ExternalWorktree[]>("detect_external_worktrees", { path });
+}
+
+/**
+ * The one idempotent retry for a failed delivery: resumes from the recorded
+ * stage (push the committed branch, adopt or create the draft PR, finish the
+ * bookkeeping) and reports what it did.
+ * Rust: retry_delivery(path) -> Result<RetryOutcome, AppError>
+ */
+export async function retryDelivery(path: string): Promise<RetryOutcome> {
+  return invoke<RetryOutcome>("retry_delivery", { path });
 }
 
 /**

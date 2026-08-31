@@ -432,6 +432,54 @@ impl ExecutionState {
         next.validate()?;
         Ok(next)
     }
+
+    /// Retry-recovery completion (`prd-verified-delivery-reconciliation`
+    /// Phase 4, `retry-recovery`): a delivery that previously ended
+    /// `Abandoned` finished after an idempotent retry once its PR existed.
+    /// For each ID: a still-`current` loop gets its in-flight links enriched
+    /// (the success-path shape); the newest matching history record flips
+    /// `Abandoned` → `Completed` with its reason cleared and the full links
+    /// attached; a record already `Completed` only gains missing links.
+    /// Idempotent — a second call finds nothing left to change except the
+    /// revision, which is only bumped on an actual mutation.
+    pub fn record_recovered_delivery(
+        &self,
+        loop_ids: &[String],
+        links: crate::delivery::DeliveryLinks,
+        now: DateTime<Utc>,
+    ) -> Result<ExecutionState, AppError> {
+        let mut next = self.clone();
+        let mut changed = false;
+        for id in loop_ids {
+            if let Some(active) = next.current.as_mut().filter(|current| current.id == *id) {
+                active.delivery = Some(links.clone());
+                changed = true;
+                continue;
+            }
+            if let Some(record) = next
+                .history
+                .iter_mut()
+                .rev()
+                .find(|record| record.id == *id)
+            {
+                if record.outcome == Outcome::Abandoned {
+                    record.outcome = Outcome::Completed;
+                    record.reason = None;
+                    record.completed_at = now;
+                    changed = true;
+                }
+                if record.delivery.is_none() {
+                    record.delivery = Some(links.clone());
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            bump_revision(&mut next)?;
+            next.validate()?;
+        }
+        Ok(next)
+    }
 }
 
 /// Move the first queued loop into `current` (attempt 1). No-op on an empty

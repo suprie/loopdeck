@@ -151,3 +151,12 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: proposed
 - **Context**: AI session active on Selasar development.
 
+## 2026-09-01 — Clean handoff is lazy: record at delivery, cut the next worktree from the default branch at next run start
+- **Status**: accepted
+- **Context**: `prd-verified-delivery-reconciliation` Phase 4, loop `clean-handoff`. PRD Open Question #1 (eager vs lazy next-branch creation) and the base of the next branch were pre-answered for the unattended run: lazy, base on the default branch, keep the delivered worktree.
+- **Consequences**: New `src-tauri/src/handoff.rs` (`HandoffRecord` → `.loopdeck/handoff.yaml`: delivered branch, PR URL, retained worktree, `next_base`), persisted best-effort by `run_queue.rs::record_handoff` right after PR creation — it never fails the delivery. `ensure_worktree` now cuts every new run branch from `git::default_branch` (main/master, fallback HEAD) instead of whatever the main worktree has checked out, so a stray or delivered checkout can't leak into the next run's base; `finalize_worktree` retains the delivered worktree for review (supersedes prune-on-full-success). The `.loopdeck/runs/<next-branch>/` worktree itself is created only when the next run starts — no idle trees.
+
+## 2026-09-01 — Failed deliveries persist a stage record; one idempotent retry resumes, nothing auto-retries
+- **Status**: accepted
+- **Context**: `prd-verified-delivery-reconciliation` Phase 4, loop `retry-recovery`. Pre-answered clarification: no automatic retries; record how far the delivery got and expose one idempotent retry command (PRD P0 "offers the idempotent next action").
+- **Consequences**: New `src-tauri/src/delivery_retry.rs`: `DeliveryStage` (nothing_mutated / committed / pushed) detected live from Git (`detect_stage`: dirty tree → nothing; clean + HEAD on a remote ref → pushed), `DeliveryRetryRecord` → `.loopdeck/delivery-retry.yaml` written by the executor at the failure site (with the retained rubric), and `run_retry` — re-detects the live stage, then requeue (nothing mutated) / push → adopt-or-create draft PR → finish bookkeeping (checklist → plan phases → `record_recovered_delivery` flips Abandoned → Completed with links) → clears the record. `gh` runs via PATH lookup so tests stub it with a script dir; push/PR failure keeps the record recoverable at the live stage. UI: `retry_delivery` command + `DeliveryReportTab` RetryCard (reason + `next_action`) and HandoffBanner.

@@ -6,11 +6,13 @@ mod commands;
 mod config;
 mod conversation;
 mod delivery;
+mod delivery_retry;
 mod epic;
 mod error;
 mod execution;
 mod git;
 mod graphify;
+mod handoff;
 mod harness;
 mod limits;
 mod logging;
@@ -215,6 +217,7 @@ pub fn run() {
             commands::delivery::get_delivery_report,
             commands::delivery::run_delivery_rubric,
             commands::delivery::detect_external_worktrees,
+            commands::delivery::retry_delivery,
             // Run queue pre-flight interview — prd-run-queue Phase 3
             commands::run_queue::run_phase_interview,
             commands::run_queue::run_batch_phase_interviews,
