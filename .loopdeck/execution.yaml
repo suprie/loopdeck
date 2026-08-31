@@ -1,13 +1,13 @@
 schema_version: 1
-revision: 22
+revision: 25
 current:
-  id: selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
-  title: Build the morning-report drawer (verdict table, parked-questions
+  id: delivery-bookkeeping/reconciliation-model
+  title: Define persisted delivery links and mismatch states for a loop, branch, PRD, rubric result, and PR.
   origin:
-    epic: selasar-revamp
-    prd: prd-night-run-surfaces
-    phase: Phase 3 — Morning report drawer
-  started_at: 2026-08-30T03:20:23.291827Z
+    epic: reliable-delivery-bookkeeping
+    prd: prd-verified-delivery-reconciliation
+    phase: Phase 1 — Reconciliation model and visible state
+  started_at: 2026-08-31T05:02:58.004058Z
   attempt: 1
 queue: []
 history:
@@ -104,3 +104,13 @@ history:
   completed_at: 2026-08-28T03:20:28.341555Z
   attempt: 1
   reason: 'Agent error: claude closed stdout before sending a result event'
+- id: optimization/measure-current-loops-md-decisions-md-token-counts-and-the
+  title: Measure current `loops.md`/`decisions.md` token counts and the
+  origin:
+    epic: optimization
+    prd: prd-memory-hygiene
+    phase: Phase 1 — Define the budget and convention
+  outcome: completed
+  started_at: 2026-08-30T07:49:50.771259Z
+  completed_at: 2026-08-30T08:19:55.323397Z
+  attempt: 1

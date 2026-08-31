@@ -278,6 +278,26 @@ pub fn find_loop_by_id(repo_path: &Path, loop_id: &str) -> Option<LoopLocation> 
     None
 }
 
+/// Checklist state for a loop ID: `Some(true)` checked, `Some(false)` still
+/// pending, `None` when no checklist item carries that ID. The delivery
+/// reconciliation (`delivery.rs`) reads this as the authoritative
+/// completed/not-completed record — never the delivery links themselves.
+pub fn loop_checked(repo_path: &Path, loop_id: &str) -> Option<bool> {
+    parse_epics(repo_path)
+        .into_iter()
+        .find_map(|epic| {
+            epic.prds
+                .into_iter()
+                .find_map(|prd| {
+                    prd.phases
+                        .into_iter()
+                        .flat_map(|phase| phase.loops)
+                        .find(|item| item.id.as_deref() == Some(loop_id))
+                        .map(|item| item.checked)
+                })
+        })
+}
+
 pub fn find_replacement_loop_id(repo_path: &Path, prior: &LoopLocation) -> Option<String> {
     let matches: Vec<String> = parse_epics(repo_path)
         .into_iter()
@@ -435,6 +455,39 @@ pub fn toggle_prd_loop(
     let new_content = lines.join("\n");
     persist::atomic_write(&prd_path, &new_content)?;
     Ok(!currently_checked)
+}
+
+/// Mark a checklist item complete without ever reopening one that is already
+/// checked. Delivery automation uses this idempotent form after a PR URL has
+/// been recorded; the interactive UI keeps `toggle_prd_loop` for deliberate
+/// manual corrections.
+pub fn complete_prd_loop(
+    repo_path: &Path,
+    epic_slug: &str,
+    prd_filename: &str,
+    loop_title: &str,
+) -> Result<(), AppError> {
+    let already_complete = parse_epics(repo_path)
+        .into_iter()
+        .find(|epic| epic.slug == epic_slug)
+        .and_then(|epic| epic.prds.into_iter().find(|prd| prd.slug == prd_filename))
+        .and_then(|prd| {
+            prd.phases
+                .into_iter()
+                .flat_map(|phase| phase.loops)
+                .find(|item| item.title == loop_title)
+        })
+        .map(|item| item.checked)
+        .ok_or_else(|| {
+            AppError::ProjectNotFound(format!(
+                "checklist item not found in {epic_slug}/{prd_filename}: {loop_title}"
+            ))
+        })?;
+
+    if !already_complete {
+        toggle_prd_loop(repo_path, epic_slug, prd_filename, loop_title)?;
+    }
+    Ok(())
 }
 
 /// Set a PRD's `status:` frontmatter field, rewriting only that line.

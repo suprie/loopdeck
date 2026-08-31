@@ -31,3 +31,6 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+
+# Managed run worktrees
+.loopdeck/runs/

@@ -34,6 +34,7 @@ import { EpicsPanel } from "./EpicsPanel";
 import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 import { AgentPanel } from "./AgentPanel";
 import { NightRunTab } from "./NightRunTab";
+import { DeliveryReportTab } from "./DeliveryReportTab";
 import { PlanTonightWizard } from "./PlanTonightWizard";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import { PermissionApprovalCard, PlanApprovalCard, buildAllowRule } from "./Chat";
@@ -316,6 +317,10 @@ function LoopsTabContent({
         </TabsTrigger>
       </TabsList>
       <TabsContent value="loops">
+        {/* Delivery reconciliation report sits above the loop list: it is the
+            pre-mutation "compare before completing" surface for whatever loop
+            is in flight (prd-verified-delivery-reconciliation Phase 1). */}
+        <DeliveryReportTab projectPath={projectPath} />
         <LoopsPanel projectPath={projectPath} />
       </TabsContent>
       <TabsContent value="epics">

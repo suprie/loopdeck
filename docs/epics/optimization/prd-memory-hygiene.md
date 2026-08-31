@@ -2,7 +2,7 @@
 prd: prd-memory-hygiene
 epic: optimization
 milestone: "0.4.0"
-status: proposed
+status: completed
 description: >
   Define a token budget and entry-length convention for .loopdeck/loops.md
   and decisions.md, lower the archive trigger below the 90KB threshold that
@@ -65,23 +65,23 @@ guessed in advance._
 
 ### Phase 1 — Define the budget and convention
 
-- [ ] Measure current `loops.md`/`decisions.md` token counts and the
+- [x] `optimization/measure-current-loops-md-decisions-md-token-counts-and-the` Measure current `loops.md`/`decisions.md` token counts and the
       distribution of entry lengths (shortest/median/longest) to set a
       realistic target budget.
-- [ ] Write the token budget, entry-length convention, and new archive
+- [x] `optimization/write-the-token-budget-entry-length-convention-and-new-archive` Write the token budget, entry-length convention, and new archive
       trigger into the `loopdeck-memory` skill's format rules.
 
 ### Phase 2 — Compact
 
-- [ ] Archive older/completed `loops.md` entries down to the new budget,
+- [x] `optimization/archive-older-completed-loops-md-entries-down-to-the-new-budget` Archive older/completed `loops.md` entries down to the new budget,
       preserving them in the existing archive location (not deleting).
-- [ ] Archive older `decisions.md` entries the same way, keeping recent/
+- [x] `optimization/archive-older-decisions-md-entries-the-same-way-keeping-recent` Archive older `decisions.md` entries the same way, keeping recent/
       still-relevant decisions in the active file.
 
 ### Phase 3 — Verification
 
-- [ ] Confirm both active files are under the new budget.
-- [ ] Confirm the archived content is still readable and findable (an
+- [x] `optimization/confirm-both-active-files-are-under-the-new-budget` Confirm both active files are under the new budget.
+- [x] `optimization/confirm-the-archived-content-is-still-readable-and-findable-an` Confirm the archived content is still readable and findable (an
       index or pointer from the active file, matching whatever pattern
       `loopdeck-memory` already documents for archives).
 

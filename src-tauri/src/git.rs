@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
@@ -112,8 +112,31 @@ pub fn worktree_remove(repo_path: &Path, path: &Path) -> Result<(), String> {
 
 /// Return the paths of all worktrees Git currently knows about for a repo.
 pub fn worktree_list(repo_path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
-    let mut command = git_command(repo_path)
-        .ok_or_else(|| "git is unavailable; cannot list worktrees".to_string())?;
+    Ok(worktree_inventory(repo_path)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
+}
+
+/// One linked worktree in Git's inventory, with the branch context the plain
+/// path list drops (`prd-verified-delivery-reconciliation` Phase 2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: std::path::PathBuf,
+    /// `refs/heads/...` for a branch-backed worktree; `None` for detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub detached: bool,
+    #[serde(default)]
+    pub bare: bool,
+}
+
+/// Full worktree inventory from `git worktree list --porcelain`.
+pub fn worktree_inventory(repo_path: &Path) -> Result<Vec<WorktreeEntry>, String> {
+    let Some(mut command) = git_command(repo_path) else {
+        return Err("git is unavailable; cannot list worktrees".to_string());
+    };
     let output = command
         .args(["worktree", "list", "--porcelain"])
         .output()
@@ -124,11 +147,171 @@ pub fn worktree_list(repo_path: &Path) -> Result<Vec<std::path::PathBuf>, String
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .map(std::path::PathBuf::from)
-        .collect())
+    let mut entries = Vec::new();
+    let mut current: Option<WorktreeEntry> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(done) = current.take() {
+                entries.push(done);
+            }
+            current = Some(WorktreeEntry {
+                path: PathBuf::from(path),
+                branch: None,
+                detached: false,
+                bare: false,
+            });
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            if let Some(entry) = current.as_mut() {
+                entry.branch = Some(branch.to_string());
+            }
+        } else if line == "detached" {
+            if let Some(entry) = current.as_mut() {
+                entry.detached = true;
+            }
+        } else if line == "bare" {
+            if let Some(entry) = current.as_mut() {
+                entry.bare = true;
+            }
+        }
+    }
+    if let Some(done) = current {
+        entries.push(done);
+    }
+    Ok(entries)
+}
+
+/// Check out an **existing** branch into a linked worktree — the resume path
+/// for a run whose worktree vanished while its branch survived (`git worktree
+/// prune` or manual deletion). Mirrors [`worktree_add`]'s canonicalization.
+pub fn worktree_add_existing(repo_path: &Path, path: &Path, branch: &str) -> Result<Worktree, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("worktree path {} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create worktree parent {}: {e}", parent.display()))?;
+    let mut command = git_command(repo_path)
+        .ok_or_else(|| "git is unavailable; cannot restore isolated run worktree".to_string())?;
+    let output = command
+        .args(["worktree", "add"])
+        .arg(path)
+        .arg(branch)
+        .output()
+        .map_err(|e| format!("failed to spawn git worktree add: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|e| format!("failed to canonicalize worktree {}: {e}", path.display()))?;
+    Ok(Worktree {
+        path: canonical_path,
+        branch: branch.to_string(),
+    })
+}
+
+/// Whether a local branch exists.
+pub fn branch_exists(repo_path: &Path, branch: &str) -> bool {
+    let Some(mut command) = git_command(repo_path) else {
+        return false;
+    };
+    command
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The branch currently checked out in `repo_path`, if any.
+pub fn current_branch(repo_path: &Path) -> Option<String> {
+    let mut command = git_command(repo_path)?;
+    let output = command
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (branch != "HEAD").then_some(branch)
+}
+
+/// The commit currently checked out in `repo_path`, if any.
+pub fn head_commit(repo_path: &Path) -> Option<String> {
+    let mut command = git_command(repo_path)?;
+    let output = command.args(["rev-parse", "HEAD"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Whether `commit` resolves and is reachable from `branch`'s tip — the
+/// delivery-flavored sibling of [`commit_reachability`] (which anchors on the
+/// *current* HEAD; reconciliation must anchor on the recorded branch).
+pub fn commit_on_branch(repo_path: &Path, branch: &str, commit: &str) -> bool {
+    let commit = commit.trim();
+    if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let Some(mut resolve) = git_command(repo_path) else {
+        return false;
+    };
+    let revision = format!("{commit}^{{commit}}");
+    let Ok(resolved) = resolve
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(&revision)
+        .output()
+    else {
+        return false;
+    };
+    if !resolved.status.success() {
+        return false;
+    }
+    let canonical = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+    let Some(mut ancestor) = git_command(repo_path) else {
+        return false;
+    };
+    ancestor
+        .args(["merge-base", "--is-ancestor"])
+        .arg(&canonical)
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The open pull-request URL for `branch`, if the `gh` CLI and GitHub auth
+/// are available. Never errors on "no gh"/"no auth" — absent tooling simply
+/// means no PR evidence, which callers treat as "not delivered yet".
+pub fn open_pr_for_branch(repo_path: &Path, branch: &str) -> Option<String> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--limit",
+            "1",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let parsed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
+    parsed
+        .first()
+        .and_then(|pr| pr.get("url"))
+        .and_then(|url| url.as_str())
+        .map(str::to_string)
 }
 
 /// Classify recorded commit evidence. A commit is reachable only when it

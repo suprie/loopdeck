@@ -5,6 +5,7 @@ mod codex_session;
 mod commands;
 mod config;
 mod conversation;
+mod delivery;
 mod epic;
 mod error;
 mod execution;
@@ -210,8 +211,13 @@ pub fn run() {
             commands::run_queue::requeue_run_phase,
             commands::run_queue::relink_delivered_phase,
             commands::run_queue::requeue_failed_run_phases,
+            // Delivery reconciliation (prd-verified-delivery-reconciliation)
+            commands::delivery::get_delivery_report,
+            commands::delivery::run_delivery_rubric,
+            commands::delivery::detect_external_worktrees,
             // Run queue pre-flight interview — prd-run-queue Phase 3
             commands::run_queue::run_phase_interview,
+            commands::run_queue::run_batch_phase_interviews,
             commands::run_queue::skip_phase_interview,
             // Agent config + auth token + diagnostics (config_cmds.rs)
             commands::config_cmds::get_agent_config,

@@ -73,6 +73,10 @@ pub struct ActiveLoop {
     /// logical ID plus an increasing `attempt`). Defaults to 1.
     #[serde(default = "default_attempt")]
     pub attempt: u32,
+    /// Delivery links accumulated in flight (branch, rubric result; PR/commit
+    /// only appear on the terminal record). `prd-verified-delivery-reconciliation` Phase 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<crate::delivery::DeliveryLinks>,
 }
 
 /// A planned-but-not-started loop (`queue:`).
@@ -97,6 +101,11 @@ pub struct HistoryLoop {
     pub attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitEvidence>,
+    /// Terminal delivery record (branch, commit, PR, rubric) — persisted by
+    /// the verified-delivery pipeline only after PR creation succeeds.
+    /// Presence never implies completion on its own; the checklist does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<crate::delivery::DeliveryLinks>,
     /// Required when `outcome == Abandoned`; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -299,6 +308,10 @@ impl ExecutionState {
             completed_at: now,
             attempt: active.attempt,
             git,
+            // The in-flight links (branch, rubric) carry into the terminal
+            // delivery record; the caller enriches them (commit, PR URL)
+            // before completing whenever the delivery pipeline ran.
+            delivery: active.delivery.clone(),
             reason: None,
         };
 
@@ -340,6 +353,10 @@ impl ExecutionState {
             completed_at: now,
             attempt: active.attempt,
             git: None,
+            // Abandoned attempts keep any links they accumulated (a parked
+            // delivery with a failing rubric stays explainable), but never
+            // gain commit/PR enrichment.
+            delivery: active.delivery.clone(),
             reason: Some(reason),
         };
 
@@ -409,6 +426,7 @@ impl ExecutionState {
             origin,
             started_at: now,
             attempt,
+            delivery: None,
         });
         bump_revision(&mut next)?;
         next.validate()?;
@@ -428,6 +446,7 @@ fn promote_first(state: &mut ExecutionState, now: DateTime<Utc>) {
             origin: q.origin,
             started_at: now,
             attempt: 1,
+            delivery: None,
         });
     }
 }
@@ -733,6 +752,7 @@ mod tests {
             origin: origin("prd-x"),
             started_at: ts("2026-07-25T09:00:00+00:00"),
             attempt,
+            delivery: None,
         }
     }
 
@@ -838,6 +858,7 @@ mod tests {
             completed_at: ts("2026-07-24T12:00:00+00:00"),
             attempt: 1,
             git: None,
+            delivery: None,
             reason: None,
         });
         // Re-running attempt 1 is invalid.
@@ -859,6 +880,7 @@ mod tests {
             completed_at: ts("2026-07-24T12:00:00+00:00"),
             attempt: 1,
             git: None,
+            delivery: None,
             reason: None,
         };
         let mut s = ExecutionState::default();
@@ -879,6 +901,7 @@ mod tests {
             completed_at: ts("2026-07-24T12:00:00+00:00"),
             attempt: 1,
             git: None,
+            delivery: None,
             reason: None,
         });
         assert!(s.validate().is_err());
