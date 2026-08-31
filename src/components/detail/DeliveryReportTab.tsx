@@ -5,7 +5,9 @@ import {
   GitBranch,
   GitPullRequest,
   ListChecks,
+  PartyPopper,
   RefreshCw,
+  RotateCcw,
   ShieldQuestion,
 } from "lucide-react";
 import type {
@@ -13,6 +15,8 @@ import type {
   ExternalWorktree,
   GateBlock,
   MismatchKind,
+  RetryOutcome,
+  RetryState,
   RubricResult,
 } from "../../types";
 import * as api from "../../lib/tauri";
@@ -34,6 +38,7 @@ export function DeliveryReportTab({ projectPath }: { projectPath: string }) {
   const [external, setExternal] = useState<ExternalWorktree[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [runningRubric, setRunningRubric] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -69,6 +74,19 @@ export function DeliveryReportTab({ projectPath }: { projectPath: string }) {
       toast.error(`Rubric run failed: ${String(err)}`);
     } finally {
       setRunningRubric(false);
+    }
+  };
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      const outcome = await api.retryDelivery(projectPath);
+      toast.success(retryToast(outcome));
+      await refresh();
+    } catch (err) {
+      toast.error(`Delivery retry failed: ${String(err)}`);
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -121,6 +139,8 @@ export function DeliveryReportTab({ projectPath }: { projectPath: string }) {
       </header>
 
       {activeLoop && <LoopCard loop={activeLoop} expanded />}
+      {report?.retry && <RetryCard retry={report.retry} retrying={retrying} onRetry={() => void handleRetry()} />}
+      {report?.handoff && <HandoffBanner handoff={report.handoff} />}
       {historyLoops.length > 0 && (
         <details className="rounded-lg border border-[color:var(--border)] p-3">
           <summary className="cursor-pointer text-xs font-medium">
@@ -289,6 +309,82 @@ function ExternalWorktreesSection({ worktrees }: { worktrees: ExternalWorktree[]
       )}
     </div>
   );
+}
+
+function HandoffBanner({ handoff }: { handoff: DeliveryReportResponse["handoff"] }) {
+  if (!handoff) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-[color:var(--border)] p-3 text-xs">
+      <PartyPopper size={14} className="mt-0.5 shrink-0 text-[color:var(--success)]" />
+      <div>
+        <p className="font-medium">
+          Clean handoff — delivered {new Date(handoff.delivered_at).toLocaleString()}
+        </p>
+        <p className="mt-1 text-[color:var(--muted-foreground)]">
+          Branch <GitBranch className="inline" size={11} /> {handoff.delivered_branch} and its
+          worktree are retained for review; the PR stays a draft until you merge it. The next run
+          starts fresh from <span className="font-medium">{handoff.next_base}</span> — a new
+          worktree is created only when the next loop starts.
+        </p>
+        <a
+          className="mt-1 flex items-center gap-1 underline"
+          href={handoff.pr_url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <GitPullRequest size={11} /> {handoff.pr_url}
+        </a>
+      </div>
+    </div>
+  );
+}
+
+function RetryCard({
+  retry,
+  retrying,
+  onRetry,
+}: {
+  retry: RetryState;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const { record, next_action: nextAction } = retry;
+  return (
+    <div className="rounded-lg border border-[color:var(--warning)] p-3 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="font-medium">Recoverable delivery — {record.stage.replace("_", " ")}</p>
+          <p className="text-[color:var(--muted-foreground)]">
+            {record.pr_title || record.execution_ids.join(", ")} ·{" "}
+            <GitBranch className="inline" size={11} /> {record.branch}
+          </p>
+        </div>
+        <button
+          className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onRetry}
+          disabled={retrying}
+        >
+          {retrying ? <LoadingSpinner label="" /> : <RotateCcw size={12} />}
+          {retrying ? "Retrying…" : "Retry delivery"}
+        </button>
+      </div>
+      <p className="mt-2 text-[color:var(--warning)]">
+        <CircleAlert size={11} className="inline" /> {record.reason}
+      </p>
+      <p className="mt-1 text-[color:var(--muted-foreground)]">Next safe action: {nextAction}</p>
+    </div>
+  );
+}
+
+function retryToast(outcome: RetryOutcome): string {
+  switch (outcome.kind) {
+    case "requeued":
+      return `Requeued ${outcome.execution_ids.length} phase(s) for a fresh run — nothing had been committed.`;
+    case "delivery_completed":
+      return `Delivery completed — draft PR ready (resumed from ${outcome.resumed_from.replace("_", " ")}).`;
+    case "still_blocked":
+      return `Retry blocked at "${outcome.stage.replace("_", " ")}": ${outcome.reason}`;
+  }
 }
 
 const MISMATCH_LABELS: Record<MismatchKind, string> = {

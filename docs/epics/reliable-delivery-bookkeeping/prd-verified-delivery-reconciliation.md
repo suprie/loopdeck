@@ -107,13 +107,13 @@ shown as a repairable discrepancy rather than silently rewritten.
 
 ### Phase 4 — Clean handoff and recovery
 
-- [ ] `delivery-bookkeeping/clean-handoff` Prepare a clean next worktree/branch while retaining the delivered branch for review.
-- [ ] `delivery-bookkeeping/retry-recovery` Make commit, push, and PR-creation failures recoverable and clearly actionable.
+- [x] `delivery-bookkeeping/clean-handoff` Prepare a clean next worktree/branch while retaining the delivered branch for review.
+- [x] `delivery-bookkeeping/retry-recovery` Make commit, push, and PR-creation failures recoverable and clearly actionable.
 
 ### Phase 5 — Verification
 
-- [ ] `delivery-bookkeeping/delivery-integration-tests` Add coverage for success, a failing rubric, cross-branch fixes, push/PR failures, and legacy worktrees.
-- [ ] `delivery-bookkeeping/prd-acceptance-audit` Verify the finished implementation against every P0 acceptance criterion with evidence.
+- [x] `delivery-bookkeeping/delivery-integration-tests` Add coverage for success, a failing rubric, cross-branch fixes, push/PR failures, and legacy worktrees.
+- [x] `delivery-bookkeeping/prd-acceptance-audit` Verify the finished implementation against every P0 acceptance criterion with evidence.
 
 ## Open Questions
 

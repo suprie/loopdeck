@@ -436,7 +436,48 @@ export interface LoopDeliveryReport {
 
 export interface DeliveryReportResponse {
   loops: LoopDeliveryReport[];
+  /** Latest clean handoff — delivered branch/worktree retained, next run
+   * starts fresh from the default branch (`clean-handoff`). */
+  handoff?: HandoffRecord;
+  /** Recoverable delivery awaiting the idempotent retry (`retry-recovery`). */
+  retry?: RetryState;
 }
+
+/** Mirrors Rust `handoff::HandoffRecord`. */
+export interface HandoffRecord {
+  delivered_branch: string;
+  pr_url: string;
+  worktree: string;
+  next_base: string;
+  delivered_at: string;
+}
+
+/** serde `rename_all = "snake_case"`. */
+export type DeliveryStage = "nothing_mutated" | "committed" | "pushed";
+
+/** The recoverable-delivery slice the report renders. */
+export interface RetryState {
+  record: DeliveryRetryRecord;
+  next_action: string;
+}
+
+/** Mirrors Rust `delivery_retry::DeliveryRetryRecord`. */
+export interface DeliveryRetryRecord {
+  execution_ids: string[];
+  branch: string;
+  worktree: string;
+  stage: DeliveryStage;
+  reason: string;
+  rubric?: RubricResult;
+  pr_title: string;
+  recorded_at: string;
+}
+
+/** serde `tag = "kind"`, `rename_all = "snake_case"`. */
+export type RetryOutcome =
+  | { kind: "requeued"; execution_ids: string[] }
+  | { kind: "delivery_completed"; pr_url: string; resumed_from: DeliveryStage }
+  | { kind: "still_blocked"; stage: DeliveryStage; reason: string };
 
 /** serde `rename_all = "snake_case"`. */
 export type WorktreeClass =
