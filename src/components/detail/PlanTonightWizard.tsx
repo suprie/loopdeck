@@ -74,15 +74,17 @@ interface PlanTonightWizardProps {
  * The "Plan tonight" 3-step wizard (prd-night-run-surfaces Phase 2, item 1):
  * phase picker (with dependency labels) + stall policy + budgets → live
  * pre-flight interviews → consent summary + required checkbox. Reuses the
- * existing run-plan IPC surface — `createRunPlan`, `runPhaseInterview`,
- * `skipPhaseInterview` — with no new backend endpoints.
+ * run-plan IPC surface — `createRunPlan`, `runPhaseInterview`,
+ * `runBatchPhaseInterviews`, and `skipPhaseInterview`.
  *
  * Per the run's pre-answered clarifications:
  * - `createRunPlan` fires on the step 1→2 transition with the draft-PR
  *   consent checkbox pre-checked; step 3's required checkbox then gates only
  *   the final queue-run action. Abandoning the wizard mid-way leaves the
  *   created plan queued-but-unstarted (same state the current panel leaves).
- * - Step 2 runs live interviews inline: `runPhaseInterview` streams the agent
+ * - Step 2 runs live interviews inline: `runBatchPhaseInterviews` streams all
+ *   pending loops in one context-rich turn (with `runPhaseInterview` retained
+ *   for one-off overrides). The agent
  *   turn server-side and parks any `AskUserQuestion` on the shared
  *   pending-question slot, which this wizard polls for and renders as the
  *   same `AskUserQuestionCard` chat shows (answer fields = the "text
@@ -109,6 +111,7 @@ export function PlanTonightWizard({
   const [starting, setStarting] = useState(false);
   const [plan, setPlan] = useState<RunPlan | null>(null);
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
+  const [batchInterviewing, setBatchInterviewing] = useState(false);
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestionEntry | null>(null);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
@@ -127,6 +130,7 @@ export function PlanTonightWizard({
     setCreating(false);
     setPlan(null);
     setInterviewingId(null);
+    setBatchInterviewing(false);
     setSkippingId(null);
     setPendingQuestion(null);
     setConsentConfirmed(false);
@@ -137,7 +141,7 @@ export function PlanTonightWizard({
   // (The interview's agent turn runs behind a no-op server channel, so the
   // question surfaces through the backend slot, not a streaming event.)
   useEffect(() => {
-    if (interviewingId === null) {
+    if (interviewingId === null && !batchInterviewing) {
       setPendingQuestion(null);
       return;
     }
@@ -156,7 +160,7 @@ export function PlanTonightWizard({
       stopped = true;
       clearInterval(interval);
     };
-  }, [interviewingId, projectPath]);
+  }, [interviewingId, batchInterviewing, projectPath]);
 
   const toggleSelected = (id: string) => {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -206,6 +210,24 @@ export function PlanTonightWizard({
       toast.error("Interview turn failed", { description: appErr.message ?? String(err) });
     } finally {
       setInterviewingId(null);
+    }
+  };
+
+  const handleInterviewAll = async () => {
+    const pendingIds = plan?.phases
+      .filter((phase) => phase.status === "queued" && phase.interview_status === "pending")
+      .map((phase) => phase.execution_id) ?? [];
+    if (pendingIds.length === 0) return;
+
+    setBatchInterviewing(true);
+    try {
+      const updated = await api.runBatchPhaseInterviews(projectPath, pendingIds);
+      setPlan(updated);
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Combined interview failed", { description: appErr.message ?? String(err) });
+    } finally {
+      setBatchInterviewing(false);
     }
   };
 
@@ -334,9 +356,11 @@ export function PlanTonightWizard({
               plan={plan}
               idToTitle={idToTitle}
               interviewingId={interviewingId}
+              batchInterviewing={batchInterviewing}
               skippingId={skippingId}
               pendingQuestion={pendingQuestion}
               onInterview={handleInterview}
+              onInterviewAll={handleInterviewAll}
               onSkip={handleSkip}
               onAnswerPending={handleAnswerPending}
             />
@@ -561,31 +585,63 @@ function StepInterviews({
   plan,
   idToTitle,
   interviewingId,
+  batchInterviewing,
   skippingId,
   pendingQuestion,
   onInterview,
+  onInterviewAll,
   onSkip,
   onAnswerPending,
 }: {
   plan: RunPlan;
   idToTitle: Record<string, string>;
   interviewingId: string | null;
+  batchInterviewing: boolean;
   skippingId: string | null;
   pendingQuestion: PendingQuestionEntry | null;
   onInterview: (executionId: string) => void;
+  onInterviewAll: () => void;
   onSkip: (executionId: string) => void;
   onAnswerPending: (answers: AskUserQuestionAnswers) => void;
 }) {
+  const pendingCount = plan.phases.filter(
+    (phase) => phase.status === "queued" && phase.interview_status === "pending",
+  ).length;
   return (
     <div>
-      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-        Pre-flight interviews
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Pre-flight interviews
+        </div>
+        {pendingCount > 1 && (
+          <button
+            type="button"
+            onClick={onInterviewAll}
+            disabled={batchInterviewing || interviewingId !== null || skippingId !== null}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--primary)] px-2 py-1 text-[10px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {batchInterviewing && <Loader2 size={10} className="animate-spin" />}
+            Answer all ({pendingCount})
+          </button>
+        )}
       </div>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-        Run each phase&apos;s interview to pin clarifying answers before the unattended run, or skip
-        phases you judge unambiguous. A running interview parks its question card below — answering
-        it lets the turn finish.
+        Answer all runs one shared interview with the context for every selected phase, then pins
+        its answers to the relevant loops. You can still run or skip individual interviews.
       </p>
+      {batchInterviewing && (
+        <div className="mb-3 rounded bg-accent/40 px-2.5 py-2">
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Loader2 size={11} className="animate-spin" />
+            Combined interview running — all questions will appear in one card.
+          </div>
+          {pendingQuestion && (
+            <div className="mt-2">
+              <AskUserQuestionCard questions={pendingQuestion.questions} onSubmit={onAnswerPending} />
+            </div>
+          )}
+        </div>
+      )}
       <ul className="space-y-1">
         {plan.phases.map((phase) => {
           const title = idToTitle[phase.execution_id] ?? phase.execution_id;
@@ -602,14 +658,14 @@ function StepInterviews({
                   <span className="flex shrink-0 items-center gap-1">
                     <button
                       onClick={() => onInterview(phase.execution_id)}
-                      disabled={interviewing || skipping || interviewingId !== null}
+                      disabled={interviewing || skipping || interviewingId !== null || batchInterviewing}
                       className="rounded px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
                     >
                       {interviewing ? <Loader2 size={10} className="animate-spin" /> : "Run interview"}
                     </button>
                     <button
                       onClick={() => onSkip(phase.execution_id)}
-                      disabled={interviewing || skipping || interviewingId !== null}
+                      disabled={interviewing || skipping || interviewingId !== null || batchInterviewing}
                       className="rounded px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
                     >
                       {skipping ? <Loader2 size={10} className="animate-spin" /> : "Skip"}

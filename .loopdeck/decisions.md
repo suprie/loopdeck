@@ -117,3 +117,32 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: `prd-night-run-surfaces` Phase 3. The PRD predates Phase 1's outcome — the "night variant of the drawer" turned out to be a swap inside the Agent tab (`NightRunTab` replaces `AgentPanel` while a run is active), not a whole-drawer variant, so the morning report needed a mount decision. Its "collapsible audit-log tail" also assumed raw log lines, but `AuditSlice` only carries `auto_allow_count` + `floor_denials` and the PRD's Non-Goals forbid new endpoints. Three more pre-answered clarifications: rail-door-only indicator (no `RoomCard` exists yet), badge clears once the report is opened, and "Answer & requeue" must run both night-variant requeue paths while the report stays mounted and refetches.
 - **Consequences**: `MorningReportTab.tsx` mounts in the same Agent-tab slot (`ProjectDrawer` render priority: latched report → night variant → `AgentPanel`). Readiness is `morningReportReady` (`lib/rail.ts`): plan exists, nothing active/queued, ≥1 terminal phase — a halt-on-stall plan with queued phases left stays on the night variant's parked inbox, so the two surfaces never fight over one state. A latch in `ProjectDrawer` keeps the report mounted after a requeue reactivates the run (same plan id) until the drawer closes or a new plan appears; the tab's 5s `getRunReport` poll refetches so requeued phases show fresh verdicts. NightRunTab's parked card + both requeue handlers were extracted verbatim into shared `ParkedQuestionInbox.tsx`, which is why the report's requeue wiring cannot drift from the night variant's. The audit tail is a native `<details>` rendering only what `AuditSlice` carries. The rail sun badge is gated by transient `appStore.morningReportSeen` (path → plan id): clear-once-opened, re-armed by a new plan; transient by the store's documented policy, so it legitimately returns after an app restart.
+
+## 2026-08-31 — Session heartbeat
+- **Status**: proposed
+- **Context**: AI session active on Selasar development.
+
+## 2026-08-31 — PR-backed runs complete the PRD checklist idempotently
+- **Status**: accepted
+- **Context**: A successful unattended PR completed runtime state without marking its spec checklist item, leaving delivery state to drift.
+- **Consequences**: New runs live under `.loopdeck/runs/<branch-name>/`; after recording a draft PR, the runner checks the matching PRD item without ever reopening one on retry.
+
+## 2026-08-31 — Pre-flight interviews can be answered as one contextual batch
+- **Status**: accepted
+- **Context**: A multi-phase night plan required a separate tap and agent turn for every pending interview, fragmenting the shared work context.
+- **Consequences**: The wizard now offers one combined interview that presents all questions together and pins the phase-tagged answers back to their respective loops.
+
+## 2026-08-31 — Delivery links live on the execution.yaml loop records; reconciliation is a pure evaluator
+- **Status**: accepted
+- **Context**: `prd-verified-delivery-reconciliation` Phase 1. Branch/commit/PR/rubric links had nowhere persisted to live, and "conflicting records" was defined nowhere — the UI report, the delivery gates, and tests each risked their own drift definition.
+- **Consequences**: New `src-tauri/src/delivery.rs`: `DeliveryLinks` (branch, commit, pr_url, optional pr_provider, optional `RubricResult`) persisted as an optional field on both `ActiveLoop` and `HistoryLoop` in `execution.yaml` (copied through `complete_current`/`abandon_current`), plus a pure `reconcile_delivery(links, LiveDeliveryState) -> Vec<MismatchKind>` and `evaluate_delivery_gates(...) -> Vec<GateBlock>` shared by report, gates, and tests. `extract_rubric_result` parses a `loopdeck-prd-verifier` report (per-criterion rows + `**Verdict:**`, last occurrence wins) into the retained `RubricResult`; provider stays optional because non-GitHub support is an open PRD question.
+
+## 2026-08-31 — Run worktrees consolidate under `.loopdeck/runs/` and resume recreates from the surviving branch
+- **Status**: accepted
+- **Context**: `prd-verified-delivery-reconciliation` Phase 2. Run worktrees scattered across legacy locations (`.loopdeck-runs/`, `.loopdeck-agent-worktrees/`) with no single managed home; a deleted worktree directory killed an otherwise-healthy run even when its branch survived.
+- **Consequences**: `run_queue.rs::ensure_worktree` and `multi_agent.rs` both place worktrees under `.loopdeck/runs/` (gitignored via idempotent `ignore_managed_runs_dir`). On resume, a missing worktree directory is recreated at the same path from the surviving branch (`git worktree add` with the existing branch checked out); only a missing branch (or no recorded branch) errors. External/legacy worktrees are detected and classified (`detect_external_worktrees`: managed / legacy-run / legacy-multi-agent / claude-harness / user-manual) for the delivery report — never moved or deleted.
+
+## 2026-08-31 — Delivery gates run a fresh rubric and own the loop's terminal state
+- **Status**: accepted
+- **Context**: `prd-verified-delivery-reconciliation` Phase 3. Checklist completion could happen without branch/PRD/rubric/PR evidence, and a rerun after a delivered PR risked double-delivering.
+- **Consequences**: `execute_run`'s success path parses the turn's own verifier report into a `RubricResult` and evaluates `evaluate_delivery_gates` fresh (loop pending, branch match, PRD link, rubric all-pass); any block parks the batch before any completion mutation. `DeliveryLinks` (branch, head commit, PR URL, provider, rubric) are persisted onto the loop before `complete_current`, and the PRD checklist items are checked only after the draft PR exists (`epic::complete_prd_loop`, idempotent). An idempotent-finish path (all checklist items already checked + an open PR on the branch) bypasses the gates so a retry after a successful delivery completes instead of re-delivering.

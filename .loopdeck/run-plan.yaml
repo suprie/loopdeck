@@ -1,6 +1,6 @@
-id: run-8dc9e98b-4ecc-4480-a96d-d949b97396f6
+id: run-d80622dd-46b6-4420-abf5-d2b59c2992a1
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-28T09:33:26.443850Z
+created: 2026-08-31T02:33:37.898118Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -8,49 +8,108 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
-  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-8dc9e98b-4ecc-4480-a96d-d949b97396f6
-  worktree_branch: run/selasar-revamp-build-the-morning-report-drawer-verdict-table-parked-questions-plus2-d949b97396f6
+  worktree_path: /Users/supriyantop/Workspace/others/.loopdeck-runs/run-d80622dd-46b6-4420-abf5-d2b59c2992a1
+  worktree_branch: run/delivery-bookkeeping-reconciliation-model-plus6-d2b59c2992a1
   worktree_kept: false
-wall_clock_secs: 616
+wall_clock_secs: 2
 stall_policy: continue_independent
 phases:
-- execution_id: selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
-  status: completed
+- execution_id: delivery-bookkeeping/reconciliation-model
+  status: running
   interview:
-  - question: The PRD asks for a "collapsible audit-log tail" sourced from real RunReport/AuditSlice types — but AuditSlice only carries auto_allow_count + floor_denials (no raw log lines), and the PRD's Non-Goals forbid new backend endpoints. What should the collapsible tail render?
-    answer: Existing AuditSlice (Recommended)
-  - question: Where does the morning-report surface mount in the drawer? Phase 1's night variant turned out to be a swap inside the Agent tab (NightRunTab replaces AgentPanel while a run is active), not a whole-drawer variant.
-    answer: Agent-tab slot (Recommended)
+  - question: Where should the persisted delivery links live? execution.yaml already holds loop state (ActiveLoop/HistoryLoop, GitEvidence on completion), but the PRD never names a file for delivery records (branch, PRD, rubric report, PR URL).
+    answer: Extend execution.yaml (Recommended)
+  - question: Does this loop include the pure reconciliation function (compute mismatch states from links + live Git/PRD data), or types only? Sibling loop `reconciliation-report` covers the user-facing report, but the PR-line between 'define mismatch states' and 'expose report' is unclear.
+    answer: Model + evaluator fn (Recommended)
+  - question: How should the PR link model providers? The PRD's open questions defer 'which providers beyond GitHub' — but the link record itself needs to know if a provider field exists now.
+    answer: Optional provider field (Recommended)
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/92'
-  token_usage: 51649
-  wall_clock_secs: 204
-- execution_id: selasar-revamp/wire-the-room-card-s-rail-door-s-morning-report-ready-indicator-to
-  status: completed
+  token_usage: 0
+  wall_clock_secs: 0
+- execution_id: delivery-bookkeeping/reconciliation-report
+  status: running
   interview:
-  - question: The RoomCard component doesn't exist yet (prd-rail-corridor-shell Phase 2 is unchecked — only the rail door ships today). What should this loop wire the "morning report ready" indicator to?
-    answer: Rail door only (Recommended)
-  - question: 'PRD Open Question deferred to Phase 3: should the "morning report ready" indicator auto-clear once the report''s been opened once, or stay until every parked question in it is resolved?'
-    answer: Clear once opened (Recommended)
+  - question: Where should the verification/discrepancy report surface in the UI?
+    answer: New DeliveryReportTab
+  - question: Does the Phase 1 report run the PRD rubric itself, or only display whatever rubric result is already persisted in the delivery links?
+    answer: Report triggers rubric run
+  - question: Where does PR state in the report come from?
+    answer: Persisted link only (Recommended)
   interview_status: answered
   depends_on:
-  - selasar-revamp/build-the-morning-report-drawer-verdict-table-parked-questions
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/92'
-  token_usage: 51649
-  wall_clock_secs: 204
-- execution_id: selasar-revamp/wire-the-report-s-answer-requeue-button-to-the-same-requeue
-  status: completed
+  - delivery-bookkeeping/reconciliation-model
+  token_usage: 0
+  wall_clock_secs: 0
+- execution_id: delivery-bookkeeping/runs-directory
+  status: running
   interview:
-  - question: 'The night variant''s inline parked card has TWO requeue paths: structured __QUESTIONS__ payloads go through answerParkedQuestion (no queueRun after), raw payloads get requeueRunPhase + queueRun. What should the report''s parked-question section wire?'
-    answer: Both paths, identical to night variant (Recommended)
-  - question: After a successful requeue from the morning report, the run becomes active again and the report is stale. What should the drawer do?
-    answer: Stay on report, refetch it (Recommended)
-  - question: This loop depends on Phase 3 item 1 (build the report drawer), which hasn't run yet. If it runs tonight in the same queue but item 1 fails or is missing, what should this loop do?
-    answer: Abort cleanly (Recommended)
+  - question: Worktrees under `.loopdeck/runs/` show as untracked content in the main worktree (this repo's .gitignore does not cover it). How should the run handle ignoring?
+    answer: Auto-add to .gitignore
+  - question: 'Resume behavior: run plan records worktree path, but worktree is gone from `git worktree list` (user deleted it, or `git worktree prune` ran) while the branch still exists. Current code hard-stops with ''preserving the run for inspection''. What should the overnight run do?'
+    answer: Recreate from branch
+  - question: PRD says 'newly created managed worktrees' live in `.loopdeck/runs/`. `multi_agent.rs` still creates worktrees under `.loopdeck-agent-worktrees/` (root-level, sibling of repo). Include those in this loop's scope?
+    answer: Both
   interview_status: answered
   depends_on:
-  - selasar-revamp/wire-the-room-card-s-rail-door-s-morning-report-ready-indicator-to
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/92'
-  token_usage: 51649
-  wall_clock_secs: 204
+  - delivery-bookkeeping/reconciliation-report
+  token_usage: 0
+  wall_clock_secs: 0
+- execution_id: delivery-bookkeeping/existing-worktree-safety
+  status: running
+  interview:
+  - question: 'Which linked worktrees should be flagged as external legacy? This repo currently has four kinds outside `.loopdeck/runs/`: old run worktrees (`.loopdeck-runs/run-*`, no code reference remains), multi-agent worktrees (`.loopdeck-agent-worktrees/`), Claude harness worktrees (`.claude/worktrees/*`, possibly in active use tonight), and a user-manual one (`/tmp/loopdeck-pr93`).'
+    answer: All external, classified (Recommended)
+  - question: What surface should this loop ship for the detection result?
+    answer: Backend + UI section (Recommended)
+  - question: PRD design says the view 'lets the user resume or explicitly relocate them when safe', but the loop title is detect-only. Are user-initiated actions in this loop's scope?
+    answer: Detect only (Recommended)
+  interview_status: answered
+  depends_on:
+  - delivery-bookkeeping/runs-directory
+  token_usage: 0
+  wall_clock_secs: 0
+- execution_id: delivery-bookkeeping/delivery-gates
+  status: running
+  interview:
+  - question: At gate time, how is the PRD rubric evaluated? "Run the PRD rubric" has no existing implementation anywhere in the repo — Phase 1's reconciliation-report was answered as "Report triggers rubric run" but the mechanism itself was never pinned down.
+    answer: Gate runs it fresh (Recommended)
+  - question: Who evaluates the criteria when the rubric does run (whatever triggers it)? The PRD says "per-criterion report" but never says what a criterion is or who judges it.
+    answer: Agent verifier (Recommended)
+  - question: What is the pass bar for the rubric gate — what counts as "non-passing"?
+    answer: All criteria pass (Recommended)
+  - question: Where do the gates get wired in — who invokes them?
+    answer: Shared fn + run executor (Recommended)
+  interview_status: answered
+  depends_on:
+  - delivery-bookkeeping/existing-worktree-safety
+  token_usage: 0
+  wall_clock_secs: 0
+- execution_id: delivery-bookkeeping/commit-push-pr
+  status: running
+  interview:
+  - question: 'Rubric scope at delivery time: the gate verifies against "epic PRD acceptance criteria, all must pass" — but this PRD has 5 phases and only Phase 3 is in flight. If the gate runs the whole-PRD rubric, tonight''s branch fails its own delivery (Phases 1/2/4/5 unchecked) and the loop blocks. What does "passing branch" mean for this loop''s commit-push-pr step?'
+    answer: This loop's criteria only (Recommended)
+  - question: What gets committed and PR'd tonight? The main worktree on codex/delivery-reconciliation is dirty with ~13 modified files spanning this epic's docs PLUS unrelated edits (docs/epics/optimization/prd-memory-hygiene.md, selasar-revamp PRDs, .loopdeck bookkeeping, src/ and src-tauri/ changes).
+    answer: Everything on the branch (Recommended)
+  - question: 'PR state when created: draft or ready-for-review? The PRD just says "create a PR". The loopdeck-open-pr skill ships branches as draft PRs, and prior run PR #92 was a draft.'
+    answer: Ready for review
+  interview_status: answered
+  depends_on:
+  - delivery-bookkeeping/delivery-gates
+  token_usage: 0
+  wall_clock_secs: 0
+- execution_id: delivery-bookkeeping/complete-after-pr
+  status: running
+  interview:
+  - question: The checklist completion mutates tracked files (PRD checkbox `- [ ]` to `- [x]` in docs/epics/.../prd-verified-delivery-reconciliation.md, plus the delivery record in execution.yaml) AFTER the PR was already created. What happens to those edits?
+    answer: Commit + push to same PR (Recommended)
+  - question: 'If the run crashes (or gh returns ambiguous success) after PR creation succeeds but before the checklist item is written, and the loop re-runs overnight: what should it do on finding an existing open PR for the branch?'
+    answer: Idempotent finish (Recommended)
+  - question: 'Who writes the loop''s terminal state — does this loop''s code flip the execution to outcome: completed in execution.yaml history, or does it only persist the delivery record and leave loop status to the existing run-executor transition?'
+    answer: Run executor owns it (Recommended)
+  interview_status: answered
+  depends_on:
+  - delivery-bookkeeping/commit-push-pr
+  token_usage: 0
+  wall_clock_secs: 0

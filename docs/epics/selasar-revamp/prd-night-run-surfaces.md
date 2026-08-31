@@ -2,7 +2,7 @@
 prd: prd-night-run-surfaces
 epic: selasar-revamp
 milestone: "0.5.0"
-status: proposed
+status: completed
 description: >
   Reskin the existing overnight-run backend (`RunPlan`, `RunBudgets`,
   `RunReport`, `AuditSlice` from the 0.4.0 `overnight-orchestration` epic)
@@ -178,10 +178,10 @@ restructuring for the drawer's layout._
 
 ### Phase 4 — Verification
 
-- [ ] `selasar-revamp/manual-smoke-test-against-a-real-queued-run-plan-tonight-let-or` Manual smoke test against a real queued run: plan tonight, let (or
+- [x] `selasar-revamp/manual-smoke-test-against-a-real-queued-run-plan-tonight-let-or` Manual smoke test against a real queued run: plan tonight, let (or
       simulate) a phase complete, confirm the morning report shows verdicts/
       parked/kills matching the actual `RunReport`.
-- [ ] `selasar-revamp/npx-tsc-noemit-clean-cd-src-tauri-cargo-test-clean-confirming` `npx tsc --noEmit` clean; `cd src-tauri && cargo test` clean, confirming
+- [x] `selasar-revamp/npx-tsc-noemit-clean-cd-src-tauri-cargo-test-clean-confirming` `npx tsc --noEmit` clean; `cd src-tauri && cargo test` clean, confirming
       no accidental backend edits broke existing `runplan`/`run_executor`
       tests.
 

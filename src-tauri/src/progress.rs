@@ -392,6 +392,7 @@ mod tests {
                 },
                 started_at: Utc::now(),
                 attempt: 1,
+                delivery: None,
             }),
             ..ExecutionState::default()
         };
@@ -432,6 +433,7 @@ mod tests {
                 },
                 started_at: Utc::now(),
                 attempt: 1,
+                delivery: None,
             }),
             ..ExecutionState::default()
         };

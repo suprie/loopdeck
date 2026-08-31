@@ -18,6 +18,9 @@ import type {
   LoopStatus,
   ExecutionState,
   LoadedExecution,
+  DeliveryReportResponse,
+  RubricResult,
+  ExternalWorktree,
   MigrationPreview,
   ProgressSnapshot,
   RunBudgets,
@@ -377,6 +380,14 @@ export async function runPhaseInterview(
   return invoke<RunPlan>("run_phase_interview", { path, executionId });
 }
 
+/** Run one combined pre-flight interview for all selected queued phases. */
+export async function runBatchPhaseInterviews(
+  path: string,
+  executionIds: string[],
+): Promise<RunPlan> {
+  return invoke<RunPlan>("run_batch_phase_interviews", { path, executionIds });
+}
+
 /**
  * Explicitly skip a queued phase's pre-flight interview — no session is
  * run; `interview_status` becomes "skipped", unblocking `queueRun` for a
@@ -388,6 +399,37 @@ export async function skipPhaseInterview(
   executionId: string,
 ): Promise<RunPlan> {
   return invoke<RunPlan>("skip_phase_interview", { path, executionId });
+}
+
+// ── Delivery reconciliation (prd-verified-delivery-reconciliation) ────
+
+/**
+ * Build the pre-mutation verification and discrepancy report: the active
+ * loop plus recent deliveries, each reconciled against live Git and PRD
+ * checklist state. PR state comes from the persisted link only.
+ * Rust: get_delivery_report(path) -> Result<DeliveryReportResponse, AppError>
+ */
+export async function getDeliveryReport(path: string): Promise<DeliveryReportResponse> {
+  return invoke<DeliveryReportResponse>("get_delivery_report", { path });
+}
+
+/**
+ * Run the PRD rubric fresh for the active loop (agent verifier turn in the
+ * main worktree) and retain the result on its delivery links. Resolves only
+ * when the verifier turn finishes — call from an active UI session.
+ * Rust: run_delivery_rubric(path) -> Result<RubricResult, AppError>
+ */
+export async function runDeliveryRubric(path: string): Promise<RubricResult> {
+  return invoke<RubricResult>("run_delivery_rubric", { path });
+}
+
+/**
+ * Detect linked worktrees outside the managed `.loopdeck/runs/` directory,
+ * each classified. Detect-only — nothing is moved or deleted.
+ * Rust: detect_external_worktrees(path) -> Result<Vec<ExternalWorktree>, AppError>
+ */
+export async function detectExternalWorktrees(path: string): Promise<ExternalWorktree[]> {
+  return invoke<ExternalWorktree[]>("detect_external_worktrees", { path });
 }
 
 /**

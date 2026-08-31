@@ -15,14 +15,16 @@ use super::agent::{
 };
 use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::{ClaudeEvent, TokenBudget};
+use crate::delivery;
 use crate::epic;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::limits;
 use crate::run_executor::{
-    self, build_combined_phase_prompt, build_interview_prompt, extract_draft_pr_url,
-    extract_interview_answers, extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
+    self, build_batch_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
+    extract_batch_interview_answers, extract_draft_pr_url, extract_interview_answers,
+    extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
 use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
 use chrono::Utc;
@@ -136,11 +138,8 @@ where
     }
 }
 
-fn run_worktree_path(root: &Path, run_id: &str) -> PathBuf {
-    root.parent()
-        .unwrap_or(root)
-        .join(".loopdeck-runs")
-        .join(run_id)
+fn run_worktree_path(root: &Path, branch: &str) -> PathBuf {
+    root.join(".loopdeck").join("runs").join(branch)
 }
 
 /// Branch name for a run's worktree: derived from the first queued phase's
@@ -172,6 +171,13 @@ fn run_branch_name(plan: &RunPlan) -> String {
 /// Create the one isolated worktree used by every phase in a run. The path and
 /// branch are persisted before a turn begins, so a failed/terminated run stays
 /// inspectable and a restart does not create a second branch.
+///
+/// Resume behavior (`prd-verified-delivery-reconciliation` Phase 2): when the
+/// persisted worktree is gone from Git's inventory but its **branch still
+/// exists** (user deleted the tree, or `git worktree prune` ran), the
+/// worktree is recreated at the same path from the surviving branch instead
+/// of hard-stopping — no second branch, no lost work. Only a missing branch
+/// (nothing left to resume from) preserves the run for inspection.
 fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError> {
     if let Some(path) = &plan.environment.worktree_path {
         if git::worktree_list(root)
@@ -181,17 +187,56 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
         {
             return Ok(path.clone());
         }
+        let branch = plan.environment.worktree_branch.as_deref().ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "run worktree {} is missing and no branch was recorded; \
+                 preserving the run for inspection",
+                path.display()
+            ))
+        })?;
+        if git::branch_exists(root, branch) {
+            let worktree =
+                git::worktree_add_existing(root, path, branch).map_err(AppError::RunPlan)?;
+            info!(
+                "recreated run worktree {} from surviving branch {branch}",
+                worktree.path.display()
+            );
+            return Ok(worktree.path);
+        }
         return Err(AppError::RunPlan(format!(
-            "run worktree {} is missing; preserving the run for inspection",
+            "run worktree {} and branch {branch} are both missing; \
+             preserving the run for inspection",
             path.display()
         )));
     }
-    let path = run_worktree_path(root, &plan.id);
     let branch = run_branch_name(plan);
+    let path = run_worktree_path(root, &branch);
+    ignore_managed_runs_dir(root);
     let worktree = git::worktree_add(root, &path, &branch).map_err(AppError::RunPlan)?;
     plan.environment.worktree_path = Some(worktree.path.clone());
     plan.environment.worktree_branch = Some(worktree.branch);
     Ok(worktree.path)
+}
+
+/// Managed run worktrees live inside the repo (`.loopdeck/runs/`), so without
+/// an ignore rule every run shows up as untracked noise in the main worktree.
+/// Idempotently append the rule to `.gitignore` — the only file this touches.
+fn ignore_managed_runs_dir(root: &Path) {
+    const RULE: &str = ".loopdeck/runs/";
+    let gitignore = root.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == RULE) {
+        return;
+    }
+    let mut next = existing;
+    if !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(RULE);
+    next.push('\n');
+    if std::fs::write(&gitignore, next).is_err() {
+        warn!("could not add {RULE} to .gitignore — runs will show as untracked");
+    }
 }
 
 /// Fresh worktrees intentionally contain no ignored build artifacts. Bootstrap
@@ -1195,6 +1240,91 @@ pub async fn run_phase_interview(
     Ok(plan)
 }
 
+/// Run one shared pre-flight interview for several queued phases. The agent
+/// receives every selected phase's context in one turn and asks all necessary
+/// questions through the single pending-question slot, avoiding one tap per
+/// phase while preserving phase-specific pinned answers.
+#[tauri::command]
+pub async fn run_batch_phase_interviews(
+    path: String,
+    execution_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    if execution_ids.is_empty() {
+        return Err(AppError::RunPlan(
+            "choose at least one phase to interview".into(),
+        ));
+    }
+
+    let root = resolve_root(&state, &path)?;
+    let plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
+    // Preserve picker order in the shared context; a duplicate ID must not
+    // cause an extra phase heading or a second state mutation.
+    let mut ids = Vec::with_capacity(execution_ids.len());
+    for execution_id in execution_ids {
+        if !ids.contains(&execution_id) {
+            ids.push(execution_id);
+        }
+    }
+    let mut phases = Vec::with_capacity(ids.len());
+    for execution_id in &ids {
+        let phase = plan
+            .phases
+            .iter()
+            .find(|phase| phase.execution_id == *execution_id)
+            .ok_or_else(|| {
+                AppError::RunPlan(format!("phase \"{execution_id}\" is not in the run plan"))
+            })?;
+        if phase.status != RunPhaseStatus::Queued
+            || phase.interview_status != InterviewStatus::Pending
+        {
+            return Err(AppError::RunPlan(format!(
+                "phase \"{execution_id}\" no longer needs a pre-flight interview"
+            )));
+        }
+        let loc = epic::find_loop_by_id(&root, execution_id).ok_or_else(|| {
+            AppError::RunPlan(format!(
+                "queued phase \"{execution_id}\" no longer exists in docs/epics/"
+            ))
+        })?;
+        phases.push((execution_id.clone(), loc));
+    }
+
+    let prompt = build_batch_interview_prompt(&phases);
+    let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
+    let response = start_fresh_and_record_streaming(
+        &state,
+        &root,
+        &prompt,
+        Some(format!("Pre-flight interview ({} phases)", phases.len())),
+        &channel,
+    )
+    .await?;
+    let answers_by_phase = extract_batch_interview_answers(&response.result);
+
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
+    for execution_id in ids {
+        let phase = plan
+            .phases
+            .iter_mut()
+            .find(|phase| phase.execution_id == execution_id)
+            .ok_or_else(|| {
+                AppError::RunPlan(format!(
+                    "phase \"{execution_id}\" was removed from the run plan during its interview"
+                ))
+            })?;
+        phase.interview = answers_by_phase
+            .get(&execution_id)
+            .cloned()
+            .unwrap_or_default();
+        phase.interview_status = InterviewStatus::Answered;
+    }
+    runplan::save(&root, &plan)?;
+    Ok(plan)
+}
+
 /// Explicitly skip a queued phase's pre-flight interview — no session is
 /// run, `interview` is left as-is (typically empty), `interview_status`
 /// becomes `Skipped`. Lets the user unblock `queue_run` for a phase they've
@@ -1506,7 +1636,17 @@ async fn execute_run(
                 }
                 let verdict = extract_verdict(&response.result);
                 if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
-                    let Some(url) = extract_draft_pr_url(&response.result) else {
+                    // The PR link: the turn's own report first; then — the
+                    // crash-retry path — an already-open PR for this run's
+                    // branch (PR creation succeeded on a previous attempt
+                    // before the bookkeeping ran).
+                    let url = extract_draft_pr_url(&response.result).or_else(|| {
+                        plan.environment
+                            .worktree_branch
+                            .as_deref()
+                            .and_then(|branch| git::open_pr_for_branch(&worktree, branch))
+                    });
+                    let Some(url) = url else {
                         let reason = "green verification passed, but no unattended draft PR URL was recorded";
                         park_batch(&mut plan, &batch, reason);
                         plan.environment.worktree_kept = true;
@@ -1522,6 +1662,55 @@ async fn execute_run(
                         execution::save(root, &abandoned, loaded.state.revision)?;
                         continue;
                     };
+
+                    // Delivery gates (Phase 3), evaluated fresh from this
+                    // turn's own verifier report — never a stale persisted
+                    // verdict. Idempotent finish is exempt: when every
+                    // checklist item is already checked and an open PR claims
+                    // the branch, this is a retry completing bookkeeping a
+                    // previous attempt already delivered, not a new delivery.
+                    let rubric =
+                        delivery::extract_rubric_result(&response.result, chrono::Utc::now());
+                    let already_delivered = locs.iter().all(|(execution_id, _, _)| {
+                        epic::loop_checked(root, execution_id) == Some(true)
+                    });
+                    if !already_delivered {
+                        let recorded_branch =
+                            plan.environment.worktree_branch.clone().unwrap_or_default();
+                        let branch_matches = git::current_branch(&worktree)
+                            .map(|live| live == recorded_branch)
+                            .unwrap_or(false);
+                        let lead_checked = epic::loop_checked(root, &locs[0].0);
+                        let blocks = delivery::evaluate_delivery_gates(
+                            lead_checked.map(|checked| !checked),
+                            branch_matches,
+                            lead_checked.is_some(),
+                            rubric.as_ref(),
+                        );
+                        if !blocks.is_empty() {
+                            let reason = format!(
+                                "delivery gate blocked: {}",
+                                blocks
+                                    .iter()
+                                    .map(std::string::ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            );
+                            park_batch(&mut plan, &batch, &reason);
+                            plan.environment.worktree_kept = true;
+                            for (execution_id, _, _) in &locs {
+                                park_blocked_dependents(&mut plan, execution_id);
+                            }
+                            runplan::save(root, &plan)?;
+                            let loaded = execution::load(root)?;
+                            let abandoned =
+                                loaded
+                                    .state
+                                    .abandon_current(reason, chrono::Utc::now(), false)?;
+                            execution::save(root, &abandoned, loaded.state.revision)?;
+                            continue;
+                        }
+                    }
                     let mut automatic_relinks = Vec::new();
                     for (&idx, (execution_id, original, _)) in batch.iter().zip(&locs) {
                         let replacement = if epic::find_loop_by_id(root, execution_id).is_some() {
@@ -1555,6 +1744,18 @@ async fn execute_run(
                             },
                         );
                     }
+                    // The PR URL is the delivery boundary: only now may the
+                    // checklist declare the loop done. Unlike the manual
+                    // toggle, this operation is idempotent and can never
+                    // reopen an already-checked item on a retry.
+                    for (_, location, _) in &locs {
+                        epic::complete_prd_loop(
+                            root,
+                            &location.epic,
+                            &location.prd,
+                            &location.title,
+                        )?;
+                    }
                     for (old_id, new_id, _) in &automatic_relinks {
                         for phase in &mut plan.phases {
                             for dependency in &mut phase.depends_on {
@@ -1582,6 +1783,20 @@ async fn execute_run(
                                 phase: location.phase.clone(),
                             };
                         }
+                        // The terminal delivery record (Phase 3, loop
+                        // `complete-after-pr`): branch, commit, PR, and the
+                        // rubric result that gated it — persisted only now
+                        // that PR creation has actually succeeded.
+                        // `complete_current` carries it into the history
+                        // entry; the checklist (already updated above)
+                        // remains the only completion authority.
+                        current.delivery = Some(delivery::DeliveryLinks {
+                            branch: plan.environment.worktree_branch.clone(),
+                            commit: git::head_commit(&worktree),
+                            pr_url: Some(url.clone()),
+                            pr_provider: url.contains("github.com").then(|| "github".to_string()),
+                            rubric: rubric.clone(),
+                        });
                     }
                     let completed =
                         execution_state.complete_current(chrono::Utc::now(), None, false)?;
@@ -2208,12 +2423,9 @@ mod unattended_tests {
 
     fn plan_with_phases(project: &Path, phases: Vec<runplan::RunPhase>) -> RunPlan {
         let mut p = plan();
-        // `run_worktree_path` derives the worktree's destination from
-        // `root.parent()/.loopdeck-runs/<plan.id>` — every temp repo here
-        // shares the OS temp dir as its parent, so a shared `plan.id` (the
-        // `plan()` fixture's fixed "run-budget-test") would make parallel
-        // tests race to create a linked worktree at the identical path. A
-        // unique id per test keeps each worktree lifecycle test isolated.
+        // `run_worktree_path` derives the destination from the branch name,
+        // whose unique run-id suffix keeps lifecycle tests isolated even when
+        // they share a parent directory.
         p.id = format!("run-{}", uuid::Uuid::new_v4());
         p.project = project.to_path_buf();
         p.phases = phases;
@@ -2297,6 +2509,68 @@ mod unattended_tests {
         let err = ensure_worktree(&dir, &mut plan).unwrap_err();
         assert!(err.to_string().contains("missing"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Resume-from-branch (`prd-verified-delivery-reconciliation` Phase 2):
+    /// a recorded worktree removed from Git's inventory while its branch
+    /// survived is recreated at the same path from that branch — no second
+    /// branch, no hard stop.
+    #[test]
+    fn ensure_worktree_recreates_from_surviving_branch() {
+        let dir = temp_git_repo("recreate");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let first = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let branch = plan.environment.worktree_branch.clone().unwrap();
+
+        git::worktree_remove(&dir, &first).expect("remove worktree, keep branch");
+        assert!(!first.exists());
+        assert!(git::branch_exists(&dir, &branch));
+
+        let second = ensure_worktree(&dir, &mut plan).expect("recreate from branch");
+
+        assert_eq!(first, second, "recreated at the same recorded path");
+        assert!(second.exists());
+        assert_eq!(
+            git::worktree_list(&dir)
+                .unwrap()
+                .iter()
+                .filter(|p| **p == second)
+                .count(),
+            1
+        );
+
+        git::worktree_remove(&dir, &second).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// New managed worktrees land under `.loopdeck/runs/` and the ignore rule
+    /// keeping them out of the main worktree's untracked view is appended
+    /// exactly once.
+    #[test]
+    fn ensure_worktree_ignores_managed_runs_dir_once() {
+        let dir = temp_git_repo("ignore");
+        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+
+        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let second = ensure_worktree(&dir, &mut plan).expect("resume");
+
+        // Git canonicalizes the worktree path (`/var` → `/private/var` on
+        // macOS); compare against the canonical repo dir.
+        let canonical_dir = std::fs::canonicalize(&dir).unwrap();
+        assert!(worktree.starts_with(canonical_dir.join(".loopdeck").join("runs")));
+        assert_eq!(worktree, second);
+        let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(
+            gitignore
+                .lines()
+                .filter(|l| l.trim() == ".loopdeck/runs/")
+                .count(),
+            1,
+            "ignore rule appended exactly once"
+        );
+
+        git::worktree_remove(&dir, &worktree).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
