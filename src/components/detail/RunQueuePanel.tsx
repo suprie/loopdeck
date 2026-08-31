@@ -53,6 +53,7 @@ export function RunQueuePanel({
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [interviewingId, setInterviewingId] = useState<string | null>(null);
+  const [batchInterviewing, setBatchInterviewing] = useState(false);
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [retryingAll, setRetryingAll] = useState(false);
@@ -256,6 +257,27 @@ export function RunQueuePanel({
     }
   };
 
+  const handleAnswerAll = async () => {
+    const pendingIds = plan?.phases
+      .filter((phase) => phase.status === "queued" && phase.interview_status === "pending")
+      .map((phase) => phase.execution_id) ?? [];
+    if (pendingIds.length < 2) return;
+
+    setBatchInterviewing(true);
+    toast.info("Combined interview started", {
+      description: "Answer every question together in the shared card.",
+    });
+    try {
+      const updated = await api.runBatchPhaseInterviews(projectPath, pendingIds);
+      setPlan(updated);
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Combined interview failed", { description: appErr.message ?? String(err) });
+    } finally {
+      setBatchInterviewing(false);
+    }
+  };
+
   const handleSkip = async (executionId: string) => {
     setSkippingId(executionId);
     try {
@@ -277,6 +299,8 @@ export function RunQueuePanel({
   const hasQueuedPhase = plan?.phases.some((p) => p.status === "queued") ?? false;
   const hasPendingInterview =
     plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
+  const pendingInterviewCount =
+    plan?.phases.filter((p) => p.status === "queued" && p.interview_status === "pending").length ?? 0;
   const canStart = !isRunning && hasQueuedPhase && !hasPendingInterview;
   const startDisabledReason = isRunning
     ? "A run is already in progress"
@@ -397,6 +421,17 @@ export function RunQueuePanel({
                     Retry failed ({retryableCount})
                   </button>
                 )}
+                {pendingInterviewCount > 1 && (
+                  <button
+                    onClick={handleAnswerAll}
+                    disabled={batchInterviewing || interviewingId !== null || skippingId !== null}
+                    title="Ask one agent interview about every pending phase, then answer all questions together"
+                    className="flex items-center gap-1.5 rounded-md border border-primary/40 px-2.5 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {batchInterviewing ? <Loader2 size={11} className="animate-spin" /> : <Zap size={11} />}
+                    Answer all ({pendingInterviewCount})
+                  </button>
+                )}
                 <button
                   onClick={handleStartRun}
                   disabled={!canStart || starting}
@@ -421,6 +456,7 @@ export function RunQueuePanel({
                 phase={phase}
                 title={idToTitle[phase.execution_id] ?? phase.execution_id}
                 interviewing={interviewingId === phase.execution_id}
+                batchInterviewing={batchInterviewing}
                 skipping={skippingId === phase.execution_id}
                 retrying={retryingId === phase.execution_id}
                 relinking={relinkingId === phase.execution_id}
@@ -636,6 +672,7 @@ function RunPhaseRow({
   phase,
   title,
   interviewing,
+  batchInterviewing,
   skipping,
   retrying,
   relinking,
@@ -650,6 +687,7 @@ function RunPhaseRow({
   phase: RunPhase;
   title: string;
   interviewing: boolean;
+  batchInterviewing: boolean;
   skipping: boolean;
   retrying: boolean;
   relinking: boolean;
@@ -662,7 +700,7 @@ function RunPhaseRow({
   onRelink: () => void;
 }) {
   const needsInterview = phase.status === "queued" && phase.interview_status === "pending";
-  const busy = interviewing || skipping;
+  const busy = interviewing || skipping || batchInterviewing;
 
   return (
     <li className="rounded px-1.5 py-1 text-xs">
