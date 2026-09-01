@@ -442,8 +442,8 @@ impl ClaudeSession {
         // floor-clearing request — skips only floor-clearing manual approvals.
         // `policy_decision` already ran the destructive floor, so role-scoped
         // autonomy can never reach past it.
-        let role_auto_allow =
-            policy_decision == Decision::Allow && self.policy.role_allows(&request.tool_name, &request.input);
+        let role_auto_allow = policy_decision == Decision::Allow
+            && self.policy.role_allows(&request.tool_name, &request.input);
         if policy_decision == Decision::Allow
             && !self.policy.is_autonomous()
             && !role_auto_allow

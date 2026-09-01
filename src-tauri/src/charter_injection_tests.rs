@@ -23,9 +23,7 @@
 //!    `multi_agent::execute_subrun` uses with a profile resolved before
 //!    worktrees are spawned).
 
-use crate::claude_session::{
-    InterruptSlot, ParkSlots, PermissionSlot, PlanSlot, QuestionSlot,
-};
+use crate::claude_session::{InterruptSlot, ParkSlots, PermissionSlot, PlanSlot, QuestionSlot};
 use crate::commands::agent::{spawn_fresh, spawn_fresh_with_config};
 use crate::commands::state::with_session;
 use crate::commands::state::AppState;
@@ -159,8 +157,8 @@ fn empty_state() -> AppState {
 /// An `AppState` whose default roster entry carries the QA charter — the
 /// shape `resolve_agent_config` sees on the interactive and run-queue paths.
 fn state_with_chartered_default() -> AppState {
-    let agent = NamedAgentConfig::new("QA".into(), chartered_claude_config())
-        .expect("valid named agent");
+    let agent =
+        NamedAgentConfig::new("QA".into(), chartered_claude_config()).expect("valid named agent");
     let state = empty_state();
     {
         let mut config = state.config.lock().unwrap();

@@ -91,8 +91,7 @@ impl HarnessSession {
         // Single choke point for role-scoped autonomy: every spawn path
         // (interactive, run-queue, multi-agent) funnels through here, so the
         // charter's rules ride the policy regardless of who spawned us.
-        let policy =
-            policy.with_role_rules(config.charter.as_ref().and_then(|c| c.rules.clone()));
+        let policy = policy.with_role_rules(config.charter.as_ref().and_then(|c| c.rules.clone()));
         match config.harness {
             AgentHarness::Claude => {
                 // Codex ids are explicitly tagged in Selasar transcripts.

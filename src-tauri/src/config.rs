@@ -73,11 +73,10 @@ impl RoleCharter {
     /// skipped at spawn time — a blank charter must not add noise to the
     /// instruction space.
     pub fn is_empty(&self) -> bool {
-        self.persona
-            .as_deref()
-            .is_none_or(|p| p.trim().is_empty())
+        self.persona.as_deref().is_none_or(|p| p.trim().is_empty())
             && self.allowed_skills.is_empty()
-            && self.output_contract
+            && self
+                .output_contract
                 .as_deref()
                 .is_none_or(|c| c.trim().is_empty())
     }
@@ -955,10 +954,13 @@ mod tests {
 
     #[test]
     fn charter_survives_roster_round_trip() {
-        let agent = super::NamedAgentConfig::new("QA".into(), super::AgentConfig {
-            charter: Some(qa_charter()),
-            ..Default::default()
-        })
+        let agent = super::NamedAgentConfig::new(
+            "QA".into(),
+            super::AgentConfig {
+                charter: Some(qa_charter()),
+                ..Default::default()
+            },
+        )
         .expect("valid agent");
         let mut config = GlobalConfig::default();
         config.agents.push(agent);

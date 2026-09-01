@@ -756,8 +756,8 @@ mod tests {
 
     #[test]
     fn role_bash_rules_cover_pipelines_only_when_every_stage_matches() {
-        let single = PermissionPolicy::confirm_changes()
-            .with_role_rules(Some(rules(&[], &["cargo test*"])));
+        let single =
+            PermissionPolicy::confirm_changes().with_role_rules(Some(rules(&[], &["cargo test*"])));
         assert!(
             !single.role_allows("Bash", &json!({ "command": "cargo test && npm run build" })),
             "an uncovered second stage must not ride a covered prefix"
@@ -766,7 +766,10 @@ mod tests {
             .with_role_rules(Some(rules(&[], &["cargo test*", "npm run build"])));
         assert!(both.role_allows("Bash", &json!({ "command": "cargo test && npm run build" })));
         assert!(!both.role_allows("Bash", &json!({ "command": "cargo test; rm x" })));
-        assert!(!both.role_allows("Bash", &json!({})), "no command → uncovered");
+        assert!(
+            !both.role_allows("Bash", &json!({})),
+            "no command → uncovered"
+        );
     }
 
     #[test]
@@ -799,7 +802,6 @@ mod tests {
         );
         assert_eq!(policy.decide("Edit", &json!({})), Decision::Allow);
     }
-
 
     // ── requires_manual_approval ───────────────────────────────────────
 
