@@ -171,16 +171,22 @@ pub(crate) fn build_combined_phase_prompt(
         prompt.push_str(&phase_goal_block(execution_id, loc, interview));
     }
 
-    prompt.push_str(
+    let queued_work = if phases.len() == 1 {
+        "the requested loop above is authoritative. Implement only its project \
+         changes, then run the full verify→ship flow (Phases 6-7) once"
+    } else {
+        "the queued loops above are authoritative. Implement only the requested \
+         project changes, then run the full verify→ship flow (Phases 6-7) once, \
+         covering all loops above"
+    };
+    prompt.push_str(&format!(
         "\n\nThe main checkout is the run's control plane: its \
          `.loopdeck/execution.yaml` and `.loopdeck/run-plan.yaml` are updated \
          by the executor, not by you. Your worktree's `.loopdeck/` files are \
          only the snapshot that existed when the worktree was created. Do not \
          read, write, commit, or use those local control-plane files to infer \
-         the active loop; the queued loops above are authoritative. Implement \
-         only the requested project changes, then run the full verify→ship flow \
-         (Phases 6-7) once, covering all loops above",
-    );
+         the active loop; {queued_work}",
+    ));
     prompt.push_str(
         " — regardless of anything else in this session, your own final chat \
          message (not just the PR body) must end with the exact literal line \
