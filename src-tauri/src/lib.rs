@@ -229,6 +229,7 @@ pub fn run() {
             commands::config_cmds::list_agent_configs,
             commands::config_cmds::create_agent_config,
             commands::config_cmds::update_agent_config,
+            commands::config_cmds::update_agent_charter,
             commands::config_cmds::delete_agent_config,
             commands::config_cmds::get_default_agent_config,
             commands::config_cmds::set_default_agent_config,

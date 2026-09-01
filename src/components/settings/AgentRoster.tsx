@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Bot, Loader2, Pencil, Plus, Star, Trash2 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import * as api from "../../lib/tauri";
-import type { NamedAgentConfig, NamedAgentConfigInput } from "../../types";
+import type { NamedAgentConfig, NamedAgentConfigInput, RoleCharter } from "../../types";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import {
   Dialog,
@@ -42,13 +42,19 @@ export function AgentRoster() {
     void refresh();
   }, [refresh]);
 
-  const save = useCallback(async (input: NamedAgentConfigInput) => {
+  const save = useCallback(async (input: NamedAgentConfigInput, charter: RoleCharter) => {
     setSaving(true);
     try {
       if (editor === "new") {
-        await api.createAgentConfig(input);
+        const created = await api.createAgentConfig(input);
+        // Skip the extra save when the new profile carries no charter.
+        if (charter.persona_prompt || charter.allowed_skills?.length || charter.output_contract) {
+          await api.updateAgentCharter(created.id, charter);
+        }
       } else if (editor) {
         await api.updateAgentConfig(editor.id, input);
+        // Replace-all semantics: an emptied field in the editor clears it.
+        await api.updateAgentCharter(editor.id, charter);
       }
       setEditor(null);
       await refresh();

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, Eye, EyeOff, Loader2 } from "lucide-react";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Textarea } from "../ui/textarea";
 import {
   Select,
   SelectContent,
@@ -9,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
-import type { NamedAgentConfig, NamedAgentConfigInput } from "../../types";
+import type { NamedAgentConfig, NamedAgentConfigInput, RoleCharter } from "../../types";
 
 const CLAUDE_EFFORT_OPTIONS = ["low", "medium", "high", "max"] as const;
 
@@ -22,6 +23,34 @@ export function emptyAgentConfig(): NamedAgentConfigInput {
     model: "",
     effort: "high",
   };
+}
+
+/** Charter form state: skills held as one comma-separated string for editing. */
+interface CharterForm {
+  persona_prompt: string;
+  allowed_skills: string;
+  output_contract: string;
+}
+
+function charterForm(profile?: NamedAgentConfig): CharterForm {
+  return {
+    persona_prompt: profile?.persona_prompt ?? "",
+    allowed_skills: profile?.allowed_skills?.join(", ") ?? "",
+    output_contract: profile?.output_contract ?? "",
+  };
+}
+
+/** Trim editor input; empty fields are omitted so the backend clears them. */
+function charterPayload(form: CharterForm): RoleCharter {
+  const charter: RoleCharter = {};
+  if (form.persona_prompt.trim()) charter.persona_prompt = form.persona_prompt.trim();
+  const skills = form.allowed_skills
+    .split(",")
+    .map((skill) => skill.trim())
+    .filter(Boolean);
+  if (skills.length) charter.allowed_skills = skills;
+  if (form.output_contract.trim()) charter.output_contract = form.output_contract.trim();
+  return charter;
 }
 
 function editableProfile(profile: NamedAgentConfig): NamedAgentConfigInput {
@@ -40,7 +69,7 @@ function editableProfile(profile: NamedAgentConfig): NamedAgentConfigInput {
 interface AgentConfigEditorProps {
   profile?: NamedAgentConfig;
   saving: boolean;
-  onSave: (value: NamedAgentConfigInput) => Promise<void>;
+  onSave: (value: NamedAgentConfigInput, charter: RoleCharter) => Promise<void>;
   onCancel: () => void;
 }
 
@@ -54,10 +83,14 @@ export function AgentConfigEditor({
   const [form, setForm] = useState<NamedAgentConfigInput>(
     profile ? editableProfile(profile) : emptyAgentConfig(),
   );
+  const [charter, setCharter] = useState<CharterForm>(charterForm(profile));
   const [showToken, setShowToken] = useState(false);
 
   const set = (field: keyof NamedAgentConfigInput, value: string) =>
     setForm((current) => ({ ...current, [field]: value }));
+
+  const setCharterField = (field: keyof CharterForm, value: string) =>
+    setCharter((current) => ({ ...current, [field]: value }));
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -68,7 +101,7 @@ export function AgentConfigEditor({
     if (form.base_url?.trim()) payload.base_url = form.base_url.trim();
     if (form.model?.trim()) payload.model = form.model.trim();
     if (form.effort?.trim()) payload.effort = form.effort.trim();
-    await onSave(payload);
+    await onSave(payload, charterPayload(charter));
   };
 
   const isCodex = form.harness === "codex";
@@ -181,6 +214,47 @@ export function AgentConfigEditor({
           />
         </div>
       ) : null}
+
+      <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Role charter (optional)
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-charter-persona">Persona</Label>
+          <Textarea
+            id="agent-charter-persona"
+            rows={2}
+            value={charter.persona_prompt}
+            onChange={(event) => setCharterField("persona_prompt", event.target.value)}
+            placeholder="e.g. You are the QA agent: skeptical, evidence-driven, verify before trusting."
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-charter-skills">Allowed skills</Label>
+          <Input
+            id="agent-charter-skills"
+            value={charter.allowed_skills}
+            onChange={(event) => setCharterField("allowed_skills", event.target.value)}
+            placeholder="e.g. loopdeck-prd-verifier, loopdeck-open-pr"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            Comma-separated skill names. Suggested, not enforced.
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-charter-contract">Output contract</Label>
+          <Textarea
+            id="agent-charter-contract"
+            rows={2}
+            value={charter.output_contract}
+            onChange={(event) => setCharterField("output_contract", event.target.value)}
+            placeholder="e.g. End every run with a verification verdict and the evidence behind it."
+          />
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Advisory for now — charters shape prompts in a later phase and are not enforced.
+        </p>
+      </div>
 
       <div className="flex justify-end gap-2 pt-2">
         <button type="button" onClick={onCancel} className="h-9 rounded-md px-3 text-sm hover:bg-muted">
