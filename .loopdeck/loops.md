@@ -9,6 +9,7 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 
 ## Next Steps
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/101
 - [ ] Review & merge the draft PR for this run (see final chat message for URL)
 - [ ] Review & merge the night-run Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
