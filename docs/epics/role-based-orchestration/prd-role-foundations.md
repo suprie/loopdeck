@@ -63,17 +63,17 @@ Stub — points to resolve while implementing:
 
 ### Phase 1 — Role charter data model
 
-- [ ] `role-foundations/charter-model` Extend NamedAgentConfig with role charter fields (persona prompt, allowed skills, output contract) and migrate existing configs
-- [ ] `role-foundations/charter-crud` Add IPC CRUD for charter fields and surface them in the agent settings editor
+- [x] `role-foundations/charter-model` Extend NamedAgentConfig with role charter fields (persona prompt, allowed skills, output contract) and migrate existing configs
+- [x] `role-foundations/charter-crud` Add IPC CRUD for charter fields and surface them in the agent settings editor
 
 ### Phase 2 — Charter injection into sessions
 
-- [ ] `role-foundations/prompt-injection` Inject the role charter into spawned harness sessions across the interactive, run-queue, and multi-agent paths
-- [ ] `role-foundations/injection-tests` Assert per-path charter injection with fixtures that capture the child process arguments
+- [x] `role-foundations/prompt-injection` Inject the role charter into spawned harness sessions across the interactive, run-queue, and multi-agent paths
+- [x] `role-foundations/injection-tests` Assert per-path charter injection with fixtures that capture the child process arguments
 
 ### Phase 3 — Role-scoped autonomy
 
-- [ ] `role-foundations/role-policy` Extend PermissionPolicy with per-role rules above the destructive floor
+- [x] `role-foundations/role-policy` Extend PermissionPolicy with per-role rules above the destructive floor
 
 ### Phase 4 — Per-phase agent assignment
 
