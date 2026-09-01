@@ -4,6 +4,7 @@ import type {
   AgentConfig,
   NamedAgentConfig,
   NamedAgentConfigInput,
+  RoleCharter,
   MultiAgentRun,
   MultiAgentEvent,
   MultiAgentControlAction,
@@ -655,6 +656,18 @@ export async function updateAgentConfig(
 /** Delete one profile by UUID. The backend rejects deleting the final profile. */
 export async function deleteAgentConfig(id: string): Promise<void> {
   return agentRosterClient.delete(id);
+}
+
+/**
+ * Replace one profile's advisory role charter (persona prompt, allowed
+ * skills, output contract). Missing/empty fields clear the corresponding
+ * charter entry; connection settings are untouched.
+ */
+export async function updateAgentCharter(
+  id: string,
+  charter: RoleCharter,
+): Promise<NamedAgentConfig> {
+  return agentRosterClient.updateCharter(id, charter);
 }
 
 /** Get the default profile's stable ID, or null when no profile exists. */

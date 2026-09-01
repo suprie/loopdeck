@@ -5,7 +5,7 @@
 //! directory snapshot + "reveal in Finder").
 
 use super::state::AppState;
-use crate::config::{AgentConfig, GlobalConfig, NamedAgentConfig};
+use crate::config::{AgentConfig, GlobalConfig, NamedAgentConfig, RoleCharter};
 use crate::error::AppError;
 use crate::logging;
 use crate::secrets;
@@ -135,6 +135,27 @@ pub async fn update_agent_config(
             previous_secret.as_ref(),
             error,
         ));
+    }
+    response_agent(updated)
+}
+
+/// Replace a named entry's role charter (persona prompt, allowed skills,
+/// output contract). Advisory data only: nothing downstream parses or
+/// enforces it in this phase. Missing/empty fields clear; connection
+/// settings and the UUID are untouched. No secrets are involved, so the
+/// rollback after a failed save is purely in-memory.
+#[tauri::command]
+pub async fn update_agent_charter(
+    id: String,
+    charter: RoleCharter,
+    state: State<'_, AppState>,
+) -> Result<NamedAgentConfig, AppError> {
+    let mut config = state.config.lock().map_err(|_| AppError::LockError)?;
+    let before = config.clone();
+    let updated = config.update_agent_charter(&id, charter.normalized())?;
+    if let Err(error) = config.save() {
+        *config = before;
+        return Err(error);
     }
     response_agent(updated)
 }

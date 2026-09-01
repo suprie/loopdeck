@@ -5,16 +5,22 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 ## Current
 
 - **Started**: 2026-09-01
-- **Goal**: `reliable-delivery-bookkeeping` / `prd-verified-delivery-reconciliation` Phases 4-5 — complete. Four queued loops finished (run was 429-killed pre-work on 2026-08-31; work executed 2026-09-1 from the pinned pre-flight answers): (1) `clean-handoff` — new `src-tauri/src/handoff.rs` (`HandoffRecord` → `.loopdeck/handoff.yaml`, persisted best-effort at PR creation); lazy next-worktree (created only at next run start, `ensure_worktree` cuts from `git::default_branch`, never the stray HEAD); `finalize_worktree` retains the delivered worktree for review. (2) `retry-recovery` — new `src-tauri/src/delivery_retry.rs`: `DeliveryStage` (nothing_mutated/committed/pushed) detected live from Git, `DeliveryRetryRecord` → `.loopdeck/delivery-retry.yaml` written at the executor failure site (rubric retained), `run_retry` idempotent (requeue / push → adopt-or-create draft PR → bookkeeping → clear); no auto-retry. UI: `retry_delivery` command + `DeliveryReportTab` RetryCard (reason + next safe action) + HandoffBanner. (3) `delivery-integration-tests` — stub-`gh`-on-PATH + local bare remotes in temp dirs; covers success (adopt existing PR / create PR / push-then-complete), failing rubric gates, cross-branch fix not read as pushed, push + PR-creation failures keep a recoverable record, legacy-worktree classification incl. real-git test. (4) `prd-acceptance-audit` — all 6 P0 goals PASS with `file:line` evidence, non-goals audit clean; all Phase 4/5 PRD items checked. Also fixed two 429 artifacts in `delivery_retry.rs` (dangling `mod tests` opener, missing `#[cfg(test)]`). Gates: `cargo test` 640 passed, clippy clean, `tsc --noEmit` clean, frontend tests 0 fail.
+- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phase 1 — complete. Two queued loops in one unattended session: (1) `charter-model` — new `RoleCharter` (`config.rs`: optional `persona_prompt`, `allowed_skills`, `output_contract`) `#[serde(flatten)]`ed onto `NamedAgentConfig` beside the flattened `AgentConfig`; old `config.yaml` without charter keys loads unchanged (empty charter = plain connection profile); `update_agent_config` preserves the charter on connection edits; `normalized()` trims prose/skills and collapses all-empty back to default so cleared fields vanish from YAML. (2) `charter-crud` — new IPC `update_agent_charter` (registered in `lib.rs`, in-memory rollback, no secrets) + `GlobalConfig::update_agent_charter` (replace-all, UUID/name checked); frontend: `RoleCharter` type, roster-client `updateCharter`, `updateAgentCharter` wrapper, "Role charter (optional)" section in `AgentConfigEditor` (persona + output-contract textareas, comma-separated skills), `AgentRoster.save` issues the charter call after create (skipped when empty) / update (replace-all clears). Tests: 3 Rust charter tests (legacy YAML load, roundtrip+normalize, replace/clear/preserve-on-connection-edit), +1 frontend contract test (charter replace + preserved across connection update + omit-clears). Gates: `cargo test` 643 passed, clippy clean, `tsc --noEmit` clean, frontend tests 23/23.
 - **Status**: completed
 
 ## Next Steps
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/101
 - [ ] Review & merge the draft PR for this run (see final chat message for URL)
 - [ ] Review & merge the night-run Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
+- **Status**: completed
+- **Completed**: 2026-09-01
+- **Summary**: handoff.rs + delivery_retry.rs + stub-gh integration tests + acceptance audit; all 6 P0 goals PASS. Detail: decisions.md 2026-08-31 / 2026-09-01 entries.
 
 ### 2026-08-31 — prd-verified-delivery-reconciliation Phases 1-3
 - **Status**: completed

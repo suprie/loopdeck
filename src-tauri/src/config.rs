@@ -65,6 +65,53 @@ impl std::fmt::Debug for AgentConfig {
     }
 }
 
+/// Advisory role charter carried on a roster entry (prd-role-foundations
+/// Phase 1). All fields are optional prose/lists — nothing parses or enforces
+/// them yet; an entry without a charter remains a plain connection profile.
+/// Flattened into `NamedAgentConfig` so the YAML/IPC shape stays flat
+/// (`persona_prompt`, `allowed_skills`, `output_contract` beside `model`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoleCharter {
+    /// Who this agent is: persona injected ahead of task prompts (Phase 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_prompt: Option<String>,
+    /// Skill names this role is expected to use. Suggestive, not binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_skills: Option<Vec<String>>,
+    /// What the role must produce, as advisory prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<String>,
+}
+
+impl RoleCharter {
+    /// Normalize editor input: trim prose, drop empty strings, drop empty
+    /// skill names, and collapse an all-empty charter back to default so a
+    /// cleared field disappears from `config.yaml` instead of persisting as
+    /// `""` / `[]`.
+    pub fn normalized(self) -> Self {
+        let prose = |value: Option<String>| {
+            value
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+        };
+        let allowed_skills = self.allowed_skills.map(|skills| {
+            skills
+                .into_iter()
+                .map(|skill| skill.trim().to_owned())
+                .filter(|skill| !skill.is_empty())
+                .collect::<Vec<_>>()
+        });
+        Self {
+            persona_prompt: prose(self.persona_prompt),
+            output_contract: prose(self.output_contract),
+            allowed_skills: match allowed_skills {
+                Some(skills) if skills.is_empty() => None,
+                other => other,
+            },
+        }
+    }
+}
+
 /// A reusable agent definition in the global roster.
 ///
 /// The identifier is a UUID generated once at creation time and is the stable
@@ -72,12 +119,16 @@ impl std::fmt::Debug for AgentConfig {
 /// user-facing label and may change, but is unique case-insensitively within a
 /// registry. `config` is flattened so the IPC/YAML shape remains pleasantly
 /// small (`id`, `name`, `harness`, `model`, …) and never contains a token.
+/// `charter` flattens the same way, so an old `config.yaml` without charter
+/// keys loads unchanged (charter defaults to empty).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NamedAgentConfig {
     pub id: String,
     pub name: String,
     #[serde(flatten)]
     pub config: AgentConfig,
+    #[serde(flatten)]
+    pub charter: RoleCharter,
 }
 
 // The singleton-to-roster migration must survive a crash between writing the
@@ -92,6 +143,7 @@ impl std::fmt::Debug for NamedAgentConfig {
             .field("id", &self.id)
             .field("name", &self.name)
             .field("config", &self.config)
+            .field("charter", &self.charter)
             .finish()
     }
 }
@@ -102,6 +154,7 @@ impl NamedAgentConfig {
             id: Uuid::new_v4().to_string(),
             name: normalize_agent_name(&name)?,
             config: scrub_agent_config(config),
+            charter: RoleCharter::default(),
         })
     }
 
@@ -367,6 +420,23 @@ impl GlobalConfig {
             .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?;
         agent.name = normalize_agent_name(&name)?;
         agent.config = scrub_agent_config(config);
+        Ok(agent.clone())
+    }
+
+    /// Replace a roster entry's role charter wholesale (None clears a field;
+    /// an all-empty charter removes the role identity). Connection settings
+    /// and the UUID are untouched.
+    pub fn update_agent_charter(
+        &mut self,
+        id: &str,
+        charter: RoleCharter,
+    ) -> Result<NamedAgentConfig, AppError> {
+        Uuid::parse_str(id)
+            .map_err(|_| AppError::Config(format!("agent config id '{id}' is not a valid UUID")))?;
+        let agent = self
+            .find_agent_config_mut(id)
+            .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?;
+        agent.charter = charter;
         Ok(agent.clone())
     }
 
@@ -1263,6 +1333,111 @@ agent:
         config.set_default_agent_config(&second.id).unwrap();
         config.delete_agent_config(&second.id).unwrap();
         assert_eq!(config.default_agent_id.as_deref(), Some(first.id.as_str()));
+    }
+
+    // ── Role charter tests (prd-role-foundations Phase 1) ──
+
+    #[test]
+    fn legacy_roster_without_charter_keys_loads_with_empty_charter() {
+        // A config.yaml written before charters existed must load unchanged:
+        // the missing keys default to an empty charter (plain connection
+        // profile, ADR-3) instead of erroring.
+        let yaml = "\
+default_agent_id: 00000000-0000-4000-8000-000000000001
+agents:
+  - id: 00000000-0000-4000-8000-000000000001
+    name: Default
+    harness: claude
+    model: claude-opus
+";
+        let parsed: GlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        let agent = &parsed.agents[0];
+        assert_eq!(agent.charter, RoleCharter::default());
+        assert_eq!(agent.config.model.as_deref(), Some("claude-opus"));
+    }
+
+    #[test]
+    fn charter_round_trips_through_yaml_and_normalizes_input() {
+        let mut config = GlobalConfig::default();
+        let created = config
+            .create_agent_config("QA".into(), AgentConfig::default())
+            .unwrap();
+        let charter = RoleCharter {
+            persona_prompt: Some("  You are the QA agent. ".into()),
+            allowed_skills: Some(vec![" loopdeck-prd-verifier ".into(), "".into()]),
+            output_contract: Some("".into()),
+        }
+        .normalized();
+        assert_eq!(
+            charter.persona_prompt.as_deref(),
+            Some("You are the QA agent.")
+        );
+        assert_eq!(
+            charter.allowed_skills,
+            Some(vec!["loopdeck-prd-verifier".to_string()])
+        );
+        assert_eq!(charter.output_contract, None);
+
+        config
+            .update_agent_charter(&created.id, charter.clone())
+            .unwrap();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("persona_prompt: You are the QA agent."));
+        assert!(yaml.contains("allowed_skills:"));
+        assert!(!yaml.contains("output_contract:"));
+
+        let parsed: GlobalConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            parsed.find_agent_config(&created.id).unwrap().charter,
+            charter
+        );
+    }
+
+    #[test]
+    fn update_agent_charter_replaces_clears_and_survives_connection_edits() {
+        let mut config = GlobalConfig::default();
+        let created = config
+            .create_agent_config("Dev".into(), AgentConfig::default())
+            .unwrap();
+        let charter = RoleCharter {
+            persona_prompt: Some("You are the dev agent.".into()),
+            allowed_skills: Some(vec!["loopdeck-loop-runner".into()]),
+            output_contract: Some("Ship a green build.".into()),
+        };
+        config
+            .update_agent_charter(&created.id, charter.clone())
+            .unwrap();
+
+        // Connection-only edits must not wipe the charter.
+        config
+            .update_agent_config(
+                &created.id,
+                "Dev — fast".into(),
+                AgentConfig {
+                    model: Some("claude-sonnet".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            config.find_agent_config(&created.id).unwrap().charter,
+            charter
+        );
+
+        // An all-empty normalized charter clears the role identity.
+        config
+            .update_agent_charter(&created.id, RoleCharter::default().normalized())
+            .unwrap();
+        assert_eq!(
+            config.find_agent_config(&created.id).unwrap().charter,
+            RoleCharter::default()
+        );
+
+        // Unknown and malformed ids are rejected like the other roster mutations.
+        assert!(config
+            .update_agent_charter("00000000-0000-4000-8000-00000000dead", charter.clone())
+            .is_err());
+        assert!(config.update_agent_charter("not-a-uuid", charter).is_err());
     }
 
     // ── RunState / UncommittedStats tests ──
