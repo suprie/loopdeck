@@ -59,6 +59,11 @@ pub struct CodexSession {
     next_request_id: u64,
     initialized: bool,
     policy: PermissionPolicy,
+    /// Rendered role charter, pending injection. Codex's app-server protocol
+    /// has no system-prompt override, so the charter is prepended to the
+    /// *first* task prompt sent on this session (role identity first, task
+    /// second) and consumed — later turns already share the thread's context.
+    charter_prompt: Option<String>,
 }
 
 impl CodexSession {
@@ -136,6 +141,11 @@ impl CodexSession {
             next_request_id: 1,
             initialized: false,
             policy,
+            charter_prompt: config
+                .charter
+                .as_ref()
+                .filter(|charter| !charter.is_empty())
+                .map(crate::config::RoleCharter::render),
         })
     }
 
@@ -289,9 +299,16 @@ impl CodexSession {
             .clone()
             .ok_or_else(|| AppError::Agent("Codex thread was not initialized".into()))?;
         let request_id = self.next_id();
+        // Charter injection: a pending charter (set at spawn) is prepended to
+        // this first task prompt — role identity first, task second. Consumed
+        // on take, so subsequent turns on the same thread don't repeat it.
+        let text = match self.charter_prompt.take() {
+            Some(charter) => format!("{charter}\n\n{text}"),
+            None => text.to_string(),
+        };
         let params = turn_start_params(
             &thread_id,
-            text,
+            &text,
             attachments,
             &self.cwd,
             self.model.as_deref(),
@@ -1339,7 +1356,9 @@ fn approval_tool_context(
 /// Return an immediate policy decision, or `None` when the user must decide.
 ///
 /// The destructive floor is evaluated before autonomous mode so autonomy can
-/// never bypass Selasar's hard-deny rules.
+/// never bypass Selasar's hard-deny rules. A role rule that explicitly covers
+/// the request grants the same immediate allow (`decide` has already run the
+/// floor by this point).
 fn automatic_permission_decision(
     policy: &PermissionPolicy,
     tool_name: &str,
@@ -1347,7 +1366,9 @@ fn automatic_permission_decision(
 ) -> Option<Decision> {
     match policy.decide(tool_name, input) {
         denied @ Decision::Deny(_) => Some(denied),
-        Decision::Allow if policy.is_autonomous() => Some(Decision::Allow),
+        Decision::Allow if policy.is_autonomous() || policy.role_allows(tool_name, input) => {
+            Some(Decision::Allow)
+        }
         Decision::Allow => None,
     }
 }

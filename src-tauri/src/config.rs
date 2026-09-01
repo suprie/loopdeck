@@ -19,6 +19,108 @@ fn is_default_harness(harness: &AgentHarness) -> bool {
     *harness == AgentHarness::Claude
 }
 
+/// Per-role permission rules layered above the destructive floor
+/// (`prd-role-foundations` Phase 3).
+///
+/// Rules only ever *grant* autonomy — they let a chartered role skip the
+/// manual-approval card for tool calls they explicitly cover. They can never
+/// weaken the destructive floor, and they never *deny* anything the base
+/// policy would allow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoleRules {
+    /// Tool names the role may run without confirmation (e.g. `Edit`,
+    /// `mcp__github__get_issue`). Case-sensitive: harnesses emit tool names
+    /// in their own canonical casing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// Bash command allow-patterns. A pattern matches either the exact
+    /// command or, when it ends in `*`, the prefix up to a word boundary —
+    /// `cargo test*` matches `cargo test` and `cargo test --all` but not
+    /// `cargo testday`. Compound commands (`a && b`, pipes) only match when
+    /// *every* stage matches some pattern, so a covered prefix can not smuggle
+    /// an uncovered second command past the card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bash_allow: Vec<String>,
+}
+
+/// Role charter (`prd-role-foundations`): the identity a roster entry carries
+/// beyond its connection settings — persona, allowed skills, and output
+/// contract — injected into every session spawned for that agent so the same
+/// connection profile behaves as a staffed role.
+///
+/// Entirely optional (ADR-3): an entry without a charter stays a plain
+/// connection profile and nothing is injected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoleCharter {
+    /// Persona / system-prompt prose. Starts with the role's identity
+    /// ("You are the QA agent…").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Skill names the role works with (referenced by name; the app does not
+    /// push skill files at runtime — see the PRD non-goals).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_skills: Vec<String>,
+    /// Output contract prose (how the role must shape its final answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<String>,
+    /// Optional per-role permission rules above the destructive floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<RoleRules>,
+}
+
+impl RoleCharter {
+    /// Whether the charter carries no injectable content. Empty charters are
+    /// skipped at spawn time — a blank charter must not add noise to the
+    /// instruction space.
+    pub fn is_empty(&self) -> bool {
+        self.persona
+            .as_deref()
+            .is_none_or(|p| p.trim().is_empty())
+            && self.allowed_skills.is_empty()
+            && self.output_contract
+                .as_deref()
+                .is_none_or(|c| c.trim().is_empty())
+    }
+
+    /// Render the charter as one prompt block. Shared by both harness
+    /// adapters on the `HarnessAdapter` spawn path — Claude appends the
+    /// rendered block via `--append-system-prompt`, Codex prepends it to the
+    /// first task prompt — so the charter reads identically regardless of the
+    /// harness a role is configured against.
+    pub fn render(&self) -> String {
+        let mut block = String::from("# Role charter\n");
+        if let Some(persona) = self
+            .persona
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            block.push_str("\n## Persona\n\n");
+            block.push_str(persona);
+            block.push('\n');
+        }
+        if !self.allowed_skills.is_empty() {
+            block.push_str("\n## Allowed skills\n\n");
+            for skill in &self.allowed_skills {
+                block.push_str("- ");
+                block.push_str(skill.trim());
+                block.push('\n');
+            }
+        }
+        if let Some(contract) = self
+            .output_contract
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            block.push_str("\n## Output contract\n\n");
+            block.push_str(contract);
+            block.push('\n');
+        }
+        block
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "is_default_harness")]
@@ -43,6 +145,13 @@ pub struct AgentConfig {
     /// recomputed from the secrets file.
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_auth_token: bool,
+    /// Optional role charter (persona, allowed skills, output contract).
+    /// Serialized inside each roster entry (`NamedAgentConfig` flattens this
+    /// struct), so charters live on the roster. Optional with serde defaults:
+    /// existing configs deserialize unchanged and an entry without a charter
+    /// behaves exactly as before (ADR-3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charter: Option<RoleCharter>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -61,6 +170,7 @@ impl std::fmt::Debug for AgentConfig {
             )
             .field("effort", &self.effort)
             .field("has_auth_token", &self.has_auth_token)
+            .field("charter", &self.charter)
             .finish()
     }
 }
@@ -715,6 +825,83 @@ pub fn update_project_status(project: &mut ProjectEntry) {
 
 #[cfg(test)]
 mod tests {
+    use super::{RoleCharter, RoleRules};
+
+    // ── Role charter model (prd-role-foundations) ──────────────────────
+
+    fn qa_charter() -> RoleCharter {
+        RoleCharter {
+            persona: Some("You are the QA agent.".into()),
+            allowed_skills: vec!["loopdeck-prd-verifier".into()],
+            output_contract: Some("End with a Verdict line.".into()),
+            rules: Some(RoleRules {
+                tools: vec!["Edit".into()],
+                bash_allow: vec!["cargo test*".into()],
+            }),
+        }
+    }
+
+    #[test]
+    fn charter_renders_as_one_block_persona_first() {
+        let rendered = qa_charter().render();
+        let persona = rendered.find("## Persona").expect("persona section");
+        let skills = rendered.find("## Allowed skills").expect("skills section");
+        let contract = rendered
+            .find("## Output contract")
+            .expect("contract section");
+        assert!(rendered.starts_with("# Role charter"));
+        assert!(persona < skills && skills < contract);
+        assert!(rendered.contains("- loopdeck-prd-verifier"));
+    }
+
+    #[test]
+    fn blank_charter_is_empty_and_renders_only_the_header() {
+        let charter = RoleCharter {
+            persona: Some("   ".into()),
+            allowed_skills: vec![],
+            output_contract: Some(String::new()),
+            rules: None,
+        };
+        assert!(charter.is_empty());
+        assert_eq!(charter.render(), "# Role charter\n");
+    }
+
+    #[test]
+    fn charterless_agent_config_round_trips_yaml_unchanged() {
+        // Migration (ADR-3): a config written before charters exist must
+        // deserialize byte-for-byte into the new model with no charter.
+        let yaml = "agents:\n  - id: 00000000-0000-4000-8000-000000000001\n    name: Default\n    model: m1\n";
+        let parsed: GlobalConfig = serde_yaml::from_str(yaml).expect("legacy config parses");
+        let agent = parsed.agents.first().expect("one agent");
+        assert!(agent.config.charter.is_none());
+        // And saving it back does not grow a charter key.
+        let resaved = serde_yaml::to_string(&parsed).expect("resave");
+        assert!(!reserialized_charter_key(&resaved));
+    }
+
+    fn reserialized_charter_key(yaml: &str) -> bool {
+        yaml.contains("charter")
+    }
+
+    #[test]
+    fn charter_survives_roster_round_trip() {
+        let agent = super::NamedAgentConfig::new("QA".into(), super::AgentConfig {
+            charter: Some(qa_charter()),
+            ..Default::default()
+        })
+        .expect("valid agent");
+        let mut config = GlobalConfig::default();
+        config.agents.push(agent);
+        let yaml = serde_yaml::to_string(&config).expect("serialize");
+        assert!(yaml.contains("charter"), "charter must persist:\n{yaml}");
+        let parsed: GlobalConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(
+            parsed.agents[0].config.charter,
+            Some(qa_charter()),
+            "charter must round-trip losslessly (including rules)"
+        );
+    }
+
     use super::*;
     use chrono::Duration;
 
@@ -1091,6 +1278,7 @@ projects:
             model: Some("claude-sonnet-4-5".into()),
             effort: None,
             has_auth_token: false,
+            charter: None,
         };
         let config = GlobalConfig {
             agent: Some(agent),
@@ -1114,6 +1302,7 @@ projects:
             model: Some("claude-sonnet-4-5".into()),
             effort: None,
             has_auth_token: true,
+            charter: None,
         };
         let json = serde_json::to_string(&agent).unwrap();
         assert!(json.contains("has_auth_token"));
@@ -1155,6 +1344,7 @@ agent:
                 model: Some("claude-sonnet-4-5".into()),
                 effort: None,
                 has_auth_token: false,
+                charter: None,
             }),
             ..Default::default()
         };
@@ -1177,6 +1367,7 @@ agent:
                 model: None,
                 effort: None,
                 has_auth_token: false,
+                charter: None,
             }),
             ..Default::default()
         };
@@ -1202,6 +1393,7 @@ agent:
                     model: Some("claude-opus".into()),
                     auth_token: Some("must-not-persist".into()),
                     has_auth_token: true,
+                    charter: None,
                     ..Default::default()
                 },
             )
@@ -1434,6 +1626,7 @@ created_at: "2025-01-01T00:00:00Z"
             auth_token: None,
             effort: None,
             has_auth_token: false,
+            charter: None,
         });
         config.save_to_path(&primary).unwrap();
 

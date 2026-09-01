@@ -2,6 +2,21 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 
+## 2026-09-01 — Role charter rides AgentConfig through one spawn choke point
+- **Status**: accepted
+- **Context**: prd-role-foundations Phase 2 needed charter injection on interactive, run-queue, and multi-agent paths without per-path plumbing.
+- **Consequences**: Charter lives on `AgentConfig` (serde-flattened into `NamedAgentConfig`); `HarnessSession::spawn` is the single choke point applying both injection and role rules; empty charter injects nothing (ADR-3 back-compat).
+
+## 2026-09-01 — Claude gets a flag, Codex gets a prepended first prompt
+- **Status**: accepted
+- **Context**: Claude CLI has `--append-system-prompt`; Codex app-server has no system-prompt hook.
+- **Consequences**: `RoleCharter::render` is the one shared block (persona, skills, contract); Claude passes it as a flag, Codex prepends it to the first turn's task prompt via `charter_prompt.take()` (never repeated on later turns).
+
+## 2026-09-01 — Role rules grant autonomy only; the destructive floor always wins
+- **Status**: accepted
+- **Context**: prd-role-foundations Phase 3 scoped per-role permission rules "above the destructive floor".
+- **Consequences**: `PermissionPolicy::with_role_rules` carries optional `RoleRules` (tool names, bash allow-patterns exact or `prefix *` word-boundary, pipelines only when every stage matches); `decide()` unchanged — floor first; callers consult `role_allows` only after a floor-clearing Allow.
+
 ## 2026-08-30 — Night-run status supports, rather than replaces, the agent conversation
 - **Status**: accepted
 - **Context**: The night-run Agent tab replaced the chat transcript with phases and budgets, and answering a structured parked question requeued it without restarting execution.

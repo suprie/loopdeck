@@ -156,6 +156,9 @@ pub(crate) fn git() -> Result<&'static Path, AppError> {
 /// Cached resolution of the `claude` binary — see [`git`] for caching semantics.
 pub(crate) fn claude() -> Result<&'static Path, AppError> {
     static CLAUDE: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = env_override("LOOPDECK_CLAUDE_BIN") {
+        return Ok(path.leak());
+    }
     loop {
         if let Some(p) = CLAUDE.get() {
             return Ok(p.as_path());
@@ -168,6 +171,9 @@ pub(crate) fn claude() -> Result<&'static Path, AppError> {
 /// Cached resolution of the `codex` binary — see [`git`] for caching semantics.
 pub(crate) fn codex() -> Result<&'static Path, AppError> {
     static CODEX: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = env_override("LOOPDECK_CODEX_BIN") {
+        return Ok(path.leak());
+    }
     loop {
         if let Some(p) = CODEX.get() {
             return Ok(p.as_path());
@@ -175,6 +181,23 @@ pub(crate) fn codex() -> Result<&'static Path, AppError> {
         let resolved = resolve_command("codex")?;
         let _ = CODEX.set(resolved);
     }
+}
+
+/// Absolute-path binary override from the environment (`LOOPDECK_CLAUDE_BIN`
+/// / `LOOPDECK_CODEX_BIN`). Exists so tests can point the real spawn code at
+/// fixture binaries that capture their own argv. Only an absolute, existing,
+/// executable file qualifies — anything else falls back to the vetted PATH
+/// search. Checked before the cache so the override is re-read per spawn.
+fn env_override(var: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(var)?;
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return None;
+    }
+    vet(&path)
 }
 
 #[cfg(test)]
