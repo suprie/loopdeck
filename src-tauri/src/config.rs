@@ -49,17 +49,20 @@ pub struct RoleRules {
 /// connection profile behaves as a staffed role.
 ///
 /// Entirely optional (ADR-3): an entry without a charter stays a plain
-/// connection profile and nothing is injected.
+/// connection profile and nothing is injected. Flattened into
+/// `NamedAgentConfig` so the YAML/IPC shape stays flat (`persona_prompt`,
+/// `allowed_skills`, `output_contract` beside `model`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoleCharter {
     /// Persona / system-prompt prose. Starts with the role's identity
     /// ("You are the QA agent…").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
+    pub persona_prompt: Option<String>,
     /// Skill names the role works with (referenced by name; the app does not
-    /// push skill files at runtime — see the PRD non-goals).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_skills: Vec<String>,
+    /// push skill files at runtime — see the PRD non-goals). Suggestive, not
+    /// binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_skills: Option<Vec<String>>,
     /// Output contract prose (how the role must shape its final answer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_contract: Option<String>,
@@ -71,10 +74,13 @@ pub struct RoleCharter {
 impl RoleCharter {
     /// Whether the charter carries no injectable content. Empty charters are
     /// skipped at spawn time — a blank charter must not add noise to the
-    /// instruction space.
+    /// instruction space. `rules` is not injectable content — a rules-only
+    /// charter renders nothing but still governs the permission policy.
     pub fn is_empty(&self) -> bool {
-        self.persona.as_deref().is_none_or(|p| p.trim().is_empty())
-            && self.allowed_skills.is_empty()
+        self.persona_prompt
+            .as_deref()
+            .is_none_or(|p| p.trim().is_empty())
+            && self.allowed_skills.as_ref().is_none_or(Vec::is_empty)
             && self
                 .output_contract
                 .as_deref()
@@ -89,7 +95,7 @@ impl RoleCharter {
     pub fn render(&self) -> String {
         let mut block = String::from("# Role charter\n");
         if let Some(persona) = self
-            .persona
+            .persona_prompt
             .as_deref()
             .map(str::trim)
             .filter(|p| !p.is_empty())
@@ -98,9 +104,13 @@ impl RoleCharter {
             block.push_str(persona);
             block.push('\n');
         }
-        if !self.allowed_skills.is_empty() {
+        if let Some(skills) = self
+            .allowed_skills
+            .as_ref()
+            .filter(|skills| !skills.is_empty())
+        {
             block.push_str("\n## Allowed skills\n\n");
-            for skill in &self.allowed_skills {
+            for skill in skills {
                 block.push_str("- ");
                 block.push_str(skill.trim());
                 block.push('\n');
@@ -117,6 +127,35 @@ impl RoleCharter {
             block.push('\n');
         }
         block
+    }
+
+    /// Normalize editor input: trim prose, drop empty strings, drop empty
+    /// skill names, and collapse an all-empty charter back to default so a
+    /// cleared field disappears from `config.yaml` instead of persisting as
+    /// `""` / `[]`. `rules` passes through untouched — it is edited through
+    /// its own surface, not the charter prose editor.
+    pub fn normalized(self) -> Self {
+        let prose = |value: Option<String>| {
+            value
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+        };
+        let allowed_skills = self.allowed_skills.map(|skills| {
+            skills
+                .into_iter()
+                .map(|skill| skill.trim().to_owned())
+                .filter(|skill| !skill.is_empty())
+                .collect::<Vec<_>>()
+        });
+        Self {
+            persona_prompt: prose(self.persona_prompt),
+            output_contract: prose(self.output_contract),
+            allowed_skills: match allowed_skills {
+                Some(skills) if skills.is_empty() => None,
+                other => other,
+            },
+            rules: self.rules,
+        }
     }
 }
 
@@ -144,12 +183,15 @@ pub struct AgentConfig {
     /// recomputed from the secrets file.
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_auth_token: bool,
-    /// Optional role charter (persona, allowed skills, output contract).
-    /// Serialized inside each roster entry (`NamedAgentConfig` flattens this
-    /// struct), so charters live on the roster. Optional with serde defaults:
-    /// existing configs deserialize unchanged and an entry without a charter
-    /// behaves exactly as before (ADR-3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Role charter for the spawn paths. The persisted home of the charter is
+    /// `NamedAgentConfig` (flattened there — Phase 1's YAML/IPC shape); this
+    /// field is an in-memory carrier only. Config resolution
+    /// (`resolve_agent_config*`) copies the roster entry's charter here so
+    /// every spawn path (interactive, run-queue, multi-agent), which all take
+    /// `&AgentConfig`, sees the role identity without signature changes.
+    /// `#[serde(skip)]` also makes connection-settings edits structurally
+    /// incapable of clobbering a charter (PR #101's contract).
+    #[serde(skip)]
     pub charter: Option<RoleCharter>,
 }
 
@@ -171,53 +213,6 @@ impl std::fmt::Debug for AgentConfig {
             .field("has_auth_token", &self.has_auth_token)
             .field("charter", &self.charter)
             .finish()
-    }
-}
-
-/// Advisory role charter carried on a roster entry (prd-role-foundations
-/// Phase 1). All fields are optional prose/lists — nothing parses or enforces
-/// them yet; an entry without a charter remains a plain connection profile.
-/// Flattened into `NamedAgentConfig` so the YAML/IPC shape stays flat
-/// (`persona_prompt`, `allowed_skills`, `output_contract` beside `model`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RoleCharter {
-    /// Who this agent is: persona injected ahead of task prompts (Phase 2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona_prompt: Option<String>,
-    /// Skill names this role is expected to use. Suggestive, not binding.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_skills: Option<Vec<String>>,
-    /// What the role must produce, as advisory prose.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_contract: Option<String>,
-}
-
-impl RoleCharter {
-    /// Normalize editor input: trim prose, drop empty strings, drop empty
-    /// skill names, and collapse an all-empty charter back to default so a
-    /// cleared field disappears from `config.yaml` instead of persisting as
-    /// `""` / `[]`.
-    pub fn normalized(self) -> Self {
-        let prose = |value: Option<String>| {
-            value
-                .map(|text| text.trim().to_owned())
-                .filter(|text| !text.is_empty())
-        };
-        let allowed_skills = self.allowed_skills.map(|skills| {
-            skills
-                .into_iter()
-                .map(|skill| skill.trim().to_owned())
-                .filter(|skill| !skill.is_empty())
-                .collect::<Vec<_>>()
-        });
-        Self {
-            persona_prompt: prose(self.persona_prompt),
-            output_contract: prose(self.output_contract),
-            allowed_skills: match allowed_skills {
-                Some(skills) if skills.is_empty() => None,
-                other => other,
-            },
-        }
     }
 }
 
@@ -292,6 +287,9 @@ fn normalize_agent_name(name: &str) -> Result<String, AppError> {
 fn scrub_agent_config(mut config: AgentConfig) -> AgentConfig {
     config.auth_token = None;
     config.has_auth_token = false;
+    // The charter's persisted home is `NamedAgentConfig::charter`; drop any
+    // stale in-memory carrier so the two can never diverge on creation.
+    config.charter = None;
     config
 }
 
@@ -900,8 +898,8 @@ mod tests {
 
     fn qa_charter() -> RoleCharter {
         RoleCharter {
-            persona: Some("You are the QA agent.".into()),
-            allowed_skills: vec!["loopdeck-prd-verifier".into()],
+            persona_prompt: Some("You are the QA agent.".into()),
+            allowed_skills: Some(vec!["loopdeck-prd-verifier".into()]),
             output_contract: Some("End with a Verdict line.".into()),
             rules: Some(RoleRules {
                 tools: vec!["Edit".into()],
@@ -926,8 +924,8 @@ mod tests {
     #[test]
     fn blank_charter_is_empty_and_renders_only_the_header() {
         let charter = RoleCharter {
-            persona: Some("   ".into()),
-            allowed_skills: vec![],
+            persona_prompt: Some("   ".into()),
+            allowed_skills: Some(vec![]),
             output_contract: Some(String::new()),
             rules: None,
         };
@@ -954,22 +952,31 @@ mod tests {
 
     #[test]
     fn charter_survives_roster_round_trip() {
-        let agent = super::NamedAgentConfig::new(
-            "QA".into(),
-            super::AgentConfig {
-                charter: Some(qa_charter()),
-                ..Default::default()
-            },
-        )
-        .expect("valid agent");
+        let mut agent = super::NamedAgentConfig::new("QA".into(), super::AgentConfig::default())
+            .expect("valid agent");
+        // The persisted home of the charter is the flattened
+        // `NamedAgentConfig::charter` (Phase 1's YAML shape); the
+        // `AgentConfig::charter` carrier is serde-skipped.
+        agent.charter = qa_charter();
         let mut config = GlobalConfig::default();
         config.agents.push(agent);
         let yaml = serde_yaml::to_string(&config).expect("serialize");
-        assert!(yaml.contains("charter"), "charter must persist:\n{yaml}");
+        assert!(
+            yaml.contains("persona_prompt:"),
+            "charter must persist:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("bash_allow:"),
+            "role rules must persist:\n{yaml}"
+        );
+        assert!(
+            !reserialized_charter_key(&yaml),
+            "charter must stay flat, not nest under a `charter:` key:\n{yaml}"
+        );
         let parsed: GlobalConfig = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(
-            parsed.agents[0].config.charter,
-            Some(qa_charter()),
+            parsed.agents[0].charter,
+            qa_charter(),
             "charter must round-trip losslessly (including rules)"
         );
     }
@@ -1560,6 +1567,7 @@ agents:
             persona_prompt: Some("  You are the QA agent. ".into()),
             allowed_skills: Some(vec![" loopdeck-prd-verifier ".into(), "".into()]),
             output_contract: Some("".into()),
+            rules: None,
         }
         .normalized();
         assert_eq!(
@@ -1597,6 +1605,7 @@ agents:
             persona_prompt: Some("You are the dev agent.".into()),
             allowed_skills: Some(vec!["loopdeck-loop-runner".into()]),
             output_contract: Some("Ship a green build.".into()),
+            rules: None,
         };
         config
             .update_agent_charter(&created.id, charter.clone())

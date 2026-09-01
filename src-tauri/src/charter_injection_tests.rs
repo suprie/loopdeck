@@ -39,8 +39,10 @@ use std::time::Duration;
 /// capture file can never match by accident.
 fn qa_charter() -> RoleCharter {
     RoleCharter {
-        persona: Some("You are the QA-role agent. You verify work; you do not build.".into()),
-        allowed_skills: vec!["loopdeck-prd-verifier".into()],
+        persona_prompt: Some(
+            "You are the QA-role agent. You verify work; you do not build.".into(),
+        ),
+        allowed_skills: Some(vec!["loopdeck-prd-verifier".into()]),
         output_contract: Some(
             "End every final message with a Verdict line: PASS, WARN, or BLOCK.".into(),
         ),
@@ -157,8 +159,12 @@ fn empty_state() -> AppState {
 /// An `AppState` whose default roster entry carries the QA charter — the
 /// shape `resolve_agent_config` sees on the interactive and run-queue paths.
 fn state_with_chartered_default() -> AppState {
-    let agent =
+    let mut agent =
         NamedAgentConfig::new("QA".into(), chartered_claude_config()).expect("valid named agent");
+    // The persisted home of the charter is the flattened
+    // `NamedAgentConfig::charter`; `NamedAgentConfig::new` scrubs any stale
+    // in-memory `AgentConfig::charter` carrier, so set it here.
+    agent.charter = qa_charter();
     let state = empty_state();
     {
         let mut config = state.config.lock().unwrap();
