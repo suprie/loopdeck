@@ -45,8 +45,36 @@ need that join before arbitration or specialization mean anything.
 
 ## Design
 
-To be filled from prd-handoff-spike findings — the spike's go/no-go and
-contract fixes land here before implementation begins.
+Filled from prd-handoff-spike findings (2026-09-01 run; full evidence in
+[handoff-spike-run.md](handoff-spike-run.md), contract in
+[handoff-artifact-contract.md](handoff-artifact-contract.md)):
+
+**Go/no-go: GO.** A path-only-prompted consumer session cited 17/17 artifact
+headings + items (coverage), contradicted nothing and fabricated nothing
+(fidelity), and dropped or merged nothing (completeness — no truncation).
+Ignored-input rate: 0. Single-run sample, both sessions same harness;
+operator was the run executor spawning both sessions back-to-back per the
+queue-time authorization, deviating from the spike PRD's manual-session
+wording.
+
+**Contract adopted as-is for injection sizing:** Markdown + YAML frontmatter
+at `.loopdeck/handoffs/<topic>.md`; frontmatter = the artifact record
+(author role, phase, type); caps (≤ 8 KiB body hard, ≤ 8 sections, ≤ 12
+numbered items) bound downstream injection.
+
+**Design changes the spike forces:**
+
+- The citation rule (§5 of the contract) held **without enforcement** — wire
+  it into the run report's citation check as-is, and treat the `##
+  Handoff citations` block as the parse target.
+- Producer-side **heading drift** was observed (consumer's own `type: plan`
+  artifact used free-form headings instead of the schema's). Executor-side
+  artifact emission (this PRD's Phase 1) must generate the schema headings
+  mechanically rather than trusting the agent — only prompt-driven
+  *consumer* behavior proved reliable.
+- Watch unanchored open questions: the consumer self-resolved both; benign
+  with normative anchors (R4/R3), a drift vector without. Producer rule:
+  open questions must cite their anchor item or be split out pre-handoff.
 
 - Persist the handoff ledger graph-native from day one — nodes and links
   (plain JSON), not a flat log. This is the seed of the 0.7.0 "loops graph"
