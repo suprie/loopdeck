@@ -1,5 +1,5 @@
 schema_version: 1
-revision: 28
+revision: 34
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -116,3 +116,66 @@ history:
   completed_at: 2026-08-31T08:46:38.532853Z
   attempt: 1
   reason: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
+- id: handoff-spike/charter-contract
+  title: Draft the handoff artifact contract (schema, size caps, citation rule) as a reviewable doc
+  origin:
+    epic: role-based-orchestration
+    prd: prd-handoff-spike
+    phase: 'Phase 1 — Spike: two-agent file handoff on a real plan'
+  outcome: completed
+  started_at: 2026-09-01T05:38:59.319310Z
+  completed_at: 2026-09-01T05:50:53.793617Z
+  attempt: 1
+  delivery:
+    branch: run/handoff-spike-charter-contract-plus2-a0af9eb683b7
+    commit: 3cd24d5928a5a95e32f39918b5365652981ebdef
+    pr_url: https://github.com/suprie/loopdeck/pull/100
+    pr_provider: github
+    rubric:
+      verdict: pass
+      checked_at: 2026-09-01T05:50:53.123245Z
+      criteria: []
+- id: role-foundations/charter-model
+  title: Extend NamedAgentConfig with role charter fields (persona prompt, allowed skills, output contract) and migrate existing configs
+  origin:
+    epic: role-based-orchestration
+    prd: prd-role-foundations
+    phase: Phase 1 — Role charter data model
+  outcome: completed
+  started_at: 2026-09-01T07:32:13.127231Z
+  completed_at: 2026-09-01T07:46:18.827988Z
+  attempt: 1
+  delivery:
+    branch: run/role-foundations-charter-model-plus1-c2b420b20d03
+    commit: af21935a6a923efd9d30f93c6faedd68d6ff61c1
+    pr_url: https://github.com/suprie/loopdeck/pull/101
+    pr_provider: github
+    rubric:
+      verdict: pass
+      checked_at: 2026-09-01T07:46:18.679572Z
+      criteria:
+      - criterion: '`role-foundations/charter-model` Extend NamedAgentConfig with role charter fields (persona prompt, allowed skills, output contract) and migrate existing configs'
+        status: pass
+        note: '`config.rs:74` `pub struct RoleCharter` (`persona_prompt` :77, `allowed_skills` :80, `output_contract` :83); flatten onto `NamedAgentConfig` :131; migration via optional serde defaults — `legacy_roster_without_charter_keys_loads_with_empty_charter` (`config.rs:1341`) + roundtrip test (:1360)'
+      - criterion: '`role-foundations/charter-crud` Add IPC CRUD for charter fields and surface them in the agent settings editor'
+        status: pass
+        note: '`update_agent_charter` command (`config_cmds.rs:148`, registered `lib.rs:232`); reads via existing list/get; `GlobalConfig::update_agent_charter` (`config.rs:429`); UI `types/index.ts:206` + `agentRosterClient.ts:65` + `tauri.ts:670` + `AgentConfigEditor.tsx:220` wired `AgentRoster.tsx:52,57`; contract test `agentRosterClient.test.mjs:87`'
+- id: role-foundations/prompt-injection
+  title: Inject the role charter into spawned harness sessions across the interactive, run-queue, and multi-agent paths
+  origin:
+    epic: role-based-orchestration
+    prd: prd-role-foundations
+    phase: Phase 2 — Charter injection into sessions
+  outcome: completed
+  started_at: 2026-09-01T09:23:09.688241Z
+  completed_at: 2026-09-01T09:49:12.293863Z
+  attempt: 1
+  delivery:
+    branch: run/role-foundations-prompt-injection-plus2-d5c2ac3228d4
+    commit: 5d3772bcdc0819ec51f484cbe93f9d67a24fd3d7
+    pr_url: https://github.com/suprie/loopdeck/pull/102
+    pr_provider: github
+    rubric:
+      verdict: pass
+      checked_at: 2026-09-01T09:49:11.594951Z
+      criteria: []

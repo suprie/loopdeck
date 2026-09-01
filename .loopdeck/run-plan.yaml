@@ -1,6 +1,6 @@
-id: run-49125dc8-93b0-42f8-a6c3-226058b7ae2d
+id: run-82e31b93-5022-4742-87c3-d5c2ac3228d4
 project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-08-31T08:12:11.214594Z
+created: 2026-09-01T07:57:56.662210Z
 consent:
   draft_pr_authorized: true
 budgets:
@@ -8,56 +8,43 @@ budgets:
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
-  worktree_path: /Users/supriyantop/Workspace/others/loopdeck/.loopdeck/runs/run/delivery-bookkeeping-clean-handoff-plus3-226058b7ae2d
-  worktree_branch: run/delivery-bookkeeping-clean-handoff-plus3-226058b7ae2d
+  worktree_path: /Users/supriyantop/Workspace/others/loopdeck/.loopdeck/runs/run/role-foundations-prompt-injection-plus2-d5c2ac3228d4
+  worktree_branch: run/role-foundations-prompt-injection-plus2-d5c2ac3228d4
   worktree_kept: true
-wall_clock_secs: 1870
+wall_clock_secs: 1566
 stall_policy: continue_independent
 phases:
-- execution_id: delivery-bookkeeping/clean-handoff
-  status: failed
+- execution_id: role-foundations/prompt-injection
+  status: completed
   interview:
-  - question: 'PRD Open Question #1 — create the clean next worktree/branch eagerly right after PR creation, or lazily when the next loop starts?'
-    answer: Lazy. Persist the handoff record at delivery; create the `.loopdeck/runs/<next-branch>/` worktree only when the next loop starts. Delivery leaves the user on the delivered branch.
-  - question: What is the next branch based on, and what happens to the delivered worktree (PR stays unmerged)?
-    answer: Base on main (fresh from default branch). Keep the delivered worktree under `.loopdeck/runs/` untouched — branch + PR retained for review.
-  - question: Retry semantics — auto-retry overnight, or record state + idempotent retry only?
-    answer: Idempotent retry command only. No auto-retry. See `retry-recovery` below.
+  - question: Which injection mechanism, given Codex (app-server, stdio) has no `--append-system-prompt` equivalent?
+    answer: Flag + prepend — Claude sessions get `--append-system-prompt`; Codex sessions get the charter prepended to the task prompt. One shared charter-rendering helper on the `HarnessAdapter` path keeps it harness-neutral.
+  - question: What gets injected and how does it compose with `build_next_loop_prompt` boilerplate?
+    answer: Full charter (persona + allowed skills + output contract) rendered as one block, placed ahead of the loop-prompt boilerplate — role identity first, task second.
   interview_status: answered
   depends_on: []
-  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
-  token_usage: 0
-  wall_clock_secs: 467
-- execution_id: delivery-bookkeeping/retry-recovery
-  status: failed
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/102'
+  token_usage: 95183
+  wall_clock_secs: 520
+- execution_id: role-foundations/injection-tests
+  status: completed
   interview:
-  - question: Should retry-recovery auto-retry push/PR-creation failures overnight (transient errors), or only record recoverable state and expose an idempotent manual retry (PRD P0 says UI "offers the idempotent next action")?
-    answer: 'Idempotent retry command only. On failure, persist the recoverable delivery record (stage: nothing mutated / committed / pushed), expose one idempotent retry command that resumes from the recorded stage, and surface reason + next safe action in the UI. No automatic retries.'
+  - question: How should the per-path fixtures verify injection?
+    answer: Fake child binaries — fake `claude`/`codex` executables on PATH that write their argv (and charter-bearing flags/prompt) to a file; integration-test all three paths (interactive, run-queue, multi-agent) against the real spawn code.
   interview_status: answered
   depends_on:
-  - delivery-bookkeeping/clean-handoff
-  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
-  token_usage: 0
-  wall_clock_secs: 467
-- execution_id: delivery-bookkeeping/delivery-integration-tests
-  status: failed
+  - role-foundations/prompt-injection
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/102'
+  token_usage: 95183
+  wall_clock_secs: 520
+- execution_id: role-foundations/role-policy
+  status: completed
   interview:
-  - question: Push/PR-failure coverage can't rely on network or `gh` auth overnight — how is PR-creation failure simulated?
-    answer: Stub `gh` (PATH/env override) that exits non-zero or emits no PR URL, plus real git against local bare remotes in temp dirs. Deterministic, no network, no credentials.
+  - question: Where do per-role rules live and what can they match?
+    answer: Charter field, tool+cmd — new optional rules field on `RoleCharter` (allowed tool names / bash command allow-patterns). `PermissionPolicy::decide` accepts the role's rules and grants autonomy (skips confirmation) above the destructive floor; the floor always wins.
   interview_status: answered
   depends_on:
-  - delivery-bookkeeping/retry-recovery
-  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
-  token_usage: 0
-  wall_clock_secs: 467
-- execution_id: delivery-bookkeeping/prd-acceptance-audit
-  status: failed
-  interview:
-  - question: (none)
-    answer: (none) — loop is verification-only per its description; audit reports P0 evidence and documents gaps without fixing them.
-  interview_status: answered
-  depends_on:
-  - delivery-bookkeeping/delivery-integration-tests
-  park_payload: 'Agent error: API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-08-31 20:44:57][202608311646387a9b0fa2dadb4b7e]'
-  token_usage: 0
-  wall_clock_secs: 467
+  - role-foundations/injection-tests
+  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/102'
+  token_usage: 95183
+  wall_clock_secs: 520

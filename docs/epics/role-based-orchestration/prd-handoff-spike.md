@@ -2,7 +2,7 @@
 prd: prd-handoff-spike
 epic: role-based-orchestration
 milestone: "0.6.0"
-status: proposed
+status: completed
 description: >
   Spike the epic's riskiest unknown before any orchestration scaffolding is
   built: validate that a file artifact written by one role-prompted session
