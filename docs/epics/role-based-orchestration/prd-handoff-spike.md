@@ -53,9 +53,9 @@ used; success is judged against the contract's citation rule.
 
 ### Phase 1 — Spike: two-agent file handoff on a real plan
 
-- [ ] `handoff-spike/charter-contract` Draft the handoff artifact contract (schema, size caps, citation rule) as a reviewable doc
-- [ ] `handoff-spike/two-agent-run` Run A-writes/B-consumes back-to-back sessions on a real queued plan using prompt text only
-- [ ] `handoff-spike/findings` Record spike findings (drift, truncation, ignored input) and a go/no-go call into prd-agent-handoff's Design section
+- [x] `handoff-spike/charter-contract` Draft the handoff artifact contract (schema, size caps, citation rule) as a reviewable doc
+- [x] `handoff-spike/two-agent-run` Run A-writes/B-consumes back-to-back sessions on a real queued plan using prompt text only
+- [x] `handoff-spike/findings` Record spike findings (drift, truncation, ignored input) and a go/no-go call into prd-agent-handoff's Design section
 
 ## Open Questions
 
