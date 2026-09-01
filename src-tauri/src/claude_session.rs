@@ -301,6 +301,20 @@ impl ClaudeSession {
         // dead code. See docs/PRD-trust-boundary-hardening.md FR1.
         cmd.args(["--permission-mode", "default"]);
 
+        // Role charter (`prd-role-foundations`): a chartered roster entry has
+        // its charter (persona + allowed skills + output contract) appended to
+        // the CLI's system prompt, so the role identity rides above every user
+        // turn without occupying the task-prompt space. An empty or missing
+        // charter injects nothing — plain connection profile (ADR-3).
+        if let Some(rendered) = agent_config
+            .charter
+            .as_ref()
+            .filter(|charter| !charter.is_empty())
+            .map(crate::config::RoleCharter::render)
+        {
+            cmd.args(["--append-system-prompt", &rendered]);
+        }
+
         if let Some(model) = agent_config.model.clone() {
             cmd.args(["--model", &model]);
         }
@@ -424,9 +438,15 @@ impl ClaudeSession {
         let input_str = request.input.to_string();
         let policy_decision = self.policy.decide(&request.tool_name, &request.input);
 
-        // Autonomous mode skips only floor-clearing manual approvals.
+        // Autonomous mode — or a role rule that explicitly covers this
+        // floor-clearing request — skips only floor-clearing manual approvals.
+        // `policy_decision` already ran the destructive floor, so role-scoped
+        // autonomy can never reach past it.
+        let role_auto_allow = policy_decision == Decision::Allow
+            && self.policy.role_allows(&request.tool_name, &request.input);
         if policy_decision == Decision::Allow
             && !self.policy.is_autonomous()
+            && !role_auto_allow
             && crate::permission::requires_manual_approval(&request.tool_name)
         {
             return self
@@ -442,7 +462,8 @@ impl ClaudeSession {
         }
 
         let decision = policy_decision;
-        let autonomous_auto_allow = self.policy.is_autonomous() && decision == Decision::Allow;
+        let autonomous_auto_allow =
+            (self.policy.is_autonomous() || role_auto_allow) && decision == Decision::Allow;
         tracing::info!(
             tool = %request.tool_name,
             input = %input_str,

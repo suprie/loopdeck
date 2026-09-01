@@ -1603,7 +1603,9 @@ async fn send_and_record_streaming(
 /// lock, a concurrent producer could in principle race — but the only producers
 /// are Start/Send, and the frontend disables both while a turn is in flight, so
 /// the race window is closed in practice for this single-user app.
-async fn spawn_fresh(
+// `pub(crate)` so the charter-injection integration tests can drive the
+// run-queue's exact resolve-default-agent → fresh-spawn sequence.
+pub(crate) async fn spawn_fresh(
     state: &AppState,
     path: &Path,
     policy_root: &Path,

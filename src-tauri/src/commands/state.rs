@@ -203,14 +203,19 @@ pub(crate) fn resolve_agent_config_by_id(
     state: &AppState,
     id: &str,
 ) -> Result<AgentConfig, AppError> {
-    let mut agent_config = state
+    let named = state
         .config
         .lock()
         .map_err(|_| AppError::LockError)?
         .find_agent_config(id)
         .ok_or_else(|| AppError::Config(format!("agent config '{id}' was not found")))?
-        .config
         .clone();
+    let mut agent_config = named.config;
+    // Carry the roster entry's charter to the spawn paths: every spawn takes
+    // `&AgentConfig`, so the charter rides along as the in-memory carrier
+    // field (`AgentConfig::charter`, serde-skipped — the persisted home is
+    // the flattened `NamedAgentConfig::charter`).
+    agent_config.charter = Some(named.charter);
     agent_config.auth_token = secrets::load_agent_auth_token(id)?;
     Ok(agent_config)
 }

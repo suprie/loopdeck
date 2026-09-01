@@ -95,9 +95,17 @@ pub enum PermissionMode {
 
 /// The configurable permission policy. The deny floor is always in effect;
 /// `mode` only governs requests that clear it.
-#[derive(Debug, Clone, Copy)]
+///
+/// `role_rules` carries a chartered role's per-role rules
+/// (`prd-role-foundations` Phase 3). They grant *scoped autonomy above the
+/// destructive floor*: a floor-clearing request the role's rules explicitly
+/// cover skips the manual-approval card even under `ConfirmChanges`. The
+/// floor always wins — it runs in `decide()` before these rules are ever
+/// consulted — and the rules can never deny anything the base policy allows.
+#[derive(Debug, Clone)]
 pub struct PermissionPolicy {
     mode: PermissionMode,
+    role_rules: Option<crate::config::RoleRules>,
 }
 
 impl PermissionPolicy {
@@ -107,13 +115,47 @@ impl PermissionPolicy {
     pub fn confirm_changes() -> Self {
         Self {
             mode: PermissionMode::ConfirmChanges,
+            role_rules: None,
         }
     }
 
     /// Constructor for tests / a future config surface.
     #[allow(dead_code)]
     pub fn with_mode(mode: PermissionMode) -> Self {
-        Self { mode }
+        Self {
+            mode,
+            role_rules: None,
+        }
+    }
+
+    /// Attach a role's permission rules. Called once at session spawn
+    /// (`HarnessSession::spawn`) from the spawning agent's charter, so every
+    /// path (interactive, run-queue, multi-agent) gets the same scoped
+    /// autonomy.
+    pub fn with_role_rules(mut self, rules: Option<crate::config::RoleRules>) -> Self {
+        self.role_rules = rules;
+        self
+    }
+
+    /// Whether the role's rules grant autonomy for this specific request —
+    /// i.e. the manual-approval card is skipped even though the policy mode
+    /// is not `Autonomous`. Only meaningful for requests that already cleared
+    /// the destructive floor (callers consult this after `decide`), so the
+    /// floor can never be bypassed from here.
+    pub fn role_allows(&self, tool_name: &str, input: &Value) -> bool {
+        let Some(rules) = self.role_rules.as_ref() else {
+            return false;
+        };
+        if rules.tools.iter().any(|tool| tool == tool_name) {
+            return true;
+        }
+        if tool_name == "Bash" {
+            let Some(command) = input.get("command").and_then(Value::as_str) else {
+                return false;
+            };
+            return bash_rules_cover(rules, command);
+        }
+        false
     }
 
     /// Whether this policy is autonomous (skip the manual-approval card).
@@ -145,6 +187,44 @@ impl PermissionPolicy {
                 "no matching allow rule and Selasar is deny-by-default",
             )),
         }
+    }
+}
+
+// ── Role-scoped bash allow-patterns ────────────────────────────────────────
+
+/// Whether every stage of `command` is covered by the role's bash patterns.
+/// Compound commands (`a && b`, pipes, `;`) require *each* stage to match —
+/// a covered prefix must not smuggle an uncovered second command past the
+/// approval card. Unparseable or empty commands are treated as uncovered.
+fn bash_rules_cover(rules: &crate::config::RoleRules, command: &str) -> bool {
+    let stages: Vec<String> = split_stages(command)
+        .into_iter()
+        .map(|stage| stage.trim().to_string())
+        .filter(|stage| !stage.is_empty())
+        .collect();
+    if stages.is_empty() {
+        return false;
+    }
+    stages.iter().all(|stage| {
+        rules
+            .bash_allow
+            .iter()
+            .any(|pattern| bash_allow_matches(pattern, stage))
+    })
+}
+
+/// Match one allow-pattern against one pipeline stage. A pattern matches the
+/// stage exactly, or — when it ends in `*` — the pattern prefix up to a word
+/// boundary (`cargo test*` matches `cargo test` and `cargo test --all`, not
+/// `cargo testday`).
+fn bash_allow_matches(pattern: &str, stage: &str) -> bool {
+    let pattern = pattern.trim();
+    let stage = stage.trim();
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        let prefix = prefix.trim_end();
+        stage == prefix || stage.starts_with(&format!("{prefix} "))
+    } else {
+        stage == pattern
     }
 }
 
@@ -612,6 +692,7 @@ fn check_destructive_floor(tool_name: &str, input: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RoleRules;
     use serde_json::json;
 
     fn bash(command: &str) -> (&'static str, Value) {
@@ -630,6 +711,96 @@ mod tests {
         assert_eq!(deny.behavior(), "deny");
         assert_eq!(deny.reason(), "nope");
         assert!(deny.is_deny());
+    }
+
+    // ── role-scoped autonomy (prd-role-foundations Phase 3) ────────────
+
+    fn rules(tools: &[&str], bash_allow: &[&str]) -> RoleRules {
+        RoleRules {
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+            bash_allow: bash_allow.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn policy_without_rules_grants_no_role_autonomy() {
+        let policy = PermissionPolicy::confirm_changes();
+        assert!(!policy.role_allows("Edit", &json!({})));
+        assert!(!policy.role_allows("Bash", &json!({ "command": "cargo test" })));
+    }
+
+    #[test]
+    fn role_tool_rules_grant_scoped_autonomy() {
+        let policy =
+            PermissionPolicy::confirm_changes().with_role_rules(Some(rules(&["Edit"], &[])));
+        assert!(policy.role_allows("Edit", &json!({ "file_path": "/a.rs" })));
+        // Case-sensitive, and other tools stay ungated.
+        assert!(!policy.role_allows("edit", &json!({})));
+        assert!(!policy.role_allows("Write", &json!({})));
+        assert!(!policy.role_allows("Bash", &json!({ "command": "cargo test" })));
+    }
+
+    #[test]
+    fn role_bash_patterns_match_exact_and_prefix() {
+        let policy = PermissionPolicy::confirm_changes()
+            .with_role_rules(Some(rules(&[], &["git status", "cargo test*"])));
+        assert!(policy.role_allows("Bash", &json!({ "command": "git status" })));
+        assert!(policy.role_allows("Bash", &json!({ "command": "cargo test" })));
+        assert!(policy.role_allows("Bash", &json!({ "command": "cargo test --all" })));
+        // Word boundary: the prefix must end at an argument boundary.
+        assert!(!policy.role_allows("Bash", &json!({ "command": "cargo testday" })));
+        assert!(!policy.role_allows("Bash", &json!({ "command": "cargo build" })));
+        // Bash rules never apply to other tools.
+        assert!(!policy.role_allows("Edit", &json!({})));
+    }
+
+    #[test]
+    fn role_bash_rules_cover_pipelines_only_when_every_stage_matches() {
+        let single =
+            PermissionPolicy::confirm_changes().with_role_rules(Some(rules(&[], &["cargo test*"])));
+        assert!(
+            !single.role_allows("Bash", &json!({ "command": "cargo test && npm run build" })),
+            "an uncovered second stage must not ride a covered prefix"
+        );
+        let both = PermissionPolicy::confirm_changes()
+            .with_role_rules(Some(rules(&[], &["cargo test*", "npm run build"])));
+        assert!(both.role_allows("Bash", &json!({ "command": "cargo test && npm run build" })));
+        assert!(!both.role_allows("Bash", &json!({ "command": "cargo test; rm x" })));
+        assert!(
+            !both.role_allows("Bash", &json!({})),
+            "no command → uncovered"
+        );
+    }
+
+    #[test]
+    fn floor_wins_over_role_rules() {
+        // A role whose bash pattern nominally covers everything destructive —
+        // the floor still denies, and callers consult role_allows only after
+        // decide() has already run the floor.
+        let policy = PermissionPolicy::confirm_changes()
+            .with_role_rules(Some(rules(&[], &["rm *", "git push*"])));
+        for cmd in ["rm -rf /", "rm -rf target/", "git push --force origin main"] {
+            let (tool, input) = bash(cmd);
+            assert!(
+                matches!(policy.decide(tool, &input), Decision::Deny(_)),
+                "{cmd} must stay floor-denied despite matching a role pattern"
+            );
+        }
+        // Sanity: the pattern itself does match — it is the floor, not the
+        // matcher, that denies.
+        assert!(policy.role_allows("Bash", &json!({ "command": "rm file.txt" })));
+    }
+
+    #[test]
+    fn role_rules_never_deny_what_the_base_policy_allows() {
+        // Rules with an empty Bash input and unrelated tools change nothing.
+        let policy = PermissionPolicy::confirm_changes()
+            .with_role_rules(Some(rules(&["Edit"], &["cargo *"])));
+        assert_eq!(
+            policy.decide("Bash", &json!({ "command": "npm install" })),
+            Decision::Allow
+        );
+        assert_eq!(policy.decide("Edit", &json!({})), Decision::Allow);
     }
 
     // ── requires_manual_approval ───────────────────────────────────────

@@ -5,11 +5,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 ## Current
 
 - **Started**: 2026-09-01
-- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phase 1 — complete. Two queued loops in one unattended session: (1) `charter-model` — new `RoleCharter` (`config.rs`: optional `persona_prompt`, `allowed_skills`, `output_contract`) `#[serde(flatten)]`ed onto `NamedAgentConfig` beside the flattened `AgentConfig`; old `config.yaml` without charter keys loads unchanged (empty charter = plain connection profile); `update_agent_config` preserves the charter on connection edits; `normalized()` trims prose/skills and collapses all-empty back to default so cleared fields vanish from YAML. (2) `charter-crud` — new IPC `update_agent_charter` (registered in `lib.rs`, in-memory rollback, no secrets) + `GlobalConfig::update_agent_charter` (replace-all, UUID/name checked); frontend: `RoleCharter` type, roster-client `updateCharter`, `updateAgentCharter` wrapper, "Role charter (optional)" section in `AgentConfigEditor` (persona + output-contract textareas, comma-separated skills), `AgentRoster.save` issues the charter call after create (skipped when empty) / update (replace-all clears). Tests: 3 Rust charter tests (legacy YAML load, roundtrip+normalize, replace/clear/preserve-on-connection-edit), +1 frontend contract test (charter replace + preserved across connection update + omit-clears). Gates: `cargo test` 643 passed, clippy clean, `tsc --noEmit` clean, frontend tests 23/23.
+- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phases 2-3 — three loops done in one unattended run: charter injection across spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
 - **Status**: completed
 
 ## Next Steps
-- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/101
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/102
 - [ ] Review & merge the draft PR for this run (see final chat message for URL)
 - [ ] Review & merge the night-run Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
