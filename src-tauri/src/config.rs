@@ -1368,21 +1368,29 @@ agents:
             output_contract: Some("".into()),
         }
         .normalized();
-        assert_eq!(charter.persona_prompt.as_deref(), Some("You are the QA agent."));
+        assert_eq!(
+            charter.persona_prompt.as_deref(),
+            Some("You are the QA agent.")
+        );
         assert_eq!(
             charter.allowed_skills,
             Some(vec!["loopdeck-prd-verifier".to_string()])
         );
         assert_eq!(charter.output_contract, None);
 
-        config.update_agent_charter(&created.id, charter.clone()).unwrap();
+        config
+            .update_agent_charter(&created.id, charter.clone())
+            .unwrap();
         let yaml = serde_yaml::to_string(&config).unwrap();
         assert!(yaml.contains("persona_prompt: You are the QA agent."));
         assert!(yaml.contains("allowed_skills:"));
         assert!(!yaml.contains("output_contract:"));
 
         let parsed: GlobalConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.find_agent_config(&created.id).unwrap().charter, charter);
+        assert_eq!(
+            parsed.find_agent_config(&created.id).unwrap().charter,
+            charter
+        );
     }
 
     #[test]
@@ -1396,7 +1404,9 @@ agents:
             allowed_skills: Some(vec!["loopdeck-loop-runner".into()]),
             output_contract: Some("Ship a green build.".into()),
         };
-        config.update_agent_charter(&created.id, charter.clone()).unwrap();
+        config
+            .update_agent_charter(&created.id, charter.clone())
+            .unwrap();
 
         // Connection-only edits must not wipe the charter.
         config
@@ -1409,7 +1419,10 @@ agents:
                 },
             )
             .unwrap();
-        assert_eq!(config.find_agent_config(&created.id).unwrap().charter, charter);
+        assert_eq!(
+            config.find_agent_config(&created.id).unwrap().charter,
+            charter
+        );
 
         // An all-empty normalized charter clears the role identity.
         config
