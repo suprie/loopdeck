@@ -199,11 +199,23 @@ export interface AgentConfig {
 }
 
 /**
+ * Advisory role charter on a roster entry (prd-role-foundations Phase 1).
+ * Mirrors Rust `RoleCharter`, flattened into the entry's IPC/YAML shape:
+ * plain optional prose/lists, nothing parses or enforces them yet.
+ */
+export interface RoleCharter {
+  persona_prompt?: string;
+  allowed_skills?: string[];
+  output_contract?: string;
+}
+
+/**
  * A reusable, globally-stored agent profile. `id` is stable and is the only
  * value persisted in a loop assignment; names can be safely edited later.
- * Mirrors Rust `NamedAgentConfig`.
+ * Mirrors Rust `NamedAgentConfig` (charter fields flattened alongside the
+ * connection fields).
  */
-export interface NamedAgentConfig extends AgentConfig {
+export interface NamedAgentConfig extends AgentConfig, RoleCharter {
   id: string;
   name: string;
   /** The profile selected by default for a new loop assignment. */

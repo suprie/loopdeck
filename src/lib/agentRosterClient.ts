@@ -1,4 +1,4 @@
-import type { NamedAgentConfig, NamedAgentConfigInput } from "../types";
+import type { NamedAgentConfig, NamedAgentConfigInput, RoleCharter } from "../types";
 
 type BackendNamedAgentConfig = Omit<NamedAgentConfig, "is_default">;
 
@@ -59,6 +59,15 @@ export function createAgentRosterClient(invoke: AgentRosterInvoke) {
 
     delete(id: string): Promise<void> {
       return invoke<void>("delete_agent_config", { id });
+    },
+
+    /** Replace a profile's advisory role charter; empty fields clear. */
+    async updateCharter(id: string, charter: RoleCharter): Promise<NamedAgentConfig> {
+      const profile = await invoke<BackendNamedAgentConfig>("update_agent_charter", {
+        id,
+        charter,
+      });
+      return enrichDefault(profile);
     },
 
     async getDefault(): Promise<NamedAgentConfig | null> {

@@ -17,6 +17,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## History
 
+### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
+- **Status**: completed
+- **Completed**: 2026-09-01
+- **Summary**: handoff.rs + delivery_retry.rs + stub-gh integration tests + acceptance audit; all 6 P0 goals PASS. Detail: decisions.md 2026-08-31 / 2026-09-01 entries.
+
 ### 2026-08-31 — prd-verified-delivery-reconciliation Phases 1-3
 - **Status**: completed
 - **Completed**: 2026-08-31
