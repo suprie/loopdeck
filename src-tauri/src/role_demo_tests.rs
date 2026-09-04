@@ -309,6 +309,4 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
     std::fs::write(repo.join(".loopdeck/role-demo-report.md"), &summary)
         .expect("write demo report");
     println!("\n{summary}\n\nfixture repo: {}", repo.display());
-
-    // The Drop guard restores the registry snapshot (temp entries removed).
 }
