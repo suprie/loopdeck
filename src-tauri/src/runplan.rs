@@ -134,6 +134,12 @@ pub struct RunPhase {
     /// the picker UI (Phase 5) edits edges explicitly.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Roster id of the agent this phase is assigned to (`prd-role-foundations`
+    /// Phase 4). `None` = the default agent config. Validated against the
+    /// roster at `create_run_plan` time; the executor parks the phase if the
+    /// entry was removed by the time the run executes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_agent: Option<String>,
     /// The reason shown in the morning report when a phase doesn't complete.
     /// Set when `status == Parked` (Phase 4 fills this with the actual
     /// question/permission-card payload) **or** `status == Failed` (Phase 2's
@@ -231,6 +237,9 @@ pub struct PhaseReportEntry {
     pub execution_id: String,
     pub status: RunPhaseStatus,
     pub verdict: PhaseVerdict,
+    /// Roster id of the agent the phase was assigned to (`prd-role-foundations`
+    /// Phase 4 per-role attribution); `None` = the default agent.
+    pub assigned_agent: Option<String>,
     /// Extracted from `park_payload` for Completed phases that shipped a draft PR.
     pub draft_pr_url: Option<String>,
     /// The park/kill/fail reason, verbatim from `park_payload`.
@@ -271,6 +280,7 @@ impl RunReport {
                     execution_id: p.execution_id.clone(),
                     status: p.status,
                     verdict,
+                    assigned_agent: p.assigned_agent.clone(),
                     draft_pr_url,
                     reason: p.park_payload.clone(),
                     token_usage: p.token_usage,
@@ -355,6 +365,7 @@ mod tests {
                 }],
                 interview_status: InterviewStatus::Answered,
                 depends_on: vec![],
+                assigned_agent: None,
                 park_payload: None,
                 token_usage: 0,
                 wall_clock_secs: 0,

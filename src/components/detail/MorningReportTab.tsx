@@ -44,6 +44,7 @@ export function MorningReportTab({
 }) {
   const [report, setReport] = useState<RunReport | null>(null);
   const [idToTitle, setIdToTitle] = useState<Record<string, string>>({});
+  const [idToAgentName, setIdToAgentName] = useState<Record<string, string>>({});
   const markMorningReportSeen = useAppStore((s) => s.markMorningReportSeen);
 
   // Opening the report clears the rail door's "morning report ready" badge
@@ -75,6 +76,16 @@ export function MorningReportTab({
         if (!disposed) setIdToTitle(buildIdToTitle(epics));
       })
       .catch((err) => console.warn("getEpics failed", err));
+    // Roster names for the per-role attribution chips (prd-role-foundations
+    // Phase 4) — the report carries roster ids, the table shows names.
+    api
+      .listAgentConfigs()
+      .then((agents) => {
+        if (!disposed) {
+          setIdToAgentName(Object.fromEntries(agents.map((a) => [a.id, a.name])));
+        }
+      })
+      .catch((err) => console.warn("listAgentConfigs failed", err));
     return () => {
       disposed = true;
     };
@@ -147,6 +158,16 @@ export function MorningReportTab({
                     title={phase.execution_id}
                   >
                     {idToTitle[phase.execution_id] ?? phase.execution_id}
+                    {/* Per-role attribution (prd-role-foundations Phase 4):
+                        which roster agent ran this phase. */}
+                    {phase.assigned_agent && (
+                      <span
+                        className="ml-1.5 rounded bg-accent px-1 py-0.5 text-[9px] text-muted-foreground"
+                        title={phase.assigned_agent}
+                      >
+                        {idToAgentName[phase.assigned_agent] ?? phase.assigned_agent}
+                      </span>
+                    )}
                   </td>
                   <td className="px-1.5 py-1.5">
                     <span

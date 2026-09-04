@@ -77,9 +77,9 @@ Stub — points to resolve while implementing:
 
 ### Phase 4 — Per-phase agent assignment
 
-- [ ] `role-foundations/phase-assignment-model` Add assigned-agent fields to RunPhase and the create_run_plan selection surface
-- [ ] `role-foundations/phase-assignment-exec` Make the run-queue executor spawn each phase with its assigned agent instead of the default config
-- [ ] `role-foundations/role-demo` Run an end-to-end two-phase plan where a dev-role agent builds and a QA-role agent verifies, with per-role attribution in the run report
+- [x] `role-foundations/phase-assignment-model` Add assigned-agent fields to RunPhase and the create_run_plan selection surface
+- [x] `role-foundations/phase-assignment-exec` Make the run-queue executor spawn each phase with its assigned agent instead of the default config
+- [x] `role-foundations/role-demo` Run an end-to-end two-phase plan where a dev-role agent builds and a QA-role agent verifies, with per-role attribution in the run report
 
 ### Phase 5 — Tests/verification
 
