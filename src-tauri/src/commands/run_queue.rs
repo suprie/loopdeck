@@ -9,11 +9,10 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::{
-    mark_turn_terminal, start_fresh_and_record_streaming, start_fresh_and_record_streaming_in_root,
-    StreamingRunOptions,
+use super::agent::{mark_turn_terminal, start_fresh_and_record_streaming_in_root_with_config};
+use super::state::{
+    fire_interrupt, resolve_agent_config, resolve_agent_config_by_id, resolve_root, AppState,
 };
-use super::state::{fire_interrupt, resolve_root, AppState};
 use crate::agents::{ClaudeEvent, TokenBudget};
 use crate::delivery;
 use crate::delivery_retry;
@@ -433,6 +432,9 @@ pub async fn create_run_plan(
     stall_policy: StallPolicy,
     draft_pr_authorized: bool,
     budgets: RunBudgets,
+    // Per-phase agent staffing (`prd-role-foundations` Phase 4). Optional
+    // and sparse — phases without an entry stay on the default agent.
+    assignments: Option<Vec<runplan::PhaseAgentAssignment>>,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
@@ -459,6 +461,38 @@ pub async fn create_run_plan(
                 "no PRD checklist loop with id \"{id}\" found under docs/epics/"
             ))
         })?;
+    }
+
+    // Resolve staffing against the roster before persisting: an unknown
+    // execution_id is a picker/UI bug, an unknown agent_id is a stale roster
+    // reference — both must fail the create, never queue a phase that can
+    // never spawn. The roster's own `name` is captured here so attribution in
+    // the run report is durable (survives later renames/deletes).
+    let assignments = assignments.unwrap_or_default();
+    let mut resolved_assignments = Vec::with_capacity(assignments.len());
+    {
+        let config = state.config.lock().map_err(|_| AppError::LockError)?;
+        for assignment in &assignments {
+            if !execution_ids.contains(&assignment.execution_id) {
+                return Err(AppError::RunPlan(format!(
+                    "assignment references phase \"{}\", which is not part of this plan",
+                    assignment.execution_id
+                )));
+            }
+            let named = config
+                .find_agent_config(&assignment.agent_id)
+                .ok_or_else(|| {
+                    AppError::RunPlan(format!(
+                        "assigned agent '{}' was not found on the roster",
+                        assignment.agent_id
+                    ))
+                })?;
+            resolved_assignments.push(runplan::PhaseAgentAssignment {
+                execution_id: assignment.execution_id.clone(),
+                agent_id: assignment.agent_id.clone(),
+                agent_name: Some(named.name.clone()),
+            });
+        }
     }
 
     if let Some(existing) = runplan::load(&root)? {
@@ -489,6 +523,7 @@ pub async fn create_run_plan(
         &execution_ids,
         stall_policy,
         draft_pr_authorized,
+        &resolved_assignments,
     );
     plan.budgets = budgets;
 
@@ -1139,7 +1174,14 @@ fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
 /// Indices of every phase currently `Queued`, in plan order — the unit of
 /// work `execute_run` hands to one combined LLM turn. `None` once nothing is
 /// left to run.
-fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
+///
+/// Per-phase staffing (`prd-role-foundations` Phase 4): one combined turn can
+/// only run under one agent, so the batch is the maximal *prefix* of queued
+/// phases sharing the same `assigned_agent_id`. A staffing change splits the
+/// turn — dev builds, then QA verifies, as separate turns. All-unassigned
+/// plans (the pre-assignment shape) still batch into one turn exactly as
+/// before.
+pub(crate) fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
     let indices: Vec<usize> = plan
         .phases
         .iter()
@@ -1147,7 +1189,15 @@ fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
         .filter(|(_, phase)| phase.status == RunPhaseStatus::Queued)
         .map(|(i, _)| i)
         .collect();
-    (!indices.is_empty()).then_some(indices)
+    if indices.is_empty() {
+        return None;
+    }
+    let staffing = plan.phases[indices[0]].assigned_agent_id.clone();
+    let split = indices
+        .iter()
+        .position(|&idx| plan.phases[idx].assigned_agent_id != staffing)
+        .unwrap_or(indices.len());
+    Some(indices[..split].to_vec())
 }
 
 /// Split a combined turn's total token usage evenly across every phase in
@@ -1224,11 +1274,17 @@ pub async fn run_phase_interview(
 
     let plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
-    if !plan.phases.iter().any(|p| p.execution_id == execution_id) {
-        return Err(AppError::RunPlan(format!(
-            "phase \"{execution_id}\" is not in the run plan"
-        )));
-    }
+    let assigned_agent_id = plan
+        .phases
+        .iter()
+        .find(|p| p.execution_id == execution_id)
+        .ok_or_else(|| {
+            AppError::RunPlan(format!("phase \"{execution_id}\" is not in the run plan"))
+        })?
+        // The interview runs with the phase's staffed agent (Phase 4), so
+        // pinned answers come from the role that will act on them.
+        .assigned_agent_id
+        .clone();
 
     let loc = epic::find_loop_by_id(&root, &execution_id).ok_or_else(|| {
         AppError::RunPlan(format!(
@@ -1241,9 +1297,23 @@ pub async fn run_phase_interview(
     // only the channel's *presence* matters, so a parked AskUserQuestion is
     // answerable instead of auto-denied (see this fn's doc comment).
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-    let response =
-        start_fresh_and_record_streaming(&state, &root, &prompt, Some(loc.title.clone()), &channel)
-            .await?;
+    let agent_config = match assigned_agent_id.as_deref() {
+        Some(agent_id) => resolve_agent_config_by_id(&state, agent_id)?,
+        None => resolve_agent_config(&state)?,
+    };
+    let response = start_fresh_and_record_streaming_in_root_with_config(
+        &state,
+        &root,
+        &root,
+        &prompt,
+        Some(loc.title.clone()),
+        &channel,
+        None,
+        Some(&agent_config),
+        None,
+        false,
+    )
+    .await?;
     let answers = extract_interview_answers(&response.result);
 
     // Reload rather than reuse the plan loaded before the (possibly long)
@@ -1324,12 +1394,29 @@ pub async fn run_batch_phase_interviews(
 
     let prompt = build_batch_interview_prompt(&phases);
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-    let response = start_fresh_and_record_streaming(
+    // One shared turn, so one agent: the lead phase's staffing (Phase 4).
+    // Mixed-assignment batches keep the first phase's role; the per-phase
+    // interviews remain available for role-specific questioning.
+    let lead_agent_id = plan
+        .phases
+        .iter()
+        .find(|phase| phase.execution_id == ids[0])
+        .and_then(|phase| phase.assigned_agent_id.clone());
+    let agent_config = match lead_agent_id.as_deref() {
+        Some(agent_id) => resolve_agent_config_by_id(&state, agent_id)?,
+        None => resolve_agent_config(&state)?,
+    };
+    let response = start_fresh_and_record_streaming_in_root_with_config(
         &state,
+        &root,
         &root,
         &prompt,
         Some(format!("Pre-flight interview ({} phases)", phases.len())),
         &channel,
+        None,
+        Some(&agent_config),
+        None,
+        false,
     )
     .await?;
     let answers_by_phase = extract_batch_interview_answers(&response.result);
@@ -1522,6 +1609,41 @@ async fn execute_run(
             }
         }
 
+        // Per-phase staffing (`prd-role-foundations` Phase 4): resolve the
+        // batch's shared roster entry — `next_queued_batch` guarantees every
+        // phase in the batch carries the same `assigned_agent_id`. A missing
+        // roster entry is a config error the user can repair, so the batch
+        // parks (recoverable via requeue) rather than failing the run;
+        // dependents park per the stall policy, independent phases continue.
+        let assigned_agent_id = plan.phases[batch[0]].assigned_agent_id.clone();
+        let agent_config = match assigned_agent_id.as_deref() {
+            Some(agent_id) => match resolve_agent_config_by_id(state, agent_id) {
+                Ok(config) => config,
+                Err(error) => {
+                    let reason =
+                        format!("assigned agent \"{agent_id}\" is not on the roster: {error}");
+                    let batch_ids = batch
+                        .iter()
+                        .map(|&idx| plan.phases[idx].execution_id.clone())
+                        .collect::<Vec<_>>();
+                    park_batch(&mut plan, &batch, &reason);
+                    plan.environment.worktree_kept = true;
+                    for id in &batch_ids {
+                        park_blocked_dependents(&mut plan, id);
+                    }
+                    runplan::save(root, &plan)?;
+                    notify_run_terminal(
+                        app,
+                        root,
+                        "Selasar run parked",
+                        &format!("Phase parked: {reason}"),
+                    );
+                    continue;
+                }
+            },
+            None => resolve_agent_config(state)?,
+        };
+
         // Mark running in both the plan and execution.yaml before spawning
         // the turn, so a crash mid-turn leaves truthful on-disk state
         // (reconciled to Interrupted/back-to-current by the next read) rather
@@ -1602,17 +1724,20 @@ async fn execute_run(
         } else {
             format!("{} queued loops", locs.len())
         };
-        let turn = start_fresh_and_record_streaming_in_root(
+        let turn = start_fresh_and_record_streaming_in_root_with_config(
             state,
             &worktree,
             root,
             &prompt,
             Some(turn_title),
             &channel,
-            StreamingRunOptions {
-                token_budget: Some(&token_budget),
-                force_autonomous: true,
-            },
+            Some(&token_budget),
+            // The batch's staffing resolved above — the assigned roster
+            // entry's connection settings *and* charter, or the default
+            // agent config when the phase is unassigned.
+            Some(&agent_config),
+            None,
+            true,
         );
         let outcome = match race_with_watchdog(watchdog_timeout, turn).await {
             WatchdogOutcome::Completed(result) => result,
@@ -2018,6 +2143,7 @@ mod unattended_tests {
             &["phase-1".into()],
             StallPolicy::ContinueIndependent,
             false,
+            &[],
         )
     }
 
@@ -2029,6 +2155,7 @@ mod unattended_tests {
             &["phase-a".into(), "phase-b".into(), "phase-c".into()],
             StallPolicy::ContinueIndependent,
             false,
+            &[],
         )
     }
 
@@ -2252,6 +2379,30 @@ mod unattended_tests {
         assert_eq!(next_queued_batch(&plan), None);
     }
 
+    /// Per-phase staffing (`prd-role-foundations` Phase 4): a staffing change
+    /// splits the combined turn — dev-builds / QA-verifies queue as two
+    /// batches — while consecutive same-staffing (or all-unassigned) phases
+    /// keep sharing one turn.
+    #[test]
+    fn next_queued_batch_splits_on_staffing_change() {
+        let mut plan = parked_chain();
+        plan.phases[0].assigned_agent_id = Some("dev-uuid".into());
+        plan.phases[1].assigned_agent_id = Some("dev-uuid".into());
+        plan.phases[2].assigned_agent_id = Some("qa-uuid".into());
+
+        assert_eq!(next_queued_batch(&plan), Some(vec![0, 1]));
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        plan.phases[1].status = RunPhaseStatus::Completed;
+        assert_eq!(next_queued_batch(&plan), Some(vec![2]));
+        plan.phases[2].status = RunPhaseStatus::Completed;
+        assert_eq!(next_queued_batch(&plan), None);
+
+        // Unassigned phases share the default agent's group and still batch
+        // together — the pre-assignment behaviour.
+        let plan = parked_chain();
+        assert_eq!(next_queued_batch(&plan), Some(vec![0, 1, 2]));
+    }
+
     #[test]
     fn kill_batch_and_park_batch_apply_to_every_index_in_the_batch() {
         let mut plan = parked_chain();
@@ -2323,6 +2474,7 @@ mod unattended_tests {
             execution_ids,
             StallPolicy::ContinueIndependent,
             false,
+            &[],
         )
     }
 
@@ -2493,6 +2645,7 @@ mod unattended_tests {
             park_payload: None,
             token_usage: 0,
             wall_clock_secs: 0,
+            ..Default::default()
         }
     }
 

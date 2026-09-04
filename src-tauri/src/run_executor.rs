@@ -463,23 +463,29 @@ pub(crate) fn build_run_plan(
     execution_ids: &[String],
     stall_policy: StallPolicy,
     draft_pr_authorized: bool,
+    assignments: &[runplan::PhaseAgentAssignment],
 ) -> RunPlan {
     let phases = execution_ids
         .iter()
         .enumerate()
-        .map(|(i, exec_id)| RunPhase {
-            execution_id: exec_id.clone(),
-            status: RunPhaseStatus::Queued,
-            interview: Vec::new(),
-            interview_status: InterviewStatus::Pending,
-            depends_on: if i == 0 {
-                Vec::new()
-            } else {
-                vec![execution_ids[i - 1].clone()]
-            },
-            park_payload: None,
-            token_usage: 0,
-            wall_clock_secs: 0,
+        .map(|(i, exec_id)| {
+            let assignment = assignments.iter().find(|a| a.execution_id == *exec_id);
+            RunPhase {
+                execution_id: exec_id.clone(),
+                status: RunPhaseStatus::Queued,
+                interview: Vec::new(),
+                interview_status: InterviewStatus::Pending,
+                depends_on: if i == 0 {
+                    Vec::new()
+                } else {
+                    vec![execution_ids[i - 1].clone()]
+                },
+                park_payload: None,
+                token_usage: 0,
+                wall_clock_secs: 0,
+                assigned_agent_id: assignment.map(|a| a.agent_id.clone()),
+                assigned_agent_name: assignment.and_then(|a| a.agent_name.clone()),
+            }
         })
         .collect();
 
@@ -884,6 +890,7 @@ mod tests {
                     park_payload: None,
                     token_usage: 0,
                     wall_clock_secs: 0,
+                    ..Default::default()
                 },
                 RunPhase {
                     execution_id: "p/2".into(),
@@ -894,6 +901,7 @@ mod tests {
                     park_payload: None,
                     token_usage: 0,
                     wall_clock_secs: 0,
+                    ..Default::default()
                 },
             ],
         };
@@ -932,6 +940,7 @@ mod tests {
             park_payload: None,
             token_usage: 0,
             wall_clock_secs: 0,
+            ..Default::default()
         }
     }
 
@@ -1007,6 +1016,7 @@ mod tests {
             &ids,
             StallPolicy::Halt,
             true,
+            &[],
         );
         assert_eq!(plan.phases.len(), 3);
         assert_eq!(plan.phases[0].depends_on, Vec::<String>::new());
@@ -1035,10 +1045,61 @@ mod tests {
             &ids,
             StallPolicy::ContinueIndependent,
             false,
+            &[],
         );
         assert_eq!(plan.phases.len(), 1);
         assert!(plan.phases[0].depends_on.is_empty());
         assert!(!plan.consent.draft_pr_authorized);
+    }
+
+    #[test]
+    fn build_run_plan_staffs_phases_from_assignments() {
+        use chrono::TimeZone;
+        let ids = vec!["dev-loop".to_string(), "qa-loop".to_string()];
+        let plan = build_run_plan(
+            "run-3".to_string(),
+            PathBuf::from("/repo"),
+            Utc.with_ymd_and_hms(2026, 9, 5, 9, 0, 0).unwrap(),
+            &ids,
+            StallPolicy::Halt,
+            false,
+            &[
+                runplan::PhaseAgentAssignment {
+                    execution_id: "dev-loop".into(),
+                    agent_id: "dev-uuid".into(),
+                    agent_name: Some("Dev".into()),
+                },
+                runplan::PhaseAgentAssignment {
+                    execution_id: "qa-loop".into(),
+                    agent_id: "qa-uuid".into(),
+                    agent_name: Some("QA".into()),
+                },
+            ],
+        );
+        assert_eq!(
+            plan.phases[0].assigned_agent_id.as_deref(),
+            Some("dev-uuid")
+        );
+        assert_eq!(plan.phases[0].assigned_agent_name.as_deref(), Some("Dev"));
+        assert_eq!(plan.phases[1].assigned_agent_id.as_deref(), Some("qa-uuid"));
+        assert_eq!(plan.phases[1].assigned_agent_name.as_deref(), Some("QA"));
+    }
+
+    #[test]
+    fn build_run_plan_unassigned_phases_stay_on_default_agent() {
+        use chrono::TimeZone;
+        let ids = vec!["only".to_string()];
+        let plan = build_run_plan(
+            "run-4".to_string(),
+            PathBuf::from("/repo"),
+            Utc.with_ymd_and_hms(2026, 9, 5, 9, 0, 0).unwrap(),
+            &ids,
+            StallPolicy::Halt,
+            false,
+            &[],
+        );
+        assert!(plan.phases[0].assigned_agent_id.is_none());
+        assert!(plan.phases[0].assigned_agent_name.is_none());
     }
 
     // ── Integration tests for executor state machine ───────────────────
@@ -1057,6 +1118,7 @@ mod tests {
                 park_payload: None,
                 token_usage: 0,
                 wall_clock_secs: 0,
+                ..Default::default()
             })
             .collect();
 

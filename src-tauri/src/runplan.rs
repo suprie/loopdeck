@@ -148,6 +148,33 @@ pub struct RunPhase {
     /// Wall-clock time spent in the phase turn, rounded down to seconds.
     #[serde(default)]
     pub wall_clock_secs: u64,
+    /// Roster entry this phase is staffed with (`prd-role-foundations`
+    /// Phase 4). `None` — the default for every pre-assignment plan — means
+    /// the phase runs with the default agent config, so old `run-plan.yaml`
+    /// files load and execute unchanged (ADR-3 migration stance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_agent_id: Option<String>,
+    /// Roster entry *name* captured at queue time. Durable per-role
+    /// attribution for the run report: the name survives even if the roster
+    /// entry is later renamed or deleted, when the id alone would render as
+    /// an unresolvable UUID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_agent_name: Option<String>,
+}
+
+/// Queue-time per-phase staffing choice (`prd-role-foundations` Phase 4):
+/// which roster entry runs which phase. Phases left unassigned stay on the
+/// default agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhaseAgentAssignment {
+    pub execution_id: String,
+    /// Roster entry UUID (`NamedAgentConfig::id`). Validated against the
+    /// roster by `create_run_plan` before the plan is persisted.
+    pub agent_id: String,
+    /// Resolved from the roster by `create_run_plan` (the IPC caller's copy
+    /// is ignored) so the persisted attribution is authoritative.
+    #[serde(default)]
+    pub agent_name: Option<String>,
 }
 
 /// The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`.
@@ -235,6 +262,9 @@ pub struct PhaseReportEntry {
     pub draft_pr_url: Option<String>,
     /// The park/kill/fail reason, verbatim from `park_payload`.
     pub reason: Option<String>,
+    /// Per-role attribution: the roster entry *name* captured at queue time
+    /// (`RunPhase::assigned_agent_name`). `None` = the default agent.
+    pub assigned_agent_name: Option<String>,
     pub token_usage: u64,
     pub wall_clock_secs: u64,
 }
@@ -273,6 +303,7 @@ impl RunReport {
                     verdict,
                     draft_pr_url,
                     reason: p.park_payload.clone(),
+                    assigned_agent_name: p.assigned_agent_name.clone(),
                     token_usage: p.token_usage,
                     wall_clock_secs: p.wall_clock_secs,
                 }
@@ -358,6 +389,7 @@ mod tests {
                 park_payload: None,
                 token_usage: 0,
                 wall_clock_secs: 0,
+                ..Default::default()
             }],
         }
     }

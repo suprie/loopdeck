@@ -35,6 +35,8 @@ mod state_cli;
 
 #[cfg(test)]
 mod charter_injection_tests;
+#[cfg(test)]
+mod role_assignment_tests;
 
 /// Entry point for the `loopdeck state` subcommand (Phase 3 `state-command`).
 /// Branch is taken in `main.rs` when the binary's first arg is `state`.

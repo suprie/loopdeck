@@ -612,6 +612,22 @@ export interface RunPhase {
   park_payload?: string;
   token_usage: number;
   wall_clock_secs: number;
+  /** Roster entry this phase is staffed with (`prd-role-foundations`
+   * Phase 4). Absent = the default agent (every pre-assignment plan). */
+  assigned_agent_id?: string;
+  /** Roster entry name captured at queue time — durable per-role
+   * attribution for the run report. */
+  assigned_agent_name?: string;
+}
+
+/** Queue-time per-phase staffing choice passed to `create_run_plan`
+ * (`prd-role-foundations` Phase 4). Phases left out stay on the default
+ * agent; `agent_name` is resolved server-side from the roster. Mirrors Rust
+ * `PhaseAgentAssignment`. */
+export interface PhaseAgentAssignment {
+  execution_id: string;
+  agent_id: string;
+  agent_name?: string;
 }
 
 /** The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`. */
@@ -653,6 +669,9 @@ export interface PhaseReportEntry {
   draft_pr_url?: string;
   /** Verbatim park/kill/fail reason from `park_payload`. */
   reason?: string;
+  /** Per-role attribution: the roster entry name captured at queue time.
+   * Absent = the default agent. */
+  assigned_agent_name?: string;
   token_usage: number;
   wall_clock_secs: number;
 }

@@ -131,7 +131,7 @@ fn fake_harness_bin_dir() -> &'static Path {
 
 /// A unique per-test project directory. Uniqueness is what keeps the fakes'
 /// cwd-relative capture files collision-free under the parallel test runner.
-fn fresh_project_dir(label: &str) -> PathBuf {
+pub(crate) fn fresh_project_dir(label: &str) -> PathBuf {
     fake_harness_bin_dir();
     let dir = std::env::temp_dir().join(format!(
         "loopdeck-charter-{}-{}",
@@ -142,7 +142,7 @@ fn fresh_project_dir(label: &str) -> PathBuf {
     dir
 }
 
-fn empty_state() -> AppState {
+pub(crate) fn empty_state() -> AppState {
     AppState {
         config: Mutex::new(GlobalConfig::default()),
         claude_sessions: Mutex::new(HashMap::new()),
@@ -177,7 +177,7 @@ fn state_with_chartered_default() -> AppState {
 /// Read a capture file produced by a fake child, retrying briefly: the fake
 /// writes asynchronously right after exec, so the read can legitimately lose
 /// the race with `spawn()` returning.
-fn read_capture(path: &Path) -> String {
+pub(crate) fn read_capture(path: &Path) -> String {
     for _ in 0..100 {
         if let Ok(contents) = std::fs::read_to_string(path) {
             if !contents.is_empty() {

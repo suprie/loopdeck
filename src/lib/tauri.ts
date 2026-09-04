@@ -26,6 +26,7 @@ import type {
   MigrationPreview,
   ProgressSnapshot,
   RunBudgets,
+  PhaseAgentAssignment,
   RunPlan,
   RunReport,
   RunQueueStatus,
@@ -254,7 +255,9 @@ export async function exportExecutionSummary(path: string): Promise<string> {
  * `queued` / interview `pending`. Replaces any existing plan for the project
  * outright; rejects if a run is already in progress or an ID doesn't
  * resolve to a real PRD checklist loop.
- * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets) -> Result<RunPlan, AppError>
+ * `assignments` (prd-role-foundations Phase 4) staffs phases with roster
+ * agents; unlisted phases run with the default agent.
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments) -> Result<RunPlan, AppError>
  */
 export async function createRunPlan(
   path: string,
@@ -262,6 +265,7 @@ export async function createRunPlan(
   stallPolicy: StallPolicy,
   draftPrAuthorized: boolean,
   budgets: RunBudgets,
+  assignments: PhaseAgentAssignment[] = [],
 ): Promise<RunPlan> {
   return invoke<RunPlan>("create_run_plan", {
     path,
@@ -269,6 +273,7 @@ export async function createRunPlan(
     stallPolicy,
     draftPrAuthorized,
     budgets,
+    assignments,
   });
 }
 
