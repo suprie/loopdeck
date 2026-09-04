@@ -19,10 +19,8 @@ use crate::harness::HarnessAdapter;
 use crate::permission::{Decision, PermissionPolicy};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Child as StdChild, Command as StdCommand, Stdio};
-use std::sync::mpsc;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -37,17 +35,13 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// A graceful Stop should complete quickly. If app-server itself is wedged,
 /// waiting forever would leave the project locked in "Agent is working".
 const INTERRUPT_GRACE_TIMEOUT: Duration = Duration::from_secs(15);
-/// The official Code Mode sidecar publishes its ephemeral localhost endpoint
-/// on stdout before accepting the app-server connection.
-const CODE_MODE_HOST_START_TIMEOUT: Duration = Duration::from_secs(5);
-/// Tool arguments are diagnostic data and can be large (notably Code Mode
-/// JavaScript cells). Keep logs useful without allowing a single request to
-/// consume an unbounded amount of the rolling application log.
+/// Tool arguments are diagnostic data and can be large. Keep logs useful
+/// without allowing a single request to consume an unbounded amount of the
+/// rolling application log.
 const CODEX_TOOL_LOG_MAX_CHARS: usize = 8_192;
 
 pub struct CodexSession {
     child: Option<Child>,
-    code_mode_host: Option<StdChild>,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     stderr_drain: Option<JoinHandle<()>>,
@@ -58,6 +52,8 @@ pub struct CodexSession {
     thread_id: Option<String>,
     next_request_id: u64,
     initialized: bool,
+    /// App-server-provided Plan preset, used only for interactive interviews.
+    plan_collaboration_mode: Option<Value>,
     policy: PermissionPolicy,
     /// Rendered role charter, pending injection. Codex's app-server protocol
     /// has no system-prompt override, so the charter is prepended to the
@@ -82,14 +78,9 @@ impl CodexSession {
             "spawning Codex app-server harness"
         );
 
-        let (code_mode_host, code_mode_host_url) = spawn_code_mode_host(binary)?;
         let mut command = Command::new(binary);
         command
             .arg("app-server")
-            .arg("--enable")
-            .arg("code_mode_host")
-            .arg("--code-mode-host")
-            .arg(&code_mode_host_url)
             .arg("--listen")
             .arg("stdio://")
             .current_dir(cwd)
@@ -101,11 +92,9 @@ impl CodexSession {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                let mut code_mode_host = code_mode_host;
-                terminate_code_mode_host(&mut code_mode_host);
                 return Err(AppError::Agent(format!(
                     "failed to start Codex app-server: {error}"
-                )));
+                )))
             }
         };
         let stdin = child
@@ -129,7 +118,6 @@ impl CodexSession {
 
         Ok(Self {
             child: Some(child),
-            code_mode_host: Some(code_mode_host),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
@@ -140,6 +128,7 @@ impl CodexSession {
             thread_id: None,
             next_request_id: 1,
             initialized: false,
+            plan_collaboration_mode: None,
             policy,
             charter_prompt: config
                 .charter
@@ -170,13 +159,13 @@ impl CodexSession {
             slots.permission,
             interrupt_slot,
             None,
+            false,
         )
         .await
     }
 
-    /// See `send_message` for why `slots.plan` goes unused. No `plan_mode`
-    /// parameter either — that flag is Claude-only; `HarnessSession` simply
-    /// doesn't forward it to this method.
+    /// Codex Plan collaboration mode is used for interactive interviews;
+    /// ordinary agent turns remain in the default mode.
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
@@ -184,6 +173,7 @@ impl CodexSession {
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
         token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
@@ -194,6 +184,7 @@ impl CodexSession {
             slots.permission,
             interrupt_slot,
             token_budget,
+            plan_mode,
         )
         .await
     }
@@ -213,6 +204,33 @@ impl CodexSession {
         self.write_message(json!({"method": "initialized", "params": {}}))
             .await?;
         self.wait_for_response(initialize_id).await?;
+
+        let modes_id = self.next_id();
+        self.write_message(json!({
+            "method": "collaborationMode/list",
+            "id": modes_id,
+            "params": {}
+        }))
+        .await?;
+        let modes = self.wait_for_response(modes_id).await?;
+
+        // A LoopDeck harness profile may intentionally leave its model unset.
+        // Ask Codex for its recommended default instead of requiring the
+        // profile to duplicate the app-server configuration.
+        let models_id = self.next_id();
+        self.write_message(json!({
+            "method": "model/list",
+            "id": models_id,
+            "params": { "limit": 20, "includeHidden": false }
+        }))
+        .await?;
+        let models = self.wait_for_response(models_id).await?;
+        self.plan_collaboration_mode = plan_collaboration_mode(
+            &modes,
+            &models,
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        );
 
         let thread_id = self.next_id();
         let mut params = if let Some(resume_id) = self.resume_thread_id.take() {
@@ -263,6 +281,7 @@ impl CodexSession {
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
         token_budget: Option<&TokenBudget>,
+        plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
         let result = self
             .send_turn_inner(
@@ -273,6 +292,7 @@ impl CodexSession {
                 permission_slot,
                 interrupt_slot,
                 token_budget,
+                plan_mode,
             )
             .await;
         let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
@@ -291,6 +311,7 @@ impl CodexSession {
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
         token_budget: Option<&TokenBudget>,
+        plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
         self.ensure_initialized().await?;
         let started = Instant::now();
@@ -313,6 +334,15 @@ impl CodexSession {
             &self.cwd,
             self.model.as_deref(),
             self.effort.as_deref(),
+            if plan_mode {
+                Some(self.plan_collaboration_mode.as_ref().ok_or_else(|| {
+                    AppError::Agent(
+                        "Codex did not provide a model for interactive pre-flight questions".into(),
+                    )
+                })?)
+            } else {
+                None
+            },
         );
         self.write_message(json!({
             "method": "turn/start",
@@ -911,9 +941,6 @@ impl CodexSession {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
         }
-        if let Some(mut host) = self.code_mode_host.take() {
-            terminate_code_mode_host(&mut host);
-        }
         self.initialized = false;
     }
 }
@@ -952,12 +979,6 @@ impl HarnessAdapter for CodexSession {
         plan_mode: bool,
         token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
-        if plan_mode {
-            return Err(AppError::Agent(
-                "plan mode is a Claude-only feature and is not supported by the Codex harness"
-                    .into(),
-            ));
-        }
         Self::send_message_streaming(
             self,
             text,
@@ -965,6 +986,7 @@ impl HarnessAdapter for CodexSession {
             channel,
             slots,
             interrupt_slot,
+            plan_mode,
             token_budget,
         )
         .await
@@ -980,133 +1002,7 @@ impl Drop for CodexSession {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
         }
-        if let Some(mut host) = self.code_mode_host.take() {
-            terminate_code_mode_host(&mut host);
-        }
     }
-}
-
-/// Launch Codex's bundled V8 host explicitly instead of relying on the
-/// app-server's implicit sibling-binary lookup. The host executes Code Mode
-/// cells and delegates nested `tools.*` calls to Codex's normal executor.
-fn spawn_code_mode_host(codex_binary: &Path) -> Result<(StdChild, String), AppError> {
-    let binary = code_mode_host_binary(codex_binary)?;
-    let mut child = StdCommand::new(&binary)
-        .arg("--listen")
-        .arg("ws://127.0.0.1:0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            AppError::Agent(format!("failed to start Codex Code Mode host: {error}"))
-        })?;
-    let Some(stdout) = child.stdout.take() else {
-        terminate_code_mode_host(&mut child);
-        return Err(AppError::Agent(
-            "Codex Code Mode host stdout unavailable".into(),
-        ));
-    };
-    let Some(stderr) = child.stderr.take() else {
-        terminate_code_mode_host(&mut child);
-        return Err(AppError::Agent(
-            "Codex Code Mode host stderr unavailable".into(),
-        ));
-    };
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr)
-            .lines()
-            .map_while(Result::ok)
-        {
-            tracing::debug!(target: "loopdeck::codex_code_mode", "{line}");
-        }
-    });
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let result = std::io::BufReader::new(stdout)
-            .read_line(&mut line)
-            .map(|_| line.trim().to_owned());
-        let _ = sender.send(result);
-    });
-    let endpoint = match receiver.recv_timeout(CODE_MODE_HOST_START_TIMEOUT) {
-        Ok(Ok(endpoint)) => endpoint,
-        Ok(Err(error)) => {
-            terminate_code_mode_host(&mut child);
-            return Err(AppError::Agent(format!(
-                "failed to read Codex Code Mode endpoint: {error}"
-            )));
-        }
-        Err(_) => {
-            terminate_code_mode_host(&mut child);
-            return Err(AppError::Agent(
-                "Codex Code Mode host did not publish an endpoint within 5s".into(),
-            ));
-        }
-    };
-    if !endpoint.starts_with("ws://127.0.0.1:") {
-        terminate_code_mode_host(&mut child);
-        return Err(AppError::Agent(format!(
-            "Codex Code Mode host published an unsafe endpoint: {endpoint}"
-        )));
-    }
-    Ok((child, endpoint))
-}
-
-fn terminate_code_mode_host(child: &mut StdChild) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn code_mode_host_binary(codex_binary: &Path) -> Result<PathBuf, AppError> {
-    // `binary::codex()` deliberately returns the vetted PATH entry, which can
-    // be a symlink such as `/usr/local/bin/codex`. Follow it before searching
-    // npm's package layout for the bundled sidecar.
-    let codex_binary = std::fs::canonicalize(codex_binary).map_err(|error| {
-        AppError::Agent(format!(
-            "cannot resolve Codex binary {}: {error}",
-            codex_binary.display()
-        ))
-    })?;
-    let host_name = if cfg!(windows) {
-        "codex-code-mode-host.exe"
-    } else {
-        "codex-code-mode-host"
-    };
-    let sibling = codex_binary.parent().map(|dir| dir.join(host_name));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return Ok(path);
-    }
-    // npm's public `codex` executable is a Node launcher. Its native binary
-    // and the sidecar live in its optional platform package beneath this root.
-    let Some(package_root) = codex_binary.parent().and_then(Path::parent) else {
-        return Err(AppError::Agent("cannot locate Codex package root".into()));
-    };
-    let packages = package_root.join("node_modules").join("@openai");
-    let entries = std::fs::read_dir(&packages).map_err(|error| {
-        AppError::Agent(format!(
-            "cannot locate Codex Code Mode host near {}: {error}",
-            codex_binary.display()
-        ))
-    })?;
-    for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with("codex-") {
-            continue;
-        }
-        let vendor = entry.path().join("vendor");
-        let Ok(targets) = std::fs::read_dir(vendor) else {
-            continue;
-        };
-        for target in targets.flatten() {
-            let candidate = target.path().join("bin").join(host_name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    Err(AppError::Agent(format!(
-        "Codex Code Mode host is not installed beside {}",
-        codex_binary.display()
-    )))
 }
 
 fn log_dynamic_tool_call(phase: &str, item: &Value) {
@@ -1261,9 +1157,9 @@ fn tool_from_item(item: &Value) -> Option<(String, Value)> {
 
 /// Build the app-server capability contract advertised by Selasar.
 ///
-/// Code Mode's client-hosted dynamic tools are experimental. Selasar does
-/// not provide their JavaScript runtime, so opting in can leave a turn waiting
-/// for a tool result that it cannot produce.
+/// `tool/requestUserInput` is an experimental app-server request. Selasar
+/// handles it directly (without declaring client-hosted dynamic tools), so
+/// turn on the capability that lets Codex ask users before unattended work.
 fn initialize_params() -> Value {
     json!({
         "clientInfo": {
@@ -1271,7 +1167,7 @@ fn initialize_params() -> Value {
             "title": "Selasar",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "capabilities": { "experimentalApi": false }
+        "capabilities": { "experimentalApi": true }
     })
 }
 
@@ -1288,6 +1184,7 @@ fn turn_start_params(
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
+    collaboration_mode: Option<&Value>,
 ) -> Value {
     let mut input: Vec<Value> = vec![json!({ "type": "text", "text": text })];
     input.extend(attachments.iter().map(|a| {
@@ -1311,7 +1208,85 @@ fn turn_start_params(
     if let Some(effort) = effort.filter(|value| !value.is_empty()) {
         params["effort"] = Value::String(effort.to_owned());
     }
+    if let Some(collaboration_mode) = collaboration_mode {
+        params["collaborationMode"] = collaboration_mode.clone();
+    }
     params
+}
+
+fn plan_collaboration_mode(
+    response: &Value,
+    models_response: &Value,
+    configured_model: Option<&str>,
+    configured_effort: Option<&str>,
+) -> Option<Value> {
+    let modes = response.get("data")?.as_array()?;
+    let plan = modes
+        .iter()
+        .find(|mode| mode.get("mode").and_then(Value::as_str) == Some("plan"));
+    // Some app-server versions list only the default preset even though the
+    // documented `plan` mode remains valid. In that case, reuse the selected
+    // Codex model rather than falsely reporting that Plan mode is unavailable.
+    let default = modes
+        .iter()
+        .find(|mode| mode.get("mode").and_then(Value::as_str) == Some("default"));
+    let available_model = preferred_codex_model(models_response);
+    let model = plan
+        .and_then(|mode| mode.get("model"))
+        .and_then(Value::as_str)
+        .or_else(|| configured_model.filter(|model| !model.is_empty()))
+        .or_else(|| {
+            default
+                .and_then(|mode| mode.get("model"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            available_model
+                .and_then(|model| model.get("model"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            available_model
+                .and_then(|model| model.get("id"))
+                .and_then(Value::as_str)
+        })?;
+    let effort = plan
+        .and_then(|mode| mode.get("reasoning_effort"))
+        .cloned()
+        .or_else(|| {
+            configured_effort
+                .filter(|effort| !effort.is_empty())
+                .map(|effort| Value::String(effort.to_owned()))
+        })
+        .or_else(|| {
+            default
+                .and_then(|mode| mode.get("reasoning_effort"))
+                .cloned()
+        })
+        .or_else(|| {
+            available_model
+                .and_then(|model| model.get("defaultReasoningEffort"))
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    Some(json!({
+        "mode": "plan",
+        "settings": {
+            "model": model,
+            "reasoning_effort": effort,
+            "developer_instructions": Value::Null,
+        }
+    }))
+}
+
+/// Return Codex's recommended model, falling back to the first visible model
+/// for older app-server catalogs that do not identify a default.
+fn preferred_codex_model(response: &Value) -> Option<&Value> {
+    let models = response.get("data")?.as_array()?;
+    models
+        .iter()
+        .find(|model| model.get("isDefault").and_then(Value::as_bool) == Some(true))
+        .or_else(|| models.first())
 }
 
 /// Resolve the approval card's tool and context.
@@ -1468,62 +1443,73 @@ mod tests {
     }
 
     #[test]
-    fn initialize_does_not_opt_into_unsupported_experimental_api() {
+    fn initialize_opts_into_native_user_input_requests() {
         let params = initialize_params();
 
         assert_eq!(params["clientInfo"]["name"], "loopdeck");
-        assert_eq!(params["capabilities"]["experimentalApi"], false);
+        assert_eq!(params["capabilities"]["experimentalApi"], true);
     }
 
     #[test]
-    fn finds_code_mode_host_beside_native_codex_binary() {
-        let dir =
-            std::env::temp_dir().join(format!("loopdeck-codex-host-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create test directory");
-        let codex = dir.join("codex");
-        let host = dir.join(if cfg!(windows) {
-            "codex-code-mode-host.exe"
-        } else {
-            "codex-code-mode-host"
-        });
-        std::fs::write(&codex, "codex").expect("create codex fixture");
-        std::fs::write(&host, "host").expect("create host fixture");
+    fn plan_mode_uses_the_app_server_advertised_model() {
+        let mode = plan_collaboration_mode(
+            &json!({
+                "data": [{
+                    "name": "Plan",
+                    "mode": "plan",
+                    "model": "gpt-5.3-codex",
+                    "reasoning_effort": "high"
+                }]
+            }),
+            &json!({ "data": [] }),
+            None,
+            None,
+        )
+        .expect("plan mode");
 
-        assert_eq!(
-            code_mode_host_binary(&codex).expect("find sibling host"),
-            std::fs::canonicalize(&host).expect("canonicalize sibling host")
-        );
-
-        std::fs::remove_dir_all(dir).expect("remove test directory");
+        assert_eq!(mode["mode"], "plan");
+        assert_eq!(mode["settings"]["model"], "gpt-5.3-codex");
+        assert_eq!(mode["settings"]["developer_instructions"], Value::Null);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn finds_code_mode_host_from_npm_launcher_symlink() {
-        use std::os::unix::fs::symlink;
+    fn plan_mode_falls_back_to_the_configured_model_when_not_listed() {
+        let mode = plan_collaboration_mode(
+            &json!({
+                "data": [{ "name": "Default", "mode": "default", "model": null }]
+            }),
+            &json!({ "data": [] }),
+            Some("gpt-5.3-codex"),
+            Some("medium"),
+        )
+        .expect("plan mode");
 
-        let dir = std::env::temp_dir().join(format!("loopdeck-codex-npm-{}", uuid::Uuid::new_v4()));
-        let package = dir.join("package");
-        let launcher = package.join("bin/codex.js");
-        let host = package
-            .join("node_modules/@openai/codex-fixture/vendor/native/bin/codex-code-mode-host");
-        let path_entry = dir.join("path/codex");
-        std::fs::create_dir_all(launcher.parent().expect("launcher parent"))
-            .expect("create launcher directory");
-        std::fs::create_dir_all(host.parent().expect("host parent"))
-            .expect("create host directory");
-        std::fs::create_dir_all(path_entry.parent().expect("path-entry parent"))
-            .expect("create path-entry directory");
-        std::fs::write(&launcher, "launcher").expect("create launcher fixture");
-        std::fs::write(&host, "host").expect("create host fixture");
-        symlink(&launcher, &path_entry).expect("link launcher into PATH");
+        assert_eq!(mode["mode"], "plan");
+        assert_eq!(mode["settings"]["model"], "gpt-5.3-codex");
+        assert_eq!(mode["settings"]["reasoning_effort"], "medium");
+    }
 
-        assert_eq!(
-            code_mode_host_binary(&path_entry).expect("find npm host"),
-            std::fs::canonicalize(&host).expect("canonicalize npm host")
-        );
+    #[test]
+    fn plan_mode_uses_codex_default_model_when_profile_is_unset() {
+        let mode = plan_collaboration_mode(
+            &json!({
+                "data": [{ "name": "Default", "mode": "default", "model": null }]
+            }),
+            &json!({
+                "data": [{
+                    "id": "gpt-5.6-sol",
+                    "model": "gpt-5.6-sol",
+                    "defaultReasoningEffort": "low",
+                    "isDefault": true
+                }]
+            }),
+            None,
+            None,
+        )
+        .expect("plan mode");
 
-        std::fs::remove_dir_all(dir).expect("remove test directory");
+        assert_eq!(mode["settings"]["model"], "gpt-5.6-sol");
+        assert_eq!(mode["settings"]["reasoning_effort"], "low");
     }
 
     #[test]
@@ -1535,6 +1521,7 @@ mod tests {
             Path::new("/repo"),
             Some("gpt-test"),
             Some("high"),
+            None,
         );
 
         assert_eq!(params["approvalPolicy"], "on-request");
@@ -1552,6 +1539,7 @@ mod tests {
             Path::new("/repo"),
             Some(""),
             Some(""),
+            None,
         );
 
         assert!(params.get("model").is_none());
@@ -1560,7 +1548,15 @@ mod tests {
 
     #[test]
     fn turn_start_input_is_text_only_without_attachments() {
-        let params = turn_start_params("thread-1", "Inspect", &[], Path::new("/repo"), None, None);
+        let params = turn_start_params(
+            "thread-1",
+            "Inspect",
+            &[],
+            Path::new("/repo"),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(
             params["input"],
@@ -1579,6 +1575,7 @@ mod tests {
             "What is this?",
             &attachments,
             Path::new("/repo"),
+            None,
             None,
             None,
         );

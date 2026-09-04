@@ -395,7 +395,8 @@ impl ExecutionState {
     /// Promote a spec-layer PRD loop (identified by its stable ID) into
     /// `current`. The title and origin come from the spec layer (`epic.rs`),
     /// so the ID is the only identity the caller needs. The attempt number is
-    /// computed from history — a retry gets `max-completed-attempt + 1` — and
+    /// computed from history — a retry gets `max-attempt + 1`, including an
+    /// abandoned attempt — and
     /// the result is re-validated, so a re-run of a non-retry cannot land.
     /// Refuses if a loop is already in progress.
     pub fn promote_loop_into_current(
@@ -414,7 +415,7 @@ impl ExecutionState {
         let attempt = self
             .history
             .iter()
-            .filter(|h| h.id == id && h.outcome == Outcome::Completed)
+            .filter(|h| h.id == id)
             .map(|h| h.attempt)
             .max()
             .unwrap_or(0)
@@ -1132,6 +1133,31 @@ mod tests {
             empty.promote_next_from_queue(now).unwrap_err(),
             AppError::Conflict(_)
         ));
+    }
+
+    #[test]
+    fn retry_after_abandonment_uses_the_next_attempt() {
+        let mut s = ExecutionState::default();
+        s.current = Some(active("prd/loop", 1));
+        let abandoned = s
+            .abandon_current(
+                "agent session ended",
+                ts("2026-07-25T12:00:00+00:00"),
+                false,
+            )
+            .unwrap();
+
+        let retried = abandoned
+            .promote_loop_into_current(
+                "prd/loop",
+                "Retryable loop",
+                origin("prd/loop"),
+                ts("2026-07-25T13:00:00+00:00"),
+            )
+            .unwrap();
+
+        assert_eq!(retried.current.as_ref().unwrap().attempt, 2);
+        assert!(retried.validate().is_ok());
     }
 
     // ── save guards ──
