@@ -1802,6 +1802,7 @@ pub(crate) async fn start_fresh_and_record_streaming(
 pub(crate) struct StreamingRunOptions<'a> {
     pub(crate) token_budget: Option<&'a TokenBudget>,
     pub(crate) force_autonomous: bool,
+    pub(crate) plan_mode: bool,
 }
 
 /// Streaming fresh turn whose process/transcript live in `path`, but whose
@@ -1829,6 +1830,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
         None,
         None,
         options.force_autonomous,
+        options.plan_mode,
     )
     .await
 }
@@ -1851,6 +1853,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     // own linked worktree so sibling controls can never collide.
     control_key: Option<&Path>,
     force_autonomous: bool,
+    plan_mode: bool,
 ) -> Result<AgentResponse, AppError> {
     let session_arc = match agent_config {
         Some(config) => {
@@ -1888,8 +1891,8 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     //    non-streaming pipelines for the interruption-recovery rationale: a
     //    transport/child failure (`Err`) orphans the user turn from step 1, so
     //    we reconcile it to `interrupted` before re-propagating the error.
-    // Start never runs under plan mode — it's the auto-built next-loop prompt,
-    // not a human follow-up with the composer's Plan-mode toggle.
+    // Most fresh loop turns are autonomous. Pre-flight interviews are the
+    // exception and deliberately use interactive Plan mode.
     // No attachments — the loop prompt is text by construction (see the
     // non-streaming fresh-start path).
     let response = match send_streaming_with_retry(
@@ -1899,7 +1902,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         channel,
         &slots,
         &islot,
-        false,
+        plan_mode,
         token_budget,
     )
     .await

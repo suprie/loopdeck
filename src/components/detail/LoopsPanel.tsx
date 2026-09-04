@@ -22,6 +22,7 @@ import * as api from "../../lib/tauri";
 import { LoadingSpinner } from "../shared/LoadingSpinner";
 import { Markdown } from "../shared/Markdown";
 import { MigrationCard } from "./MigrationCard";
+import { ConfirmDialog } from "../shared/ConfirmDialog";
 
 interface LoopsPanelProps {
   projectPath: string;
@@ -87,11 +88,15 @@ function StructuredCard({
   status,
   date,
   isCurrent,
+  onRetry,
+  retrying,
 }: {
   loop: { id: string; title: string };
   status: "in_progress" | "queued" | "completed" | "abandoned";
   date: string;
   isCurrent?: boolean;
+  onRetry?: () => void;
+  retrying?: boolean;
 }) {
   return (
     <div
@@ -116,15 +121,74 @@ function StructuredCard({
       <div className="mt-1 text-[10px] font-mono text-muted-foreground/70">
         {loop.id}
       </div>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={retrying}
+          className="mt-3 flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {retrying ? <Loader2 size={11} className="animate-spin" /> : <Repeat size={11} />}
+          Continue this loop
+        </button>
+      )}
     </div>
   );
 }
 
-function StructuredView({ loaded }: { loaded: LoadedExecution }) {
+function StructuredView({
+  loaded,
+  projectPath,
+  onChanged,
+}: {
+  loaded: LoadedExecution;
+  projectPath: string;
+  onChanged: () => Promise<void>;
+}) {
   const s = loaded.state;
   const current = s.current;
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [clearingCurrent, setClearingCurrent] = useState(false);
+  const [confirmClearCurrent, setConfirmClearCurrent] = useState(false);
   const isEmpty =
     !current && s.queue.length === 0 && s.history.length === 0;
+
+  const retry = async (loop: HistoryLoop) => {
+    setRetryingId(loop.id);
+    try {
+      await api.promoteLoopById(projectPath, loop.id);
+      toast.success("Loop ready to continue", {
+        description: `${loop.title} is now the current loop.`,
+      });
+      await onChanged();
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to continue loop", { description: appErr.message ?? String(err) });
+    } finally {
+      setRetryingId(null);
+    }
+  };
+
+  const clearCurrent = async () => {
+    if (!current) return;
+    setClearingCurrent(true);
+    try {
+      await api.abandonCurrentLoop(
+        projectPath,
+        "Cleared from the Loops view after confirming no work is running.",
+      );
+      toast.success("Inactive loop cleared", {
+        description: "You can now start the queued run.",
+      });
+      await onChanged();
+    } catch (err) {
+      const appErr = err as AppError;
+      toast.error("Failed to clear loop", { description: appErr.message ?? String(err) });
+    } finally {
+      setClearingCurrent(false);
+      setConfirmClearCurrent(false);
+    }
+  };
   return (
     <div className="max-w-2xl">
       {loaded.warnings.length > 0 && (
@@ -153,6 +217,15 @@ function StructuredView({ loaded }: { loaded: LoadedExecution }) {
             date={dateOnly(current.started_at)}
             isCurrent
           />
+          <button
+            type="button"
+            onClick={() => setConfirmClearCurrent(true)}
+            disabled={clearingCurrent}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {clearingCurrent ? <Loader2 size={11} className="animate-spin" /> : <Circle size={11} />}
+            Mark inactive
+          </button>
         </section>
       )}
 
@@ -187,6 +260,8 @@ function StructuredView({ loaded }: { loaded: LoadedExecution }) {
                 loop={h}
                 status={h.outcome}
                 date={dateOnly(h.completed_at)}
+                onRetry={h.outcome === "abandoned" && !current ? () => retry(h) : undefined}
+                retrying={retryingId === h.id}
               />
             ))}
           </div>
@@ -207,6 +282,16 @@ function StructuredView({ loaded }: { loaded: LoadedExecution }) {
             store. Promote a loop from the Epics tab to begin.
           </p>
         </div>
+      )}
+      {confirmClearCurrent && (
+        <ConfirmDialog
+          title="Mark this loop inactive?"
+          message="Use this only when no agent or work is still running. The loop will be kept in history as abandoned, and queued runs will be unblocked."
+          confirmLabel="Mark inactive"
+          danger
+          onConfirm={() => void clearCurrent()}
+          onCancel={() => setConfirmClearCurrent(false)}
+        />
       )}
     </div>
   );
@@ -309,7 +394,7 @@ export function LoopsPanel({ projectPath }: LoopsPanelProps) {
   }
 
   if (mode === "structured" && exec) {
-    return <StructuredView loaded={exec} />;
+    return <StructuredView loaded={exec} projectPath={projectPath} onChanged={reload} />;
   }
 
   if (mode === "empty" || !status) {

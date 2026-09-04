@@ -253,7 +253,8 @@ pub(crate) fn build_combined_phase_prompt(
 /// Build the prompt for one queued phase's pre-flight interview turn
 /// (Phase 3) — a single bounded session, run while the user is present,
 /// whose entire job is to surface ambiguity in that one phase's acceptance
-/// criteria via `AskUserQuestion` before the phase runs unattended tonight.
+/// criteria via the selected harness's user-input facility before the phase
+/// runs unattended tonight.
 ///
 /// Mirrors the orchestrator's Phase 1 "Ask Clarifying Questions" step, but
 /// scoped to one phase instead of a whole PRD, and closed off with a
@@ -261,14 +262,36 @@ pub(crate) fn build_combined_phase_prompt(
 /// so [`extract_interview_answers`] can pin the answers without re-deriving
 /// them from raw tool-call history.
 pub(crate) fn build_interview_prompt(execution_id: &str, loc: &LoopLocation) -> String {
+    build_interview_prompt_with_question_instruction(
+        execution_id,
+        loc,
+        "Ask the user via `AskUserQuestion` now, while they're present, and wait for their answers.",
+    )
+}
+
+/// Build the Codex variant of the pre-flight interview. Codex app-server
+/// exposes user input through `item/tool/requestUserInput`, rather than the
+/// Claude CLI's `AskUserQuestion` tool.
+pub(crate) fn build_codex_interview_prompt(execution_id: &str, loc: &LoopLocation) -> String {
+    build_interview_prompt_with_question_instruction(
+        execution_id,
+        loc,
+        "Use Codex's native user-input request now, while they're present, and wait for their answers. Ask at most three short questions. Do not try to call a tool named `AskUserQuestion`.",
+    )
+}
+
+fn build_interview_prompt_with_question_instruction(
+    execution_id: &str,
+    loc: &LoopLocation,
+    question_instruction: &str,
+) -> String {
     format!(
         "You are preparing loop `{execution_id}` — \"{title}\" (epic `{epic}`, \
          PRD `{prd}`, phase `{phase}`) to run **unattended, overnight** — no \
          human will be present once the run starts. Read the phase's \
          acceptance criteria in its PRD and identify anything genuinely \
-         ambiguous that would make you guess mid-run. Ask the user via \
-         `AskUserQuestion` now, while they're present, and wait for their \
-         answers. If nothing is ambiguous, ask no questions.\n\n\
+         ambiguous that would make you guess mid-run. {question_instruction} \
+         If nothing is ambiguous, ask no questions.\n\n\
          Do not implement anything — this turn only clarifies. When you are \
          done (whether or not you asked anything), end your final message \
          with exactly this block, restating each question you asked and the \
@@ -287,6 +310,25 @@ pub(crate) fn build_interview_prompt(execution_id: &str, loc: &LoopLocation) -> 
 /// individual phase contexts stay explicit so the agent can ask focused
 /// questions while the user only has to answer one combined card.
 pub(crate) fn build_batch_interview_prompt(phases: &[(String, LoopLocation)]) -> String {
+    build_batch_interview_prompt_with_question_instruction(
+        phases,
+        "Combine all useful questions into one `AskUserQuestion` call so the user can answer them together.",
+    )
+}
+
+/// Build the Codex variant of the combined interview, using app-server's
+/// native user-input request instead of Claude's `AskUserQuestion` tool.
+pub(crate) fn build_codex_batch_interview_prompt(phases: &[(String, LoopLocation)]) -> String {
+    build_batch_interview_prompt_with_question_instruction(
+        phases,
+        "Combine the most important ambiguities into one native Codex user-input request so the user can answer them together. Ask at most three short questions. Do not try to call a tool named `AskUserQuestion`.",
+    )
+}
+
+fn build_batch_interview_prompt_with_question_instruction(
+    phases: &[(String, LoopLocation)],
+    question_instruction: &str,
+) -> String {
     let contexts = phases
         .iter()
         .map(|(execution_id, loc)| {
@@ -309,9 +351,8 @@ pub(crate) fn build_batch_interview_prompt(phases: &[(String, LoopLocation)]) ->
         "You are preparing these loops to run **unattended, overnight** — no \
          human will be present once the run starts:\n\n{contexts}\n\n\
          Read each phase's acceptance criteria in its PRD. Identify only the \
-         ambiguities that would force a guess mid-run, and combine all useful \
-         questions into one `AskUserQuestion` call so the user can answer them \
-         together. Prefix every question's header with its loop ID. If nothing \
+         ambiguities that would force a guess mid-run. {question_instruction} \
+         Prefix every question's header with its loop ID. If nothing \
          is ambiguous, ask no questions.\n\n\
          Do not implement anything — this turn only clarifies. When you are \
          done (whether or not you asked anything), end your final message with \
@@ -773,6 +814,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_interview_prompt_uses_native_user_input_not_claude_tool() {
+        let loc = LoopLocation {
+            epic: "overnight-orchestration".into(),
+            prd: "prd-run-queue".into(),
+            phase: "Phase 3".into(),
+            title: "Pre-flight interview".into(),
+        };
+
+        let prompt = build_codex_interview_prompt("prd-run-queue/phase-3", &loc);
+        assert!(prompt.contains("native user-input request"));
+        assert!(prompt.contains("Do not try to call a tool named `AskUserQuestion`"));
+        assert!(prompt.contains("## Pre-flight Answers"));
+    }
+
+    #[test]
     fn batch_interview_prompt_keeps_every_phase_context_and_one_combined_card_instruction() {
         let phases = vec![
             (
@@ -799,6 +855,23 @@ mod tests {
         assert!(prompt.contains("prd-b/loop-b"));
         assert!(prompt.contains("one `AskUserQuestion` call"));
         assert!(prompt.contains("## Batch Pre-flight Answers"));
+    }
+
+    #[test]
+    fn codex_batch_interview_prompt_uses_native_user_input_not_claude_tool() {
+        let phases = vec![(
+            "prd-a/loop-a".into(),
+            LoopLocation {
+                epic: "epic-a".into(),
+                prd: "prd-a".into(),
+                phase: "Phase 1".into(),
+                title: "First loop".into(),
+            },
+        )];
+
+        let prompt = build_codex_batch_interview_prompt(&phases);
+        assert!(prompt.contains("native Codex user-input request"));
+        assert!(prompt.contains("Do not try to call a tool named `AskUserQuestion`"));
     }
 
     #[test]

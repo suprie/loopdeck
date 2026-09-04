@@ -205,6 +205,27 @@ export async function getExecutionState(
 }
 
 /**
+ * Retry a structured loop from execution history. The backend restores it as
+ * the current loop with a new attempt number and sources its metadata from the PRD.
+ * Rust: promote_loop_by_id(path, loop_id) -> Result<ExecutionState, AppError>
+ */
+export async function promoteLoopById(path: string, loopId: string): Promise<ExecutionState> {
+  return invoke<ExecutionState>("promote_loop_by_id", { path, loopId });
+}
+
+/** Mark the persisted current loop as abandoned when work has stopped. */
+export async function abandonCurrentLoop(
+  path: string,
+  reason: string,
+): Promise<ExecutionState> {
+  return invoke<ExecutionState>("abandon_current_loop", {
+    path,
+    reason,
+    promoteNext: false,
+  });
+}
+
+/**
  * Read-only migration preview for a project still on legacy .loopdeck/loops.md:
  * the planned execution.yaml + every unmatched/ambiguous record (preserved
  * verbatim, never fuzzy-matched). Writes nothing. Rust:

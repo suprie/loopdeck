@@ -238,6 +238,7 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
             Some(&agent_config),
             None,
             true,
+            false,
         )
         .await
         .expect("demo phase turn completes");
