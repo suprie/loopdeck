@@ -28,8 +28,8 @@
 use crate::agents::{ClaudeEvent, TokenBudget};
 use crate::commands::agent::start_fresh_and_record_streaming_in_root_with_config;
 use crate::commands::run_queue::next_queued_batch;
-use crate::commands::state::AppState;
 use crate::commands::state::resolve_agent_config_by_id;
+use crate::commands::state::AppState;
 use crate::config::{AgentConfig, GlobalConfig, NamedAgentConfig, RoleCharter};
 use crate::epic;
 use crate::run_executor::build_run_plan;
@@ -172,7 +172,10 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
     };
 
     // ── Plan: two phases, dev then QA (authored chain), each assigned. ──
-    let execution_ids = vec!["role-demo/dev-build".to_string(), "role-demo/qa-verify".to_string()];
+    let execution_ids = vec![
+        "role-demo/dev-build".to_string(),
+        "role-demo/qa-verify".to_string(),
+    ];
     let mut plan = build_run_plan(
         "role-demo".into(),
         repo.clone(),
@@ -184,7 +187,9 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
     plan.phases[0].assigned_agent = Some(dev.id.clone());
     plan.phases[1].assigned_agent = Some(qa.id.clone());
     runplan::save(&repo, &plan).expect("save demo plan");
-    let mut plan = runplan::load(&repo).expect("reload plan").expect("plan present");
+    let mut plan = runplan::load(&repo)
+        .expect("reload plan")
+        .expect("plan present");
     let batch_count_before = plan.phases.len();
 
     // ── Execute: the executor's own batching + resolution + spawn path. ──
@@ -193,16 +198,19 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
             .assigned_agent
             .clone()
             .expect("demo phases are all assigned");
-        let agent_config = resolve_agent_config_by_id(&state, &assigned)
-            .expect("temp roster entry resolves");
-        assert!(agent_config.charter.is_some(), "charter must ride the config");
+        let agent_config =
+            resolve_agent_config_by_id(&state, &assigned).expect("temp roster entry resolves");
+        assert!(
+            agent_config.charter.is_some(),
+            "charter must ride the config"
+        );
 
         let locs: Vec<(String, epic::LoopLocation)> = batch
             .iter()
             .map(|&idx| {
                 let execution_id = plan.phases[idx].execution_id.clone();
-                let loc = epic::find_loop_by_id(&repo, &execution_id)
-                    .expect("fixture loop resolves");
+                let loc =
+                    epic::find_loop_by_id(&repo, &execution_id).expect("fixture loop resolves");
                 (execution_id, loc)
             })
             .collect();
@@ -251,7 +259,10 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
     // ── Assert the work really happened: dev built, QA verified. ──
     let math = std::fs::read_to_string(repo.join("math.js")).expect("dev turn wrote math.js");
     assert!(math.contains("add"), "math.js exports add: {math}");
-    assert!(repo.join("math.test.js").exists(), "dev turn wrote math.test.js");
+    assert!(
+        repo.join("math.test.js").exists(),
+        "dev turn wrote math.test.js"
+    );
     let qa_report =
         std::fs::read_to_string(repo.join("qa-report.md")).expect("qa turn wrote qa-report.md");
     assert!(
@@ -260,10 +271,15 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
     );
 
     // ── Report: per-role attribution. ──
-    let report =
-        crate::runplan::RunReport::from_plan(plan, crate::runplan::AuditSlice::default());
-    assert_eq!(report.phases[0].assigned_agent.as_deref(), Some(dev.id.as_str()));
-    assert_eq!(report.phases[1].assigned_agent.as_deref(), Some(qa.id.as_str()));
+    let report = crate::runplan::RunReport::from_plan(plan, crate::runplan::AuditSlice::default());
+    assert_eq!(
+        report.phases[0].assigned_agent.as_deref(),
+        Some(dev.id.as_str())
+    );
+    assert_eq!(
+        report.phases[1].assigned_agent.as_deref(),
+        Some(qa.id.as_str())
+    );
     assert_eq!(report.phases[0].verdict, crate::runplan::PhaseVerdict::Pass);
     assert_eq!(report.phases[1].verdict, crate::runplan::PhaseVerdict::Pass);
 
