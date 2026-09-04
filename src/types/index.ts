@@ -606,6 +606,11 @@ export interface RunPhase {
   /** Other phases in this plan (by `execution_id`) that must complete before
    * this one is eligible under `continue_independent`. */
   depends_on: string[];
+  /** Roster id of the agent this phase is assigned to (prd-role-foundations
+   * Phase 4). Absent = the default agent. Validated against the roster at
+   * `create_run_plan` time; the executor parks the phase if the entry is
+   * gone by run time. */
+  assigned_agent?: string;
   /** Set when `status` is `parked` (Phase 4) or `failed` (Phase 2: the
    * non-green verdict or turn error) — the reason shown in the morning
    * report. */
@@ -649,6 +654,9 @@ export interface PhaseReportEntry {
   execution_id: string;
   status: RunPhaseStatus;
   verdict: PhaseVerdict;
+  /** Roster id of the agent the phase was assigned to (per-role
+   * attribution); absent = the default agent. */
+  assigned_agent?: string;
   /** Extracted from Completed phases that shipped a draft PR. */
   draft_pr_url?: string;
   /** Verbatim park/kill/fail reason from `park_payload`. */
