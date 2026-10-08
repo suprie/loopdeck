@@ -4,18 +4,23 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Started**: 2026-09-01
-- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phases 2-3 — three loops done in one unattended run: charter injection across spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
+- **Started**: 2026-09-05
+- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phase 4 — three loops in one unattended run: `phase-assignment-model` (`RunPhase.assigned_agent_id`/`assigned_agent_name` + sparse `PhaseAgentAssignment` payload validated by `create_run_plan` + per-phase agent picker in `PlanTonightWizard`), `phase-assignment-exec` (`next_queued_batch` staffing split; `execute_run` spawns each batch through `resolve_agent_config_by_id` → `start_fresh_and_record_streaming_in_root_with_config`; missing roster entry parks the batch; interviews use the phase's agent), `role-demo` (`role_assignment_tests.rs` — deterministic two-phase dev/QA plan, per-role charter argv capture, report attribution).
 - **Status**: completed
 
 ## Next Steps
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/102
-- [ ] Review & merge the draft PR for this run (see final chat message for URL)
+- [ ] Review & merge the draft PR for this run: https://github.com/suprie/loopdeck/pull/106
 - [ ] Review & merge the night-run Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-09-05 — prd-role-foundations Phase 4 (phase-assignment-model, phase-assignment-exec, role-demo)
+- **Status**: completed
+- **Completed**: 2026-09-05
+- **Summary**: per-phase agent assignment end to end — plan staffing fields + wizard picker, executor spawns with the assigned agent (staffing change splits the combined turn; missing roster entry parks), morning-report Agent attribution column, deterministic two-phase dev/QA demo test. Detail: decisions.md 2026-09-05 entry.
 
 ### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
 - **Status**: completed

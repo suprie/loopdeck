@@ -183,6 +183,7 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
         &execution_ids,
         StallPolicy::ContinueIndependent,
         false,
+        &[],
     );
     plan.phases[0].assigned_agent = Some(dev.id.clone());
     plan.phases[1].assigned_agent = Some(qa.id.clone());

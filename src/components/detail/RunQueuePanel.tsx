@@ -117,7 +117,7 @@ export function RunQueuePanel({
         budgets,
         // No per-phase assignment surface here — the Plan-tonight wizard owns
         // the agent picker (prd-role-foundations Phase 4).
-        selectedIds.map(() => null),
+        [],
       );
       setPlan(created);
       onQueued();
