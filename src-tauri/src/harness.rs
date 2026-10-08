@@ -127,18 +127,9 @@ impl HarnessSession {
         }
     }
 
-    /// `plan_mode` only has meaning for Claude — it toggles the CLI's `plan`
-    /// permission mode, entirely a Claude-CLI concept (`ExitPlanMode`, the
-    /// `PlanSlot` carried inside `slots`). Codex has its own approval model
-    /// (always `readOnly` + `on-request` — see the harness-boundary decision
-    /// in `.loopdeck/decisions.md`) with no equivalent read-only-until-approved
-    /// gate, so `plan_mode: true` against a Codex session is a hard error
-    /// rather than a silently-dropped flag: Codex would otherwise start the
-    /// turn with its normal `workspace-write` access despite the caller
-    /// believing it asked for a plan-first review. This is the single choke
-    /// point for that guarantee — any caller (not just the current frontend
-    /// toggle, which separately fails closed while the harness is unknown)
-    /// gets the same rejection.
+    /// `plan_mode` maps to the harness's interactive planning mode. Claude
+    /// uses its `ExitPlanMode` approval flow; Codex uses the app-server Plan
+    /// collaboration mode, which exposes native user-input questions.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_message_streaming(
         &mut self,

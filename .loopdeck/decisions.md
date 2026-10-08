@@ -189,3 +189,13 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: `prd-role-foundations` Phase 4, loops `phase-assignment-model` + `phase-assignment-exec` + `role-demo`. Pre-answered clarifications (unattended run): unassigned phases stay valid on the default agent (ADR-3 migration stance); a missing roster entry at execution time parks the batch (user-repairable config error, recoverable via requeue) rather than failing the run or silently falling back; the demo proves attribution through persisted report fields with a deterministic harness (fake child binaries capturing argv), not a live provider.
 - **Consequences**: `RunPhase` gains `assigned_agent_id` + `assigned_agent_name` (both `serde(default)`-optional, so pre-assignment `run-plan.yaml` files load unchanged); `PhaseAgentAssignment` is the sparse IPC payload, validated by `create_run_plan` against the roster (name captured at queue time for durable attribution). `next_queued_batch` returns the maximal prefix of queued phases sharing one staffing — a staffing change splits the combined turn (dev builds, then QA verifies), while all-unassigned plans keep the single-turn behaviour. `execute_run` resolves each batch via `resolve_agent_config_by_id` (default agent when unassigned) and spawns through `start_fresh_and_record_streaming_in_root_with_config`; pre-flight interviews run with the phase's assigned agent too. `PhaseReportEntry.assigned_agent_name` carries attribution into the morning report (new Agent column). Demo: `role_assignment_tests.rs`.
+
+## 2026-10-08 — Track Rust Atomic API renames
+- **Status**: accepted
+- **Context**: CI treats deprecations as errors, and the current Rust toolchain renamed `Atomic<u64>::fetch_update` to `try_update`.
+- **Consequences**: Token-budget accounting now uses `try_update` while preserving the existing saturating increment behavior.
+
+## 2026-10-08 — Keep Codex handshake fixtures current
+- **Status**: accepted
+- **Context**: The Codex charter-injection fixture stopped before `turn/start` because production now queries collaboration modes and models during initialization.
+- **Consequences**: The fake app-server answers `collaborationMode/list` and `model/list` alongside the existing handshake methods.

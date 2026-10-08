@@ -13,7 +13,8 @@ use super::agent::{mark_turn_terminal, start_fresh_and_record_streaming_in_root_
 use super::state::{
     fire_interrupt, resolve_agent_config, resolve_agent_config_by_id, resolve_root, AppState,
 };
-use crate::agents::{ClaudeEvent, TokenBudget};
+use crate::agents::{AskUserQuestionSpec, ClaudeEvent, TokenBudget};
+use crate::config::AgentHarness;
 use crate::delivery;
 use crate::delivery_retry;
 use crate::epic;
@@ -23,7 +24,8 @@ use crate::git;
 use crate::handoff;
 use crate::limits;
 use crate::run_executor::{
-    self, build_batch_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
+    self, build_batch_interview_prompt, build_codex_batch_interview_prompt,
+    build_codex_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
     extract_batch_interview_answers, extract_draft_pr_url, extract_interview_answers,
     extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
@@ -415,7 +417,11 @@ fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
 ///
 /// Every ID is validated against `docs/epics/` (`epic::find_loop_by_id`) so a
 /// stale or mistyped ID is rejected before it's written to disk, not
-/// discovered later at run time. `depends_on` defaults to the authored
+/// discovered later at run time. Each phase's `assigned_agent` (when the
+/// picker set one) is validated against the agent roster the same way, so a
+/// deleted profile is caught at queue time — the executor's missing-agent
+/// park is only the overnight safety net for entries removed between plan
+/// creation and execution. `depends_on` defaults to the authored
 /// selection order — each phase depends on its immediate predecessor — per
 /// the PRD's "linear chain, no editor" v1 design; there is no edge editor in
 /// this phase. Every phase starts `Queued`/`Pending` (interview unanswered),
@@ -1239,14 +1245,35 @@ fn park_blocked_dependents(plan: &mut RunPlan, execution_id: &str) {
     }
 }
 
+/// Park a batch whose assigned agent no longer resolves in the roster
+/// (`prd-role-foundations` Phase 4): the payload names the missing agent for
+/// the morning report, and the plan's `stall_policy` decides — via the same
+/// dependent-parking every other park site uses — whether the rest of the
+/// plan stays eligible. Split out of `execute_run` so the policy behavior is
+/// testable without a live turn.
+fn park_missing_agent(plan: &mut RunPlan, batch: &[usize], agent_id: &str) {
+    park_batch(
+        plan,
+        batch,
+        &format!("assigned agent \"{agent_id}\" no longer exists in the agent roster"),
+    );
+    let batch_ids: Vec<String> = batch
+        .iter()
+        .map(|&idx| plan.phases[idx].execution_id.clone())
+        .collect();
+    for execution_id in &batch_ids {
+        park_blocked_dependents(plan, execution_id);
+    }
+}
+
 /// Run one queued phase's pre-flight interview turn (Phase 3) — a bounded
 /// session driven through the *streaming* pipeline
 /// (`start_fresh_and_record_streaming`, no-op sink `Channel`, same trick
 /// Phase 4's executor uses). This is load-bearing, not cosmetic: per
-/// `claude_session.rs::answer_ask_user_question`'s own doc comment, an
-/// `AskUserQuestion` on the *non*-streaming path (`channel: None`) has no UI
+/// `claude_session.rs::answer_ask_user_question`'s own doc comment, a
+/// user-input request on the *non*-streaming path (`channel: None`) has no UI
 /// surface to answer from and is auto-denied immediately instead of parking —
-/// exactly the tool call `build_interview_prompt` tells the agent to make. A
+/// exactly the request the harness-specific interview prompt tells the agent to make. A
 /// channel merely being present (its callback can be a no-op) is what lets
 /// `answer_control_request` park on the shared `question_slot` instead of
 /// taking that deny branch; the pending card then surfaces through the
@@ -1292,9 +1319,12 @@ pub async fn run_phase_interview(
         ))
     })?;
 
-    let prompt = build_interview_prompt(&execution_id, &loc);
+    let prompt = match resolve_agent_config(&state)?.harness {
+        AgentHarness::Claude => build_interview_prompt(&execution_id, &loc),
+        AgentHarness::Codex => build_codex_interview_prompt(&execution_id, &loc),
+    };
     // No-op sink: nothing here needs to narrate turn events to a UI channel —
-    // only the channel's *presence* matters, so a parked AskUserQuestion is
+    // only the channel's *presence* matters, so a parked user question is
     // answerable instead of auto-denied (see this fn's doc comment).
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
     let agent_config = match assigned_agent_id.as_deref() {
@@ -1311,6 +1341,7 @@ pub async fn run_phase_interview(
         None,
         Some(&agent_config),
         None,
+        false,
         false,
     )
     .await?;
@@ -1330,6 +1361,15 @@ pub async fn run_phase_interview(
                 "phase \"{execution_id}\" was removed from the run plan during its interview"
             ))
         })?;
+    let unavailable_questions = unavailable_codex_questions(&answers);
+    if !unavailable_questions.is_empty() {
+        let payload = preflight_question_payload(&unavailable_questions)?;
+        let phase = &mut plan.phases[idx];
+        phase.status = RunPhaseStatus::Parked;
+        phase.park_payload = Some(payload);
+        runplan::save(&root, &plan)?;
+        return Ok(plan);
+    }
     plan.phases[idx].interview = answers;
     plan.phases[idx].interview_status = InterviewStatus::Answered;
     runplan::save(&root, &plan)?;
@@ -1392,7 +1432,10 @@ pub async fn run_batch_phase_interviews(
         phases.push((execution_id.clone(), loc));
     }
 
-    let prompt = build_batch_interview_prompt(&phases);
+    let prompt = match resolve_agent_config(&state)?.harness {
+        AgentHarness::Claude => build_batch_interview_prompt(&phases),
+        AgentHarness::Codex => build_codex_batch_interview_prompt(&phases),
+    };
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
     // One shared turn, so one agent: the lead phase's staffing (Phase 4).
     // Mixed-assignment batches keep the first phase's role; the per-phase
@@ -1417,6 +1460,7 @@ pub async fn run_batch_phase_interviews(
         Some(&agent_config),
         None,
         false,
+        false,
     )
     .await?;
     let answers_by_phase = extract_batch_interview_answers(&response.result);
@@ -1433,14 +1477,55 @@ pub async fn run_batch_phase_interviews(
                     "phase \"{execution_id}\" was removed from the run plan during its interview"
                 ))
             })?;
-        phase.interview = answers_by_phase
+        let answers = answers_by_phase
             .get(&execution_id)
             .cloned()
             .unwrap_or_default();
-        phase.interview_status = InterviewStatus::Answered;
+        let unavailable_questions = unavailable_codex_questions(&answers);
+        if unavailable_questions.is_empty() {
+            phase.interview = answers;
+            phase.interview_status = InterviewStatus::Answered;
+        } else {
+            phase.status = RunPhaseStatus::Parked;
+            phase.park_payload = Some(preflight_question_payload(&unavailable_questions)?);
+        }
     }
     runplan::save(&root, &plan)?;
     Ok(plan)
+}
+
+/// A Codex model may report that its native input request is unavailable in
+/// the current collaboration mode. That is not an answer: preserve the
+/// question as a standard parked card, where the user can answer it and
+/// requeue the phase without losing the pre-flight decision.
+fn unavailable_codex_questions(
+    answers: &[crate::runplan::PinnedAnswer],
+) -> Vec<AskUserQuestionSpec> {
+    answers
+        .iter()
+        .filter(|answer| {
+            let text = answer.answer.to_ascii_lowercase();
+            text.contains("native input request unavailable")
+                || text.contains("askuserquestion unavailable")
+        })
+        .map(|answer| AskUserQuestionSpec {
+            question: answer.question.clone(),
+            header: "Pre-flight question".into(),
+            // The card's built-in Other field accepts the user's free-text
+            // response when Codex could not supply selectable options.
+            options: Vec::new(),
+            multi_select: false,
+        })
+        .collect()
+}
+
+fn preflight_question_payload(questions: &[AskUserQuestionSpec]) -> Result<String, AppError> {
+    let encoded = serde_json::to_string(questions).map_err(|error| {
+        AppError::RunPlan(format!("failed to encode pre-flight question: {error}"))
+    })?;
+    Ok(format!(
+        "__QUESTIONS__{encoded}__END__ Codex needs your pre-flight answer before this phase can run."
+    ))
 }
 
 /// Explicitly skip a queued phase's pre-flight interview — no session is
@@ -1622,15 +1707,8 @@ async fn execute_run(
                 Err(error) => {
                     let reason =
                         format!("assigned agent \"{agent_id}\" is not on the roster: {error}");
-                    let batch_ids = batch
-                        .iter()
-                        .map(|&idx| plan.phases[idx].execution_id.clone())
-                        .collect::<Vec<_>>();
-                    park_batch(&mut plan, &batch, &reason);
+                    park_missing_agent(&mut plan, &batch, agent_id);
                     plan.environment.worktree_kept = true;
-                    for id in &batch_ids {
-                        park_blocked_dependents(&mut plan, id);
-                    }
                     runplan::save(root, &plan)?;
                     notify_run_terminal(
                         app,
@@ -1724,6 +1802,11 @@ async fn execute_run(
         } else {
             format!("{} queued loops", locs.len())
         };
+        // Profile-pinned turn (`prd-role-foundations` Phase 4): when the
+        // batch has an assigned agent, its resolved config — charter included
+        // — replaces the default-config spawn, so each phase group runs under
+        // its own role. `None` falls back to the default-agent resolution
+        // inside the wrapper, unchanged from Phase 2.
         let turn = start_fresh_and_record_streaming_in_root_with_config(
             state,
             &worktree,
@@ -1738,6 +1821,7 @@ async fn execute_run(
             Some(&agent_config),
             None,
             true,
+            false,
         );
         let outcome = match race_with_watchdog(watchdog_timeout, turn).await {
             WatchdogOutcome::Completed(result) => result,
@@ -2135,6 +2219,21 @@ mod unattended_tests {
     use super::*;
     use chrono::Utc;
 
+    #[test]
+    fn unavailable_codex_input_is_preserved_as_a_parked_question() {
+        let questions = unavailable_codex_questions(&[crate::runplan::PinnedAnswer {
+            question: "Which existing roster entries should the unattended demo use?".into(),
+            answer: "(unanswered — native input request unavailable in this mode)".into(),
+        }]);
+
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].header, "Pre-flight question");
+        assert!(questions[0].options.is_empty());
+        let payload = preflight_question_payload(&questions).expect("payload");
+        assert!(payload.starts_with("__QUESTIONS__["));
+        assert!(payload.contains("__END__"));
+    }
+
     fn plan() -> RunPlan {
         run_executor::build_run_plan(
             "run-budget-test".into(),
@@ -2403,6 +2502,106 @@ mod unattended_tests {
         assert_eq!(next_queued_batch(&plan), Some(vec![0, 1, 2]));
     }
 
+    // ── Per-phase agent assignment (`prd-role-foundations` Phase 4) ──────
+
+    #[test]
+    fn next_queued_batch_takes_the_whole_queue_when_no_agent_is_assigned() {
+        let plan = parked_chain();
+
+        let batch = next_queued_batch(&plan).expect("all phases queued");
+
+        // No assignments — every phase shares `None`, so the combined turn
+        // still covers the whole queue (pre-Phase-4 behavior preserved).
+        assert_eq!(batch, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn next_queued_batch_takes_only_consecutive_same_agent_phases() {
+        let mut plan = parked_chain();
+        // dev, dev, qa → first batch is the two dev phases; qa stays queued.
+        plan.phases[0].assigned_agent_id = Some("dev-id".into());
+        plan.phases[1].assigned_agent_id = Some("dev-id".into());
+        plan.phases[2].assigned_agent_id = Some("qa-id".into());
+
+        let batch = next_queued_batch(&plan).expect("phases are queued");
+
+        assert_eq!(batch, vec![0, 1]);
+
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        plan.phases[1].status = RunPhaseStatus::Completed;
+        let next = next_queued_batch(&plan).expect("qa phase still queued");
+        assert_eq!(next, vec![2]);
+    }
+
+    #[test]
+    fn next_queued_batch_splits_when_assignment_differs_from_default() {
+        let mut plan = parked_chain();
+        // default, dev, default → three groups of one.
+        plan.phases[1].assigned_agent_id = Some("dev-id".into());
+
+        let first = next_queued_batch(&plan).expect("phases are queued");
+        assert_eq!(first, vec![0]);
+
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        let second = next_queued_batch(&plan).expect("dev phase queued");
+        assert_eq!(second, vec![1]);
+
+        plan.phases[1].status = RunPhaseStatus::Completed;
+        let third = next_queued_batch(&plan).expect("default phase queued");
+        assert_eq!(third, vec![2]);
+    }
+
+    #[test]
+    fn next_queued_batch_regroups_across_a_non_queued_phase() {
+        let mut plan = parked_chain();
+        // Queued set is phases 0 and 2 (1 completed), both dev → one batch,
+        // because grouping is over the eligible list, not raw plan indices.
+        plan.phases[0].assigned_agent_id = Some("dev-id".into());
+        plan.phases[1].status = RunPhaseStatus::Completed;
+        plan.phases[1].assigned_agent_id = None;
+        plan.phases[2].assigned_agent_id = Some("dev-id".into());
+
+        let batch = next_queued_batch(&plan).expect("two phases queued");
+
+        assert_eq!(batch, vec![0, 2]);
+    }
+
+    #[test]
+    fn park_missing_agent_names_the_agent_and_parks_only_policy_dependents() {
+        let mut plan = parked_chain();
+        // phase-b and phase-c depend on phase-a (authored chain); park its
+        // batch for a missing agent under ContinueIndependent.
+        park_missing_agent(&mut plan, &[0], "gone-agent-id");
+
+        assert_eq!(plan.phases[0].status, RunPhaseStatus::Parked);
+        assert!(
+            plan.phases[0]
+                .park_payload
+                .as_deref()
+                .unwrap()
+                .contains("gone-agent-id"),
+            "payload must name the missing agent"
+        );
+        // Dependents park as blocked; that's the authored chain here.
+        assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
+        assert_eq!(plan.phases[2].status, RunPhaseStatus::Parked);
+    }
+
+    #[test]
+    fn park_missing_agent_leaves_independent_phases_queued_under_continue() {
+        let mut plan = parked_chain();
+        // Break the chain: phase-c no longer depends on anything, so only the
+        // batch itself parks and the independent phase stays eligible.
+        plan.phases[2].depends_on.clear();
+
+        park_missing_agent(&mut plan, &[0], "gone-agent-id");
+
+        assert_eq!(plan.phases[0].status, RunPhaseStatus::Parked);
+        assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
+        assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
+        assert!(plan.phases[2].park_payload.is_none());
+    }
+
     #[test]
     fn kill_batch_and_park_batch_apply_to_every_index_in_the_batch() {
         let mut plan = parked_chain();
@@ -2642,6 +2841,7 @@ mod unattended_tests {
             interview: vec![],
             interview_status: InterviewStatus::Answered,
             depends_on: vec![],
+            assigned_agent: None,
             park_payload: None,
             token_usage: 0,
             wall_clock_secs: 0,

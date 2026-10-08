@@ -37,6 +37,10 @@ import type {
 /** Step indicator for the wizard header. */
 const STEPS = ["Phases", "Interviews", "Consent"] as const;
 
+/** Radix Select can't carry an empty string as an item value, so the default
+ *  agent (no per-phase assignment) travels as this sentinel. */
+const DEFAULT_AGENT = "__default__";
+
 /** Queueable (id-bearing, unchecked, not-in-history) loops flattened with
  *  their epic/PRD/phase breadcrumbs, in authored order — the picker list. */
 interface PickerEntry {
@@ -104,6 +108,9 @@ export function PlanTonightWizard({
 }: PlanTonightWizardProps) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [selected, setSelected] = useState<string[]>([]);
+  /** Per-phase agent assignment (prd-role-foundations Phase 4):
+   *  executionId → roster id. Absent = the default agent. */
+  const [agentByPhase, setAgentByPhase] = useState<Record<string, string>>({});
   const [stallPolicy, setStallPolicy] = useState<StallPolicy>("continue_independent");
   const [draftPrAuthorized, setDraftPrAuthorized] = useState(true);
   const [phaseTokenCap, setPhaseTokenCap] = useState("500000");
@@ -117,10 +124,7 @@ export function PlanTonightWizard({
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestionEntry | null>(null);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
-  // Per-phase staffing (prd-role-foundations Phase 4): executionId → roster
-  // agent id. Empty string / missing = the default agent.
   const [roster, setRoster] = useState<NamedAgentConfig[]>([]);
-  const [agentByPhase, setAgentByPhase] = useState<Record<string, string>>({});
 
   const idToTitle = useMemo(() => buildIdToTitle(epics), [epics]);
   const entries = useMemo(() => pickerEntries(epics), [epics]);
@@ -141,6 +145,7 @@ export function PlanTonightWizard({
     if (open) return;
     setStep(1);
     setSelected([]);
+    setAgentByPhase({});
     setDraftPrAuthorized(true);
     setCreating(false);
     setPlan(null);
@@ -151,6 +156,15 @@ export function PlanTonightWizard({
     setConsentConfirmed(false);
     setAgentByPhase({});
   }, [open]);
+
+  const setPhaseAgent = (executionId: string, agentId: string) => {
+    setAgentByPhase((prev) => {
+      const next = { ...prev };
+      if (agentId === DEFAULT_AGENT) delete next[executionId];
+      else next[executionId] = agentId;
+      return next;
+    });
+  };
 
   // While a live interview turn runs, poll the shared pending-question slot
   // so a parked AskUserQuestion renders inline below the running phase row.
@@ -180,10 +194,6 @@ export function PlanTonightWizard({
 
   const toggleSelected = (id: string) => {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  };
-
-  const setPhaseAgent = (id: string, agentId: string) => {
-    setAgentByPhase((prev) => ({ ...prev, [id]: agentId }));
   };
 
   // Sparse staffing payload: only explicitly-assigned phases cross the IPC
@@ -401,6 +411,7 @@ export function PlanTonightWizard({
             <StepConsent
               plan={plan}
               idToTitle={idToTitle}
+              agents={roster}
               consentConfirmed={consentConfirmed}
               setConsentConfirmed={setConsentConfirmed}
               hasPendingInterview={hasPendingInterview}
@@ -532,9 +543,11 @@ function StepPhases({
                   <span className="min-w-0 flex-1">
                     <span className="block text-foreground">{loop.title}</span>
                     {index !== -1 && (
-                      <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                        <span className="mr-1 font-mono">{index + 1}.</span>
-                        {dependencyLabel(index, selected, idToTitle)}
+                      <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
+                        <span>
+                          <span className="mr-1 font-mono">{index + 1}.</span>
+                          {dependencyLabel(index, selected, idToTitle)}
+                        </span>
                       </span>
                     )}
                   </span>
@@ -779,16 +792,19 @@ function StepInterviews({
 function StepConsent({
   plan,
   idToTitle,
+  agents,
   consentConfirmed,
   setConsentConfirmed,
   hasPendingInterview,
 }: {
   plan: RunPlan;
   idToTitle: Record<string, string>;
+  agents: NamedAgentConfig[];
   consentConfirmed: boolean;
   setConsentConfirmed: (v: boolean) => void;
   hasPendingInterview: boolean;
 }) {
+  const idToAgentName = Object.fromEntries(agents.map((a) => [a.id, a.name]));
   return (
     <div className="space-y-4">
       <div>
@@ -802,6 +818,15 @@ function StepConsent({
               <span className="min-w-0 flex-1 truncate text-foreground" title={phase.execution_id}>
                 {idToTitle[phase.execution_id] ?? phase.execution_id}
               </span>
+              {/* Per-role attribution (prd-role-foundations Phase 4). */}
+              {phase.assigned_agent && (
+                <span
+                  className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                  title={phase.assigned_agent}
+                >
+                  {idToAgentName[phase.assigned_agent] ?? phase.assigned_agent}
+                </span>
+              )}
               <span className="shrink-0 text-[10px] text-muted-foreground">
                 {phase.assigned_agent_name ?? "default agent"}
               </span>
