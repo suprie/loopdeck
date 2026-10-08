@@ -222,3 +222,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Codex could ask a blocking question as ordinary assistant prose even when the `request_user_input` capability was enabled, leaving LoopDeck with no structured event from which to render a popup.
 - **Consequences**: The first Codex task prompt now includes a concise interaction contract requiring `request_user_input` for decisions needed before continuing. Role charters remain first, and the guidance is injected only once per session.
+
+## 2026-10-08 — Keep Codex integration fixtures aligned with Code Mode transport
+- **Status**: accepted
+- **Context**: PR CI failed because the charter-injection fixture still published the retired WebSocket endpoint after production Code Mode moved to local gRPC/HTTP endpoint validation; strict Clippy also caught an unnecessary borrow.
+- **Consequences**: The fixture now publishes a local gRPC endpoint and the launcher uses the clippy-clean `StdCommand::new(binary)` form. Full serialized Rust tests pass.

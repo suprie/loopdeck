@@ -109,3 +109,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Added first-turn Codex interaction guidance and regression tests so questions requiring user input use LoopDeck's structured question bridge instead of prose-only messages.
+
+### 2026-10-08 — Repair PR CI after Code Mode transport update
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Fixed the stale WebSocket endpoint in the charter-injection fixture and removed a strict-Clippy needless borrow. Serialized Rust tests: 668 passed, 9 ignored.

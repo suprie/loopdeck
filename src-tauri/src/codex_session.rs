@@ -1006,7 +1006,7 @@ impl Drop for CodexSession {
 /// app-server's implicit sibling-binary lookup. The host executes Code Mode
 /// cells and delegates nested `tools.*` calls to Codex's normal executor.
 fn spawn_code_mode_host_binary(binary: &Path) -> Result<(StdChild, String), AppError> {
-    let mut child = StdCommand::new(&binary)
+    let mut child = StdCommand::new(binary)
         .arg("--listen")
         .arg("grpc://127.0.0.1:0")
         .stdout(Stdio::piped())

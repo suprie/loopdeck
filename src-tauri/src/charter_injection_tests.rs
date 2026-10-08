@@ -91,7 +91,7 @@ const FAKE_CODEX: &str = concat!(
 /// is even started, so the fixture directory must provide it.
 const FAKE_CODE_MODE_HOST: &str = concat!(
     "#!/bin/sh\n",
-    "printf 'ws://127.0.0.1:1\\n'\n",
+    "printf 'grpc://127.0.0.1:1\\n'\n",
     "exec sleep 300\n",
 );
 
