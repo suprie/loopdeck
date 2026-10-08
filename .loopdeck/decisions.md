@@ -1,6 +1,6 @@
 # Decisions
 
-_Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
+_Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
 
 ## 2026-09-01 — Role charter rides AgentConfig through one spawn choke point
 - **Status**: accepted
@@ -184,3 +184,13 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: prd-handoff-spike needed evidence that a prompt-text-only consumer session reliably reads, respects, and cites an upstream file artifact.
 - **Consequences**: Contract adopted at docs/epics/role-based-orchestration/handoff-artifact-contract.md; the spike run cited 17/17 artifact parts with no drift, truncation, or ignored input — GO recorded in prd-agent-handoff's Design section.
+
+## 2026-10-08 — Track Rust Atomic API renames
+- **Status**: accepted
+- **Context**: CI treats deprecations as errors, and the current Rust toolchain renamed `Atomic<u64>::fetch_update` to `try_update`.
+- **Consequences**: Token-budget accounting now uses `try_update` while preserving the existing saturating increment behavior.
+
+## 2026-10-08 — Keep Codex handshake fixtures current
+- **Status**: accepted
+- **Context**: The Codex charter-injection fixture stopped before `turn/start` because production now queries collaboration modes and models during initialization.
+- **Consequences**: The fake app-server answers `collaborationMode/list` and `model/list` alongside the existing handshake methods.

@@ -10,11 +10,14 @@
 //! (see `run_executor.rs`'s module docs).
 
 use super::agent::{
-    mark_turn_terminal, start_fresh_and_record_streaming,
-    start_fresh_and_record_streaming_in_root_with_config,
+    mark_turn_terminal, start_fresh_and_record_streaming_in_root,
+    start_fresh_and_record_streaming_in_root_with_config, StreamingRunOptions,
 };
-use super::state::{fire_interrupt, resolve_agent_config_by_id, resolve_root, AppState};
-use crate::agents::{ClaudeEvent, TokenBudget};
+use super::state::{
+    fire_interrupt, resolve_agent_config, resolve_agent_config_by_id, resolve_root, AppState,
+};
+use crate::agents::{AskUserQuestionSpec, ClaudeEvent, TokenBudget};
+use crate::config::AgentHarness;
 use crate::delivery;
 use crate::delivery_retry;
 use crate::epic;
@@ -24,7 +27,8 @@ use crate::git;
 use crate::handoff;
 use crate::limits;
 use crate::run_executor::{
-    self, build_batch_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
+    self, build_batch_interview_prompt, build_codex_batch_interview_prompt,
+    build_codex_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
     extract_batch_interview_answers, extract_draft_pr_url, extract_interview_answers,
     extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
@@ -1262,10 +1266,10 @@ fn park_missing_agent(plan: &mut RunPlan, batch: &[usize], agent_id: &str) {
 /// session driven through the *streaming* pipeline
 /// (`start_fresh_and_record_streaming`, no-op sink `Channel`, same trick
 /// Phase 4's executor uses). This is load-bearing, not cosmetic: per
-/// `claude_session.rs::answer_ask_user_question`'s own doc comment, an
-/// `AskUserQuestion` on the *non*-streaming path (`channel: None`) has no UI
+/// `claude_session.rs::answer_ask_user_question`'s own doc comment, a
+/// user-input request on the *non*-streaming path (`channel: None`) has no UI
 /// surface to answer from and is auto-denied immediately instead of parking —
-/// exactly the tool call `build_interview_prompt` tells the agent to make. A
+/// exactly the request the harness-specific interview prompt tells the agent to make. A
 /// channel merely being present (its callback can be a no-op) is what lets
 /// `answer_control_request` park on the shared `question_slot` instead of
 /// taking that deny branch; the pending card then surfaces through the
@@ -1305,14 +1309,28 @@ pub async fn run_phase_interview(
         ))
     })?;
 
-    let prompt = build_interview_prompt(&execution_id, &loc);
+    let prompt = match resolve_agent_config(&state)?.harness {
+        AgentHarness::Claude => build_interview_prompt(&execution_id, &loc),
+        AgentHarness::Codex => build_codex_interview_prompt(&execution_id, &loc),
+    };
     // No-op sink: nothing here needs to narrate turn events to a UI channel —
-    // only the channel's *presence* matters, so a parked AskUserQuestion is
+    // only the channel's *presence* matters, so a parked user question is
     // answerable instead of auto-denied (see this fn's doc comment).
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-    let response =
-        start_fresh_and_record_streaming(&state, &root, &prompt, Some(loc.title.clone()), &channel)
-            .await?;
+    let response = start_fresh_and_record_streaming_in_root(
+        &state,
+        &root,
+        &root,
+        &prompt,
+        Some(loc.title.clone()),
+        &channel,
+        // Codex's native `requestUserInput` is available in its normal
+        // collaboration mode. Its optional Plan preset is not present in
+        // every Codex configuration, so do not make asking a pre-flight
+        // question depend on that separate capability.
+        StreamingRunOptions::default(),
+    )
+    .await?;
     let answers = extract_interview_answers(&response.result);
 
     // Reload rather than reuse the plan loaded before the (possibly long)
@@ -1329,6 +1347,15 @@ pub async fn run_phase_interview(
                 "phase \"{execution_id}\" was removed from the run plan during its interview"
             ))
         })?;
+    let unavailable_questions = unavailable_codex_questions(&answers);
+    if !unavailable_questions.is_empty() {
+        let payload = preflight_question_payload(&unavailable_questions)?;
+        let phase = &mut plan.phases[idx];
+        phase.status = RunPhaseStatus::Parked;
+        phase.park_payload = Some(payload);
+        runplan::save(&root, &plan)?;
+        return Ok(plan);
+    }
     plan.phases[idx].interview = answers;
     plan.phases[idx].interview_status = InterviewStatus::Answered;
     runplan::save(&root, &plan)?;
@@ -1391,14 +1418,21 @@ pub async fn run_batch_phase_interviews(
         phases.push((execution_id.clone(), loc));
     }
 
-    let prompt = build_batch_interview_prompt(&phases);
+    let prompt = match resolve_agent_config(&state)?.harness {
+        AgentHarness::Claude => build_batch_interview_prompt(&phases),
+        AgentHarness::Codex => build_codex_batch_interview_prompt(&phases),
+    };
     let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
-    let response = start_fresh_and_record_streaming(
+    let response = start_fresh_and_record_streaming_in_root(
         &state,
+        &root,
         &root,
         &prompt,
         Some(format!("Pre-flight interview ({} phases)", phases.len())),
         &channel,
+        // See the single-phase interview above: use Codex's native input
+        // request without requiring the optional Plan collaboration preset.
+        StreamingRunOptions::default(),
     )
     .await?;
     let answers_by_phase = extract_batch_interview_answers(&response.result);
@@ -1415,14 +1449,55 @@ pub async fn run_batch_phase_interviews(
                     "phase \"{execution_id}\" was removed from the run plan during its interview"
                 ))
             })?;
-        phase.interview = answers_by_phase
+        let answers = answers_by_phase
             .get(&execution_id)
             .cloned()
             .unwrap_or_default();
-        phase.interview_status = InterviewStatus::Answered;
+        let unavailable_questions = unavailable_codex_questions(&answers);
+        if unavailable_questions.is_empty() {
+            phase.interview = answers;
+            phase.interview_status = InterviewStatus::Answered;
+        } else {
+            phase.status = RunPhaseStatus::Parked;
+            phase.park_payload = Some(preflight_question_payload(&unavailable_questions)?);
+        }
     }
     runplan::save(&root, &plan)?;
     Ok(plan)
+}
+
+/// A Codex model may report that its native input request is unavailable in
+/// the current collaboration mode. That is not an answer: preserve the
+/// question as a standard parked card, where the user can answer it and
+/// requeue the phase without losing the pre-flight decision.
+fn unavailable_codex_questions(
+    answers: &[crate::runplan::PinnedAnswer],
+) -> Vec<AskUserQuestionSpec> {
+    answers
+        .iter()
+        .filter(|answer| {
+            let text = answer.answer.to_ascii_lowercase();
+            text.contains("native input request unavailable")
+                || text.contains("askuserquestion unavailable")
+        })
+        .map(|answer| AskUserQuestionSpec {
+            question: answer.question.clone(),
+            header: "Pre-flight question".into(),
+            // The card's built-in Other field accepts the user's free-text
+            // response when Codex could not supply selectable options.
+            options: Vec::new(),
+            multi_select: false,
+        })
+        .collect()
+}
+
+fn preflight_question_payload(questions: &[AskUserQuestionSpec]) -> Result<String, AppError> {
+    let encoded = serde_json::to_string(questions).map_err(|error| {
+        AppError::RunPlan(format!("failed to encode pre-flight question: {error}"))
+    })?;
+    Ok(format!(
+        "__QUESTIONS__{encoded}__END__ Codex needs your pre-flight answer before this phase can run."
+    ))
 }
 
 /// Explicitly skip a queued phase's pre-flight interview — no session is
@@ -1709,6 +1784,7 @@ async fn execute_run(
             agent_config.as_ref(),
             None,
             true,
+            false,
         );
         let outcome = match race_with_watchdog(watchdog_timeout, turn).await {
             WatchdogOutcome::Completed(result) => result,
@@ -2105,6 +2181,21 @@ fn finalize_worktree(plan: &mut RunPlan) {
 mod unattended_tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn unavailable_codex_input_is_preserved_as_a_parked_question() {
+        let questions = unavailable_codex_questions(&[crate::runplan::PinnedAnswer {
+            question: "Which existing roster entries should the unattended demo use?".into(),
+            answer: "(unanswered — native input request unavailable in this mode)".into(),
+        }]);
+
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].header, "Pre-flight question");
+        assert!(questions[0].options.is_empty());
+        let payload = preflight_question_payload(&questions).expect("payload");
+        assert!(payload.starts_with("__QUESTIONS__["));
+        assert!(payload.contains("__END__"));
+    }
 
     fn plan() -> RunPlan {
         run_executor::build_run_plan(
