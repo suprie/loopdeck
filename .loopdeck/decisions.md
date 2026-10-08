@@ -1,6 +1,26 @@
 # Decisions
 
-_Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
+_Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
+
+## 2026-10-08 — Shared generated brand assets are used across web and desktop
+- **Status**: accepted
+- **Context**: The beta site needed a product visual and the desktop app needed a consistent app icon.
+- **Consequences**: Added the supplied dashboard image and icon under `website/assets/`; wired the image into the Selasar site hero, favicon to the icon, and Tauri PNG bundle sizes to the same icon source.
+
+## 2026-10-08 — Product visual is transparent outside the app frame
+- **Status**: accepted
+- **Context**: The supplied product screenshot had an opaque background that fought the website’s dark theme.
+- **Consequences**: Replaced it with a transparent-background edit so the Selasar app frame blends into the dark site while preserving the existing product composition.
+
+## 2026-10-08 — Selasar icon has transparent outer corners
+- **Status**: accepted
+- **Context**: The generated icon included a white square outside its rounded dark tile, which looked wrong on dark surfaces.
+- **Consequences**: Replaced the website favicon and regenerated all Tauri platform icon assets from a transparent-corner version.
+
+## 2026-10-08 — Marketing workflow uses real app actions, not an invented CLI
+- **Status**: accepted
+- **Context**: The first website draft showed `loopdeck run --next`, but the repository has no such command.
+- **Consequences**: The workflow copy now uses the actual desktop actions: scan workspace, import project, and start loop; implementation reference is `agent_start_loop[_streaming]`.
 
 ## 2026-09-01 — Role charter rides AgentConfig through one spawn choke point
 - **Status**: accepted
@@ -185,10 +205,28 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: prd-handoff-spike needed evidence that a prompt-text-only consumer session reliably reads, respects, and cites an upstream file artifact.
 - **Consequences**: Contract adopted at docs/epics/role-based-orchestration/handoff-artifact-contract.md; the spike run cited 17/17 artifact parts with no drift, truncation, or ignored input — GO recorded in prd-agent-handoff's Design section.
 
-## 2026-09-05 — Per-phase agent assignment: staffing fields on RunPhase, executor honors them, report attributes by role
+## 2026-10-08 — Enable Codex default-mode user questions
 - **Status**: accepted
-- **Context**: `prd-role-foundations` Phase 4, loops `phase-assignment-model` + `phase-assignment-exec` + `role-demo`. Pre-answered clarifications (unattended run): unassigned phases stay valid on the default agent (ADR-3 migration stance); a missing roster entry at execution time parks the batch (user-repairable config error, recoverable via requeue) rather than failing the run or silently falling back; the demo proves attribution through persisted report fields with a deterministic harness (fake child binaries capturing argv), not a live provider.
-- **Consequences**: `RunPhase` gains `assigned_agent_id` + `assigned_agent_name` (both `serde(default)`-optional, so pre-assignment `run-plan.yaml` files load unchanged); `PhaseAgentAssignment` is the sparse IPC payload, validated by `create_run_plan` against the roster (name captured at queue time for durable attribution). `next_queued_batch` returns the maximal prefix of queued phases sharing one staffing — a staffing change splits the combined turn (dev builds, then QA verifies), while all-unassigned plans keep the single-turn behaviour. `execute_run` resolves each batch via `resolve_agent_config_by_id` (default agent when unassigned) and spawns through `start_fresh_and_record_streaming_in_root_with_config`; pre-flight interviews run with the phase's assigned agent too. `PhaseReportEntry.assigned_agent_name` carries attribution into the morning report (new Agent column). Demo: `role_assignment_tests.rs`.
+- **Context**: Codex turns launched by LoopDeck could not call `request_user_input` because the Codex app-server feature was disabled, even though LoopDeck already implemented the parked-question bridge and UI.
+- **Consequences**: The Codex app-server is launched with `default_mode_request_user_input` enabled, allowing normal coding turns to emit `item/tool/requestUserInput` while preserving LoopDeck's existing approval and sandbox policy.
+- **Follow-up**: Code Mode remains opportunistic; if the npm package lacks `codex-code-mode-host`, LoopDeck starts the regular app-server instead of blocking agent startup.
+- **Follow-up**: Codex 0.161's bundled host requires the local gRPC transport (`grpc://127.0.0.1:<port>`); LoopDeck now launches and validates that transport instead of the older WebSocket form.
+- **Follow-up**: Codex 0.161 may publish the resulting local host as `http://127.0.0.1:<port>`; the validator accepts both local gRPC and local HTTP endpoint forms, while rejecting non-loopback addresses.
+
+## 2026-10-08 — Deduplicate multi-agent header chips
+- **Status**: accepted
+- **Context**: The Agent header flattened sub-runs from the three most recent multi-agent runs, so one profile named `Default` appeared three times even though the roster had one profile.
+- **Consequences**: The compact header now shows one chip per agent profile, keeping the newest sub-run for status and controls; full historical runs remain available through History.
+
+## 2026-10-08 — Guide Codex prose questions into LoopDeck question cards
+- **Status**: accepted
+- **Context**: Codex could ask a blocking question as ordinary assistant prose even when the `request_user_input` capability was enabled, leaving LoopDeck with no structured event from which to render a popup.
+- **Consequences**: The first Codex task prompt now includes a concise interaction contract requiring `request_user_input` for decisions needed before continuing. Role charters remain first, and the guidance is injected only once per session.
+
+## 2026-10-08 — Keep Codex integration fixtures aligned with Code Mode transport
+- **Status**: accepted
+- **Context**: PR CI failed because the charter-injection fixture still published the retired WebSocket endpoint after production Code Mode moved to local gRPC/HTTP endpoint validation; strict Clippy also caught an unnecessary borrow.
+- **Consequences**: The fixture now publishes a local gRPC endpoint and the launcher uses the clippy-clean `StdCommand::new(binary)` form. Full serialized Rust tests pass.
 
 ## 2026-10-08 — Track Rust Atomic API renames
 - **Status**: accepted
@@ -199,3 +237,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: The Codex charter-injection fixture stopped before `turn/start` because production now queries collaboration modes and models during initialization.
 - **Consequences**: The fake app-server answers `collaborationMode/list` and `model/list` alongside the existing handshake methods.
+
+## 2026-10-08 — Box provider sessions in the harness enum
+- **Status**: accepted
+- **Context**: Strict Clippy rejected `HarnessSession` because concrete Claude and Codex session variants have materially different sizes.
+- **Consequences**: Both provider sessions are heap-allocated inside `HarnessSession`, reducing enum size while preserving the existing provider delegation API.

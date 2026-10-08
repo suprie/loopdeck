@@ -89,6 +89,26 @@ export function patchMultiAgentRun(
   });
 }
 
+/**
+ * Keep one visible chip per agent profile. The history list may contain the
+ * same profile in several recent runs; showing every historical sub-run makes
+ * one profile look like duplicate agents in the compact header.
+ */
+export function uniqueRecentSubRuns(
+  runs: MultiAgentRun[],
+): Array<{ run: MultiAgentRun; subRun: MultiAgentSubRun }> {
+  const seenAgentIds = new Set<string>();
+  const recent: Array<{ run: MultiAgentRun; subRun: MultiAgentSubRun }> = [];
+  for (const run of runs.slice(0, 3)) {
+    for (const subRun of run.sub_runs) {
+      if (seenAgentIds.has(subRun.agent_id)) continue;
+      seenAgentIds.add(subRun.agent_id);
+      recent.push({ run, subRun });
+    }
+  }
+  return recent;
+}
+
 /** Select profiles and monitor each isolated worktree sub-run independently. */
 export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
   const setError = useAppStore((state) => state.setError);
@@ -258,9 +278,7 @@ export function MultiAgentRuns({ projectPath }: MultiAgentRunsProps) {
     }
   }, [projectPath, setError]);
 
-  const recentSubRuns = runs.slice(0, 3).flatMap((run) =>
-    run.sub_runs.map((subRun) => ({ run, subRun })),
-  );
+  const recentSubRuns = uniqueRecentSubRuns(runs);
 
   return (
     <section className="mb-2 flex shrink-0 items-center gap-2 border-b border-border pb-2 text-xs">

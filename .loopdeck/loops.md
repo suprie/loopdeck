@@ -4,23 +4,37 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Started**: 2026-09-05
-- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phase 4 — three loops in one unattended run: `phase-assignment-model` (`RunPhase.assigned_agent_id`/`assigned_agent_name` + sparse `PhaseAgentAssignment` payload validated by `create_run_plan` + per-phase agent picker in `PlanTonightWizard`), `phase-assignment-exec` (`next_queued_batch` staffing split; `execute_run` spawns each batch through `resolve_agent_config_by_id` → `start_fresh_and_record_streaming_in_root_with_config`; missing roster entry parks the batch; interviews use the phase's agent), `role-demo` (`role_assignment_tests.rs` — deterministic two-phase dev/QA plan, per-role charter argv capture, report attribution).
+- **Started**: 2026-09-01
+- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phases 2-3 — three loops done in one unattended run: charter injection across spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
 - **Status**: completed
 
 ## Next Steps
+- [ ] Review and publish the new beta corporate site in `website/`
+- [ ] Confirm the generated product screenshot’s text artifacts are acceptable for public beta branding
+- [ ] Review the transparent product visual on the dark website background
+- [ ] Review the transparent-corner Selasar icon at small sizes
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/102
-- [ ] Review & merge the draft PR for this run: https://github.com/suprie/loopdeck/pull/106
+- [ ] Review & merge the draft PR for this run (see final chat message for URL)
 - [ ] Review & merge the night-run Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
 - [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through the night variant, into the morning report (verdicts/parked/kills match the actual `RunReport`)
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
 
-### 2026-09-05 — prd-role-foundations Phase 4 (phase-assignment-model, phase-assignment-exec, role-demo)
+### 2026-10-08 — Product visual and app icon integration
 - **Status**: completed
-- **Completed**: 2026-09-05
-- **Summary**: per-phase agent assignment end to end — plan staffing fields + wizard picker, executor spawns with the assigned agent (staffing change splits the combined turn; missing roster entry parks), morning-report Agent attribution column, deterministic two-phase dev/QA demo test. Detail: decisions.md 2026-09-05 entry.
+- **Completed**: 2026-10-08
+- **Summary**: Added the supplied dashboard screenshot to the site hero and reused the supplied icon for the website favicon and Tauri PNG bundle assets.
+
+### 2026-10-08 — Transparent dark-mode product visual
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Edited the product screenshot so the area outside the app frame is transparent and blends with the site’s dark background.
+
+### 2026-10-08 — Transparent-corner Selasar icon
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Removed the icon’s white outer corners and regenerated the favicon plus Tauri PNG, ICO, ICNS, Windows, iOS, and Android assets.
 
 ### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
 - **Status**: completed
@@ -78,6 +92,29 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Completed**: 2026-08-12
 - **Summary**: Project rail with all 4 loop-domain doors. Detail: `loops-archive.md` 2026-08-30 appendix.
 
+### 2026-10-08 — Codex interactive questions
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Enabled Codex's `default_mode_request_user_input` app-server feature and added a regression test for the spawned argument contract; the existing LoopDeck question bridge remains responsible for rendering and answering prompts.
+- **Follow-up**: Added a startup fallback for Codex installations without the optional Code Mode sidecar.
+- **Follow-up**: Updated Code Mode host startup from WebSocket to the gRPC transport used by Codex 0.161 and added endpoint-safety tests.
+- **Follow-up**: Accepted Codex 0.161's loopback HTTP endpoint output and expanded endpoint-safety coverage.
+
+### 2026-10-08 — Deduplicate repeated Default agent chips
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Multi-agent header chips are now deduplicated by profile ID across recent runs; historical sub-runs remain accessible in History.
+
+### 2026-10-08 — Route Codex blocking questions to the popup
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Added first-turn Codex interaction guidance and regression tests so questions requiring user input use LoopDeck's structured question bridge instead of prose-only messages.
+
+### 2026-10-08 — Repair PR CI after Code Mode transport update
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Fixed the stale WebSocket endpoint in the charter-injection fixture and removed a strict-Clippy needless borrow. Serialized Rust tests: 668 passed, 9 ignored.
+
 ### 2026-10-08 — Fix Rust deprecation CI failure
 - **Status**: completed
 - **Completed**: 2026-10-08
@@ -87,3 +124,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Updated the fake Codex handshake for collaboration-mode and model discovery; the targeted charter test passes.
+
+### 2026-10-08 — Fix strict Clippy harness variant sizing
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Boxed both concrete provider sessions in `HarnessSession` and updated delegation to satisfy `large_enum_variant`; CI-style Clippy and the Rust library suite pass.
