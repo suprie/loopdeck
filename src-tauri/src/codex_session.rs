@@ -166,6 +166,7 @@ impl CodexSession {
 
     /// Codex Plan collaboration mode is used for interactive interviews;
     /// ordinary agent turns remain in the default mode.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
