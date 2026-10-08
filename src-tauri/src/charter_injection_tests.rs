@@ -80,7 +80,7 @@ const FAKE_CODEX: &str = concat!(
     "  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n",
     "  method=$(printf '%s' \"$line\" | sed -n 's/.*\"method\":\"\\([^\"]*\\)\".*/\\1/p' | head -n 1)\n",
     "  case \"$method\" in\n",
-    "    initialize) printf '{\"id\":%s,\"result\":{}}\\n' \"$id\" ;;\n",
+    "    initialize|collaborationMode/list|model/list) printf '{\"id\":%s,\"result\":{}}\\n' \"$id\" ;;\n",
     "    thread/start|thread/resume) printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"fake-thread\"}}}\\n' \"$id\" ;;\n",
     "  esac\n",
     "done\n",

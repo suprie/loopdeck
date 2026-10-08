@@ -189,3 +189,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: CI treats deprecations as errors, and the current Rust toolchain renamed `Atomic<u64>::fetch_update` to `try_update`.
 - **Consequences**: Token-budget accounting now uses `try_update` while preserving the existing saturating increment behavior.
+
+## 2026-10-08 — Keep Codex handshake fixtures current
+- **Status**: accepted
+- **Context**: The Codex charter-injection fixture stopped before `turn/start` because production now queries collaboration modes and models during initialization.
+- **Consequences**: The fake app-server answers `collaborationMode/list` and `model/list` alongside the existing handshake methods.
