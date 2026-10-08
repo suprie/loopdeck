@@ -37,9 +37,18 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// A graceful Stop should complete quickly. If app-server itself is wedged,
 /// waiting forever would leave the project locked in "Agent is working".
 const INTERRUPT_GRACE_TIMEOUT: Duration = Duration::from_secs(15);
-/// The official Code Mode sidecar publishes its ephemeral localhost endpoint
-/// on stdout before accepting the app-server connection.
+/// The official Code Mode sidecar publishes its ephemeral localhost gRPC
+/// endpoint on stdout before accepting the app-server connection.
 const CODE_MODE_HOST_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// Codex only exposes `request_user_input` in Default mode when this feature
+/// is enabled. LoopDeck owns the question UI, so enable it in the app-server
+/// rather than requiring users to edit their Codex config manually.
+const DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE: &str = "default_mode_request_user_input";
+/// Codex app-server has no system-prompt override, so give the model a small
+/// interaction contract in the first task prompt. Without this, it may ask a
+/// blocking question as ordinary prose, which cannot be rendered as a
+/// LoopDeck question card.
+const CODEX_INTERACTION_GUIDANCE: &str = "When you need an answer or decision from the user before you can continue, use the request_user_input tool. Do not ask a blocking question only in ordinary prose.";
 /// Tool arguments are diagnostic data and can be large (notably Code Mode
 /// JavaScript cells). Keep logs useful without allowing a single request to
 /// consume an unbounded amount of the rolling application log.
@@ -82,16 +91,25 @@ impl CodexSession {
             "spawning Codex app-server harness"
         );
 
-        let (code_mode_host, code_mode_host_url) = spawn_code_mode_host(binary)?;
+        // Code Mode is optional in the npm distribution. The regular app-server
+        // (including request_user_input) must remain usable when the optional
+        // sidecar package is not installed.
+        let code_mode_host = match code_mode_host_binary(binary) {
+            Ok(host_binary) => Some(spawn_code_mode_host_binary(&host_binary)?),
+            Err(error) => {
+                tracing::warn!(
+                    target: "loopdeck::codex",
+                    "Codex Code Mode host unavailable; continuing without Code Mode: {error}"
+                );
+                None
+            }
+        };
+        let code_mode_host_url = code_mode_host
+            .as_ref()
+            .map(|(_, endpoint)| endpoint.as_str());
         let mut command = Command::new(binary);
         command
-            .arg("app-server")
-            .arg("--enable")
-            .arg("code_mode_host")
-            .arg("--code-mode-host")
-            .arg(&code_mode_host_url)
-            .arg("--listen")
-            .arg("stdio://")
+            .args(app_server_args(code_mode_host_url))
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -101,8 +119,9 @@ impl CodexSession {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                let mut code_mode_host = code_mode_host;
-                terminate_code_mode_host(&mut code_mode_host);
+                if let Some((mut code_mode_host, _)) = code_mode_host {
+                    terminate_code_mode_host(&mut code_mode_host);
+                }
                 return Err(AppError::Agent(format!(
                     "failed to start Codex app-server: {error}"
                 )));
@@ -129,7 +148,7 @@ impl CodexSession {
 
         Ok(Self {
             child: Some(child),
-            code_mode_host: Some(code_mode_host),
+            code_mode_host: code_mode_host.map(|(child, _)| child),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             stderr_drain: Some(stderr_drain),
@@ -302,10 +321,7 @@ impl CodexSession {
         // Charter injection: a pending charter (set at spawn) is prepended to
         // this first task prompt — role identity first, task second. Consumed
         // on take, so subsequent turns on the same thread don't repeat it.
-        let text = match self.charter_prompt.take() {
-            Some(charter) => format!("{charter}\n\n{text}"),
-            None => text.to_string(),
-        };
+        let text = first_turn_prompt(self.charter_prompt.take(), text);
         let params = turn_start_params(
             &thread_id,
             &text,
@@ -989,11 +1005,10 @@ impl Drop for CodexSession {
 /// Launch Codex's bundled V8 host explicitly instead of relying on the
 /// app-server's implicit sibling-binary lookup. The host executes Code Mode
 /// cells and delegates nested `tools.*` calls to Codex's normal executor.
-fn spawn_code_mode_host(codex_binary: &Path) -> Result<(StdChild, String), AppError> {
-    let binary = code_mode_host_binary(codex_binary)?;
+fn spawn_code_mode_host_binary(binary: &Path) -> Result<(StdChild, String), AppError> {
     let mut child = StdCommand::new(&binary)
         .arg("--listen")
-        .arg("ws://127.0.0.1:0")
+        .arg("grpc://127.0.0.1:0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1043,13 +1058,17 @@ fn spawn_code_mode_host(codex_binary: &Path) -> Result<(StdChild, String), AppEr
             ));
         }
     };
-    if !endpoint.starts_with("ws://127.0.0.1:") {
+    if !is_safe_code_mode_endpoint(&endpoint) {
         terminate_code_mode_host(&mut child);
         return Err(AppError::Agent(format!(
             "Codex Code Mode host published an unsafe endpoint: {endpoint}"
         )));
     }
     Ok((child, endpoint))
+}
+
+fn is_safe_code_mode_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("grpc://127.0.0.1:") || endpoint.starts_with("http://127.0.0.1:")
 }
 
 fn terminate_code_mode_host(child: &mut StdChild) {
@@ -1219,6 +1238,15 @@ fn codex_questions(params: &Value) -> Vec<AskUserQuestionSpec> {
         .collect()
 }
 
+fn first_turn_prompt(charter: Option<String>, task: &str) -> String {
+    match charter {
+        Some(charter) => {
+            format!("{charter}\n\n## LoopDeck interaction\n{CODEX_INTERACTION_GUIDANCE}\n\n{task}")
+        }
+        None => format!("## LoopDeck interaction\n{CODEX_INTERACTION_GUIDANCE}\n\n{task}"),
+    }
+}
+
 fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     match item.get("type")?.as_str()? {
         "commandExecution" => Some((
@@ -1273,6 +1301,28 @@ fn initialize_params() -> Value {
         },
         "capabilities": { "experimentalApi": false }
     })
+}
+
+/// Build the Codex app-server arguments owned by LoopDeck.
+///
+/// The feature is enabled on the app-server process itself so Default-mode
+/// turns can use Codex's native `request_user_input` tool.
+fn app_server_args(code_mode_host_url: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "app-server".into(),
+        "--enable".into(),
+        DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE.into(),
+    ];
+    if let Some(url) = code_mode_host_url {
+        args.extend([
+            "--enable".into(),
+            "code_mode_host".into(),
+            "--code-mode-host".into(),
+            url.into(),
+        ]);
+    }
+    args.extend(["--listen".into(), "stdio://".into()]);
+    args
 }
 
 /// Build the per-turn security boundary and optional model overrides.
@@ -1462,6 +1512,26 @@ mod tests {
     }
 
     #[test]
+    fn first_turn_prompt_requires_structured_user_questions() {
+        let prompt = first_turn_prompt(None, "Inspect the repository.");
+
+        assert!(prompt.contains(CODEX_INTERACTION_GUIDANCE));
+        assert!(prompt.ends_with("Inspect the repository."));
+    }
+
+    #[test]
+    fn first_turn_prompt_keeps_charter_before_interaction_guidance() {
+        let prompt =
+            first_turn_prompt(Some("You are the planning agent.".into()), "Plan the work.");
+
+        assert!(prompt.starts_with("You are the planning agent."));
+        assert!(
+            prompt.find(CODEX_INTERACTION_GUIDANCE).unwrap()
+                < prompt.find("Plan the work.").unwrap()
+        );
+    }
+
+    #[test]
     fn request_ids_preserve_strings_and_numbers() {
         assert_eq!(display_request_id(&json!("req-1")), "req-1");
         assert_eq!(display_request_id(&json!(42)), "42");
@@ -1473,6 +1543,37 @@ mod tests {
 
         assert_eq!(params["clientInfo"]["name"], "loopdeck");
         assert_eq!(params["capabilities"]["experimentalApi"], false);
+    }
+
+    #[test]
+    fn app_server_enables_default_mode_user_questions() {
+        let args = app_server_args(Some("http://127.0.0.1:1234"));
+
+        assert_eq!(
+            args,
+            vec![
+                "app-server",
+                "--enable",
+                "default_mode_request_user_input",
+                "--enable",
+                "code_mode_host",
+                "--code-mode-host",
+                "http://127.0.0.1:1234",
+                "--listen",
+                "stdio://",
+            ]
+        );
+
+        assert_eq!(
+            app_server_args(None),
+            vec![
+                "app-server",
+                "--enable",
+                "default_mode_request_user_input",
+                "--listen",
+                "stdio://",
+            ]
+        );
     }
 
     #[test]
@@ -1524,6 +1625,15 @@ mod tests {
         );
 
         std::fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn accepts_only_local_code_mode_endpoints() {
+        assert!(is_safe_code_mode_endpoint("grpc://127.0.0.1:43127"));
+        assert!(is_safe_code_mode_endpoint("http://127.0.0.1:43127"));
+        assert!(!is_safe_code_mode_endpoint("ws://127.0.0.1:43127"));
+        assert!(!is_safe_code_mode_endpoint("grpc://localhost:43127"));
+        assert!(!is_safe_code_mode_endpoint("grpc://192.168.1.10:43127"));
     }
 
     #[test]

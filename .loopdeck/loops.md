@@ -9,6 +9,10 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 
 ## Next Steps
+- [ ] Review and publish the new beta corporate site in `website/`
+- [ ] Confirm the generated product screenshot’s text artifacts are acceptable for public beta branding
+- [ ] Review the transparent product visual on the dark website background
+- [ ] Review the transparent-corner Selasar icon at small sizes
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/102
 - [ ] Review & merge the draft PR for this run (see final chat message for URL)
 - [ ] Review & merge the night-run Phase 3 draft PR: https://github.com/suprie/loopdeck/pull/92
@@ -16,6 +20,21 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-08 — Product visual and app icon integration
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Added the supplied dashboard screenshot to the site hero and reused the supplied icon for the website favicon and Tauri PNG bundle assets.
+
+### 2026-10-08 — Transparent dark-mode product visual
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Edited the product screenshot so the area outside the app frame is transparent and blends with the site’s dark background.
+
+### 2026-10-08 — Transparent-corner Selasar icon
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Removed the icon’s white outer corners and regenerated the favicon plus Tauri PNG, ICO, ICNS, Windows, iOS, and Android assets.
 
 ### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
 - **Status**: completed
@@ -72,3 +91,21 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-08-12
 - **Summary**: Project rail with all 4 loop-domain doors. Detail: `loops-archive.md` 2026-08-30 appendix.
+
+### 2026-10-08 — Codex interactive questions
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Enabled Codex's `default_mode_request_user_input` app-server feature and added a regression test for the spawned argument contract; the existing LoopDeck question bridge remains responsible for rendering and answering prompts.
+- **Follow-up**: Added a startup fallback for Codex installations without the optional Code Mode sidecar.
+- **Follow-up**: Updated Code Mode host startup from WebSocket to the gRPC transport used by Codex 0.161 and added endpoint-safety tests.
+- **Follow-up**: Accepted Codex 0.161's loopback HTTP endpoint output and expanded endpoint-safety coverage.
+
+### 2026-10-08 — Deduplicate repeated Default agent chips
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Multi-agent header chips are now deduplicated by profile ID across recent runs; historical sub-runs remain accessible in History.
+
+### 2026-10-08 — Route Codex blocking questions to the popup
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Added first-turn Codex interaction guidance and regression tests so questions requiring user input use LoopDeck's structured question bridge instead of prose-only messages.
