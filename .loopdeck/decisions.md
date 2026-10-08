@@ -237,3 +237,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: The Codex charter-injection fixture stopped before `turn/start` because production now queries collaboration modes and models during initialization.
 - **Consequences**: The fake app-server answers `collaborationMode/list` and `model/list` alongside the existing handshake methods.
+
+## 2026-10-08 — Box provider sessions in the harness enum
+- **Status**: accepted
+- **Context**: Strict Clippy rejected `HarnessSession` because concrete Claude and Codex session variants have materially different sizes.
+- **Consequences**: Both provider sessions are heap-allocated inside `HarnessSession`, reducing enum size while preserving the existing provider delegation API.

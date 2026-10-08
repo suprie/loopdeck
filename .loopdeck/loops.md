@@ -124,3 +124,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Updated the fake Codex handshake for collaboration-mode and model discovery; the targeted charter test passes.
+
+### 2026-10-08 — Fix strict Clippy harness variant sizing
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Boxed both concrete provider sessions in `HarnessSession` and updated delegation to satisfy `large_enum_variant`; CI-style Clippy and the Rust library suite pass.

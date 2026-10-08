@@ -59,8 +59,8 @@ pub(crate) trait HarnessAdapter: Sized {
 }
 
 pub enum HarnessSession {
-    Claude(ClaudeSession),
-    Codex(CodexSession),
+    Claude(Box<ClaudeSession>),
+    Codex(Box<CodexSession>),
 }
 
 impl HarnessSession {
@@ -77,8 +77,8 @@ impl HarnessSession {
     /// after ignoring Stop; `with_session` then replaces it on the next send.
     pub fn is_usable(&mut self) -> bool {
         match self {
-            Self::Claude(session) => HarnessAdapter::is_usable(session),
-            Self::Codex(session) => HarnessAdapter::is_usable(session),
+            Self::Claude(session) => HarnessAdapter::is_usable(session.as_mut()),
+            Self::Codex(session) => HarnessAdapter::is_usable(session.as_mut()),
         }
     }
 
@@ -97,13 +97,15 @@ impl HarnessSession {
                 // Codex ids are explicitly tagged in Selasar transcripts.
                 // Never pass one to Claude's `--resume`.
                 let resume = resume_session_id.filter(|id| !id.starts_with("codex:"));
-                HarnessAdapter::spawn(cwd, config, resume, policy).map(Self::Claude)
+                HarnessAdapter::spawn(cwd, config, resume, policy)
+                    .map(|session| Self::Claude(Box::new(session)))
             }
             AgentHarness::Codex => {
                 // Legacy untagged ids belong to Claude. Codex ids are tagged so
                 // switching harnesses cannot cross-resume incompatible state.
                 let resume = resume_session_id.and_then(|id| id.strip_prefix("codex:"));
-                HarnessAdapter::spawn(cwd, config, resume, policy).map(Self::Codex)
+                HarnessAdapter::spawn(cwd, config, resume, policy)
+                    .map(|session| Self::Codex(Box::new(session)))
             }
         }
     }
@@ -117,12 +119,24 @@ impl HarnessSession {
     ) -> Result<AgentResponse, AppError> {
         match self {
             Self::Claude(session) => {
-                HarnessAdapter::send_message(session, text, attachments, slots, interrupt_slot)
-                    .await
+                HarnessAdapter::send_message(
+                    session.as_mut(),
+                    text,
+                    attachments,
+                    slots,
+                    interrupt_slot,
+                )
+                .await
             }
             Self::Codex(session) => {
-                HarnessAdapter::send_message(session, text, attachments, slots, interrupt_slot)
-                    .await
+                HarnessAdapter::send_message(
+                    session.as_mut(),
+                    text,
+                    attachments,
+                    slots,
+                    interrupt_slot,
+                )
+                .await
             }
         }
     }
@@ -144,7 +158,7 @@ impl HarnessSession {
         match self {
             Self::Claude(session) => {
                 HarnessAdapter::send_message_streaming(
-                    session,
+                    session.as_mut(),
                     text,
                     attachments,
                     channel,
@@ -157,7 +171,7 @@ impl HarnessSession {
             }
             Self::Codex(session) => {
                 HarnessAdapter::send_message_streaming(
-                    session,
+                    session.as_mut(),
                     text,
                     attachments,
                     channel,
