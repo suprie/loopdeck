@@ -72,3 +72,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-08-12
 - **Summary**: Project rail with all 4 loop-domain doors. Detail: `loops-archive.md` 2026-08-30 appendix.
+
+### 2026-10-08 — Fix Rust deprecation CI failure
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Replaced deprecated `Atomic::fetch_update` with `try_update`; strict Clippy passes on PR #105.
