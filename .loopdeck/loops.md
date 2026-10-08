@@ -114,3 +114,13 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Fixed the stale WebSocket endpoint in the charter-injection fixture and removed a strict-Clippy needless borrow. Serialized Rust tests: 668 passed, 9 ignored.
+
+### 2026-10-08 — Fix Rust deprecation CI failure
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Replaced deprecated `Atomic::fetch_update` with `try_update`; strict Clippy passes on PR #105.
+
+### 2026-10-08 — Repair Codex charter-injection fixture
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Updated the fake Codex handshake for collaboration-mode and model discovery; the targeted charter test passes.

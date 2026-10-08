@@ -67,6 +67,8 @@ pub struct CodexSession {
     thread_id: Option<String>,
     next_request_id: u64,
     initialized: bool,
+    /// App-server-provided Plan preset, used only for interactive interviews.
+    plan_collaboration_mode: Option<Value>,
     policy: PermissionPolicy,
     /// Rendered role charter, pending injection. Codex's app-server protocol
     /// has no system-prompt override, so the charter is prepended to the
@@ -159,6 +161,7 @@ impl CodexSession {
             thread_id: None,
             next_request_id: 1,
             initialized: false,
+            plan_collaboration_mode: None,
             policy,
             charter_prompt: config
                 .charter
@@ -189,13 +192,14 @@ impl CodexSession {
             slots.permission,
             interrupt_slot,
             None,
+            false,
         )
         .await
     }
 
-    /// See `send_message` for why `slots.plan` goes unused. No `plan_mode`
-    /// parameter either — that flag is Claude-only; `HarnessSession` simply
-    /// doesn't forward it to this method.
+    /// Codex Plan collaboration mode is used for interactive interviews;
+    /// ordinary agent turns remain in the default mode.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message_streaming(
         &mut self,
         text: &str,
@@ -203,6 +207,7 @@ impl CodexSession {
         channel: &Channel<ClaudeEvent>,
         slots: &ParkSlots<'_>,
         interrupt_slot: &InterruptSlot,
+        plan_mode: bool,
         token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
         self.send_turn(
@@ -213,6 +218,7 @@ impl CodexSession {
             slots.permission,
             interrupt_slot,
             token_budget,
+            plan_mode,
         )
         .await
     }
@@ -232,6 +238,30 @@ impl CodexSession {
         self.write_message(json!({"method": "initialized", "params": {}}))
             .await?;
         self.wait_for_response(initialize_id).await?;
+
+        let modes_id = self.next_id();
+        self.write_message(json!({
+            "method": "collaborationMode/list",
+            "id": modes_id,
+            "params": {}
+        }))
+        .await?;
+        let modes = self.wait_for_response(modes_id).await?;
+
+        let models_id = self.next_id();
+        self.write_message(json!({
+            "method": "model/list",
+            "id": models_id,
+            "params": { "limit": 20, "includeHidden": false }
+        }))
+        .await?;
+        let models = self.wait_for_response(models_id).await?;
+        self.plan_collaboration_mode = plan_collaboration_mode(
+            &modes,
+            &models,
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        );
 
         let thread_id = self.next_id();
         let mut params = if let Some(resume_id) = self.resume_thread_id.take() {
@@ -282,6 +312,7 @@ impl CodexSession {
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
         token_budget: Option<&TokenBudget>,
+        plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
         let result = self
             .send_turn_inner(
@@ -292,6 +323,7 @@ impl CodexSession {
                 permission_slot,
                 interrupt_slot,
                 token_budget,
+                plan_mode,
             )
             .await;
         let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
@@ -310,6 +342,7 @@ impl CodexSession {
         permission_slot: &PermissionSlot,
         interrupt_slot: &InterruptSlot,
         token_budget: Option<&TokenBudget>,
+        plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
         self.ensure_initialized().await?;
         let started = Instant::now();
@@ -329,6 +362,15 @@ impl CodexSession {
             &self.cwd,
             self.model.as_deref(),
             self.effort.as_deref(),
+            if plan_mode {
+                Some(self.plan_collaboration_mode.as_ref().ok_or_else(|| {
+                    AppError::Agent(
+                        "Codex did not provide a model for interactive pre-flight questions".into(),
+                    )
+                })?)
+            } else {
+                None
+            },
         );
         self.write_message(json!({
             "method": "turn/start",
@@ -968,12 +1010,6 @@ impl HarnessAdapter for CodexSession {
         plan_mode: bool,
         token_budget: Option<&TokenBudget>,
     ) -> Result<AgentResponse, AppError> {
-        if plan_mode {
-            return Err(AppError::Agent(
-                "plan mode is a Claude-only feature and is not supported by the Codex harness"
-                    .into(),
-            ));
-        }
         Self::send_message_streaming(
             self,
             text,
@@ -981,6 +1017,7 @@ impl HarnessAdapter for CodexSession {
             channel,
             slots,
             interrupt_slot,
+            plan_mode,
             token_budget,
         )
         .await
@@ -1338,6 +1375,7 @@ fn turn_start_params(
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
+    collaboration_mode: Option<&Value>,
 ) -> Value {
     let mut input: Vec<Value> = vec![json!({ "type": "text", "text": text })];
     input.extend(attachments.iter().map(|a| {
@@ -1361,7 +1399,80 @@ fn turn_start_params(
     if let Some(effort) = effort.filter(|value| !value.is_empty()) {
         params["effort"] = Value::String(effort.to_owned());
     }
+    if let Some(collaboration_mode) = collaboration_mode {
+        params["collaborationMode"] = collaboration_mode.clone();
+    }
     params
+}
+
+fn plan_collaboration_mode(
+    response: &Value,
+    models_response: &Value,
+    configured_model: Option<&str>,
+    configured_effort: Option<&str>,
+) -> Option<Value> {
+    let modes = response.get("data")?.as_array()?;
+    let plan = modes
+        .iter()
+        .find(|mode| mode.get("mode").and_then(Value::as_str) == Some("plan"));
+    let default = modes
+        .iter()
+        .find(|mode| mode.get("mode").and_then(Value::as_str) == Some("default"));
+    let available_model = preferred_codex_model(models_response);
+    let model = plan
+        .and_then(|mode| mode.get("model"))
+        .and_then(Value::as_str)
+        .or_else(|| configured_model.filter(|model| !model.is_empty()))
+        .or_else(|| {
+            default
+                .and_then(|mode| mode.get("model"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            available_model
+                .and_then(|model| model.get("model"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            available_model
+                .and_then(|model| model.get("id"))
+                .and_then(Value::as_str)
+        })?;
+    let effort = plan
+        .and_then(|mode| mode.get("reasoning_effort"))
+        .cloned()
+        .or_else(|| {
+            configured_effort
+                .filter(|effort| !effort.is_empty())
+                .map(|effort| Value::String(effort.to_owned()))
+        })
+        .or_else(|| {
+            default
+                .and_then(|mode| mode.get("reasoning_effort"))
+                .cloned()
+        })
+        .or_else(|| {
+            available_model
+                .and_then(|model| model.get("defaultReasoningEffort"))
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    Some(json!({
+        "mode": "plan",
+        "settings": {
+            "model": model,
+            "reasoning_effort": effort,
+            "developer_instructions": Value::Null,
+        }
+    }))
+}
+
+fn preferred_codex_model(response: &Value) -> Option<&Value> {
+    let models = response.get("data")?.as_array()?;
+    models
+        .iter()
+        .find(|model| model.get("isDefault").and_then(Value::as_bool) == Some(true))
+        .or_else(|| models.first())
 }
 
 /// Resolve the approval card's tool and context.
@@ -1645,6 +1756,7 @@ mod tests {
             Path::new("/repo"),
             Some("gpt-test"),
             Some("high"),
+            None,
         );
 
         assert_eq!(params["approvalPolicy"], "on-request");
@@ -1662,6 +1774,7 @@ mod tests {
             Path::new("/repo"),
             Some(""),
             Some(""),
+            None,
         );
 
         assert!(params.get("model").is_none());
@@ -1670,7 +1783,15 @@ mod tests {
 
     #[test]
     fn turn_start_input_is_text_only_without_attachments() {
-        let params = turn_start_params("thread-1", "Inspect", &[], Path::new("/repo"), None, None);
+        let params = turn_start_params(
+            "thread-1",
+            "Inspect",
+            &[],
+            Path::new("/repo"),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(
             params["input"],
@@ -1689,6 +1810,7 @@ mod tests {
             "What is this?",
             &attachments,
             Path::new("/repo"),
+            None,
             None,
             None,
         );

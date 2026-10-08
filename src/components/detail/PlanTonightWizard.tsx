@@ -27,6 +27,7 @@ import type {
   Epic,
   NamedAgentConfig,
   PendingQuestionEntry,
+  PhaseAgentAssignment,
   PrdLoop,
   RunBudgets,
   RunPlan,
@@ -110,7 +111,6 @@ export function PlanTonightWizard({
   /** Per-phase agent assignment (prd-role-foundations Phase 4):
    *  executionId → roster id. Absent = the default agent. */
   const [agentByPhase, setAgentByPhase] = useState<Record<string, string>>({});
-  const [agents, setAgents] = useState<NamedAgentConfig[]>([]);
   const [stallPolicy, setStallPolicy] = useState<StallPolicy>("continue_independent");
   const [draftPrAuthorized, setDraftPrAuthorized] = useState(true);
   const [phaseTokenCap, setPhaseTokenCap] = useState("500000");
@@ -124,9 +124,19 @@ export function PlanTonightWizard({
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestionEntry | null>(null);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
+  const [roster, setRoster] = useState<NamedAgentConfig[]>([]);
 
   const idToTitle = useMemo(() => buildIdToTitle(epics), [epics]);
   const entries = useMemo(() => pickerEntries(epics), [epics]);
+
+  // Load the roster once per open for the per-phase agent picker.
+  useEffect(() => {
+    if (!open) return;
+    api
+      .listAgentConfigs()
+      .then(setRoster)
+      .catch((err) => console.warn("listAgentConfigs failed", err));
+  }, [open]);
 
   // Fresh wizard per open. A previously created (unstarted) plan stays on
   // disk queued-but-unstarted; finishing step 1 again simply replaces it —
@@ -144,16 +154,7 @@ export function PlanTonightWizard({
     setSkippingId(null);
     setPendingQuestion(null);
     setConsentConfirmed(false);
-  }, [open]);
-
-  // Roster for the per-phase assignment dropdowns (prd-role-foundations
-  // Phase 4). An empty roster simply hides them — nothing to assign to.
-  useEffect(() => {
-    if (!open) return;
-    api
-      .listAgentConfigs()
-      .then(setAgents)
-      .catch((err) => console.warn("listAgentConfigs failed", err));
+    setAgentByPhase({});
   }, [open]);
 
   const setPhaseAgent = (executionId: string, agentId: string) => {
@@ -195,6 +196,13 @@ export function PlanTonightWizard({
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  // Sparse staffing payload: only explicitly-assigned phases cross the IPC
+  // boundary; unlisted phases stay on the default agent.
+  const assignmentsFromSelection = (): PhaseAgentAssignment[] =>
+    selected
+      .filter((id) => agentByPhase[id])
+      .map((id) => ({ execution_id: id, agent_id: agentByPhase[id] }));
+
   const budgetsFromInputs = (): RunBudgets => {
     const budgets: RunBudgets = {
       per_phase_token_cap: Number(phaseTokenCap),
@@ -218,7 +226,7 @@ export function PlanTonightWizard({
         stallPolicy,
         draftPrAuthorized,
         budgetsFromInputs(),
-        selected.map((id) => agentByPhase[id] ?? null),
+        assignmentsFromSelection(),
       );
       setPlan(created);
       setStep(2);
@@ -367,7 +375,7 @@ export function PlanTonightWizard({
               entries={entries}
               selected={selected}
               idToTitle={idToTitle}
-              agents={agents}
+              roster={roster}
               agentByPhase={agentByPhase}
               onSetAgent={setPhaseAgent}
               stallPolicy={stallPolicy}
@@ -403,7 +411,7 @@ export function PlanTonightWizard({
             <StepConsent
               plan={plan}
               idToTitle={idToTitle}
-              agents={agents}
+              agents={roster}
               consentConfirmed={consentConfirmed}
               setConsentConfirmed={setConsentConfirmed}
               hasPendingInterview={hasPendingInterview}
@@ -473,7 +481,7 @@ function StepPhases({
   entries,
   selected,
   idToTitle,
-  agents,
+  roster,
   agentByPhase,
   onSetAgent,
   stallPolicy,
@@ -491,9 +499,9 @@ function StepPhases({
   entries: PickerEntry[];
   selected: string[];
   idToTitle: Record<string, string>;
-  agents: NamedAgentConfig[];
+  roster: NamedAgentConfig[];
   agentByPhase: Record<string, string>;
-  onSetAgent: (executionId: string, agentId: string) => void;
+  onSetAgent: (id: string, agentId: string) => void;
   stallPolicy: StallPolicy;
   setStallPolicy: (v: StallPolicy) => void;
   draftPrAuthorized: boolean;
@@ -540,30 +548,34 @@ function StepPhases({
                           <span className="mr-1 font-mono">{index + 1}.</span>
                           {dependencyLabel(index, selected, idToTitle)}
                         </span>
-                        {/* Per-phase agent assignment (prd-role-foundations
-                            Phase 4). Hidden with an empty roster. */}
-                        {agents.length > 0 && (
-                          <Select
-                            value={agentByPhase[loop.id!] ?? DEFAULT_AGENT}
-                            onValueChange={(v) => onSetAgent(loop.id!, v)}
-                          >
-                            <SelectTrigger className="h-5 w-40 rounded text-[10px]">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value={DEFAULT_AGENT}>Default agent</SelectItem>
-                              {agents.map((agent) => (
-                                <SelectItem key={agent.id} value={agent.id}>
-                                  {agent.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        )}
                       </span>
                     )}
                   </span>
                 </label>
+                {/* Per-phase staffing (prd-role-foundations Phase 4): which
+                    roster agent runs this phase. Kept outside the label so
+                    picker clicks never toggle the checkbox. */}
+                {index !== -1 && roster.length > 0 && (
+                  <div className="mb-1 ml-6 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <span className="shrink-0">runs with</span>
+                    <Select
+                      value={agentByPhase[loop.id!] || "default"}
+                      onValueChange={(v) => onSetAgent(loop.id!, v === "default" ? "" : v)}
+                    >
+                      <SelectTrigger className="h-5 w-40 gap-1 rounded px-1.5 text-[10px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">Default agent</SelectItem>
+                        {roster.map((agent) => (
+                          <SelectItem key={agent.id} value={agent.id}>
+                            {agent.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </li>
             );
           })}
@@ -815,6 +827,9 @@ function StepConsent({
                   {idToAgentName[phase.assigned_agent] ?? phase.assigned_agent}
                 </span>
               )}
+              <span className="shrink-0 text-[10px] text-muted-foreground">
+                {phase.assigned_agent_name ?? "default agent"}
+              </span>
               <span className="shrink-0 text-[10px] text-muted-foreground">
                 {INTERVIEW_STATUS_LABEL[phase.interview_status] ?? phase.interview_status}
               </span>

@@ -144,6 +144,7 @@ export function MorningReportTab({
             <thead>
               <tr className="border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground">
                 <th className="px-1.5 py-1 text-left font-medium">Phase</th>
+                <th className="px-1.5 py-1 text-left font-medium">Agent</th>
                 <th className="px-1.5 py-1 text-left font-medium">Verdict</th>
                 <th className="px-1.5 py-1 text-right font-medium">Tokens</th>
                 <th className="px-1.5 py-1 text-right font-medium">Wall Time</th>
@@ -168,6 +169,9 @@ export function MorningReportTab({
                         {idToAgentName[phase.assigned_agent] ?? phase.assigned_agent}
                       </span>
                     )}
+                  </td>
+                  <td className="max-w-32 truncate px-1.5 py-1.5 text-muted-foreground">
+                    {phase.assigned_agent_name ?? "default"}
                   </td>
                   <td className="px-1.5 py-1.5">
                     <span

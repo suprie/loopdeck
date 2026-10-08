@@ -35,6 +35,8 @@ mod state_cli;
 
 #[cfg(test)]
 mod charter_injection_tests;
+#[cfg(test)]
+mod role_assignment_tests;
 
 #[cfg(test)]
 mod role_demo_tests;

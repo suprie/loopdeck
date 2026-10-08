@@ -471,6 +471,7 @@ mod tests {
                 &[LOOP_ID.to_string()],
                 crate::runplan::StallPolicy::Halt,
                 true,
+                &[],
             );
             plan.phases[0].status = RunPhaseStatus::Parked;
             plan.phases[0].park_payload = Some("no draft PR URL".into());

@@ -31,7 +31,7 @@ impl TokenBudget {
     pub(crate) fn add(&self, tokens: u64) -> bool {
         let previous = self
             .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 Some(used.saturating_add(tokens))
             })
             .unwrap_or_else(|used| used);

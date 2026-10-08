@@ -549,6 +549,7 @@ async fn execute_subrun(
         Some(&assignment.config),
         Some(&linked.path),
         true,
+        false,
     )
     .await;
     // The session owns its child process. Drop it before even considering

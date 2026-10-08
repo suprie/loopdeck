@@ -227,3 +227,13 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: PR CI failed because the charter-injection fixture still published the retired WebSocket endpoint after production Code Mode moved to local gRPC/HTTP endpoint validation; strict Clippy also caught an unnecessary borrow.
 - **Consequences**: The fixture now publishes a local gRPC endpoint and the launcher uses the clippy-clean `StdCommand::new(binary)` form. Full serialized Rust tests pass.
+
+## 2026-10-08 — Track Rust Atomic API renames
+- **Status**: accepted
+- **Context**: CI treats deprecations as errors, and the current Rust toolchain renamed `Atomic<u64>::fetch_update` to `try_update`.
+- **Consequences**: Token-budget accounting now uses `try_update` while preserving the existing saturating increment behavior.
+
+## 2026-10-08 — Keep Codex handshake fixtures current
+- **Status**: accepted
+- **Context**: The Codex charter-injection fixture stopped before `turn/start` because production now queries collaboration modes and models during initialization.
+- **Consequences**: The fake app-server answers `collaborationMode/list` and `model/list` alongside the existing handshake methods.

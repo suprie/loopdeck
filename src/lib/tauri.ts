@@ -26,6 +26,7 @@ import type {
   MigrationPreview,
   ProgressSnapshot,
   RunBudgets,
+  PhaseAgentAssignment,
   RunPlan,
   RunReport,
   RunQueueStatus,
@@ -205,6 +206,27 @@ export async function getExecutionState(
 }
 
 /**
+ * Retry a structured loop from execution history. The backend restores it as
+ * the current loop with a new attempt number and sources its metadata from the PRD.
+ * Rust: promote_loop_by_id(path, loop_id) -> Result<ExecutionState, AppError>
+ */
+export async function promoteLoopById(path: string, loopId: string): Promise<ExecutionState> {
+  return invoke<ExecutionState>("promote_loop_by_id", { path, loopId });
+}
+
+/** Mark the persisted current loop as abandoned when work has stopped. */
+export async function abandonCurrentLoop(
+  path: string,
+  reason: string,
+): Promise<ExecutionState> {
+  return invoke<ExecutionState>("abandon_current_loop", {
+    path,
+    reason,
+    promoteNext: false,
+  });
+}
+
+/**
  * Read-only migration preview for a project still on legacy .loopdeck/loops.md:
  * the planned execution.yaml + every unmatched/ambiguous record (preserved
  * verbatim, never fuzzy-matched). Writes nothing. Rust:
@@ -251,13 +273,12 @@ export async function exportExecutionSummary(path: string): Promise<string> {
  * Build and persist a new run plan from a phase-picker selection
  * (prd-run-queue Phase 5): the given execution IDs, in selection order,
  * under one queue-time stall policy and draft-PR consent. Every phase starts
- * `queued` / interview `pending`. `phaseAgents` carries an optional roster
- * id per phase, parallel to `executionIds` (null = default agent,
- * prd-role-foundations Phase 4); each id is validated against the agent
- * roster. Replaces any existing plan for the project outright; rejects if a
- * run is already in progress or an ID doesn't resolve to a real PRD
- * checklist loop.
- * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, phase_agents) -> Result<RunPlan, AppError>
+ * `queued` / interview `pending`. Replaces any existing plan for the project
+ * outright; rejects if a run is already in progress or an ID doesn't
+ * resolve to a real PRD checklist loop.
+ * `assignments` (prd-role-foundations Phase 4) staffs phases with roster
+ * agents; unlisted phases run with the default agent.
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments) -> Result<RunPlan, AppError>
  */
 export async function createRunPlan(
   path: string,
@@ -265,7 +286,7 @@ export async function createRunPlan(
   stallPolicy: StallPolicy,
   draftPrAuthorized: boolean,
   budgets: RunBudgets,
-  phaseAgents: (string | null)[],
+  assignments: PhaseAgentAssignment[] = [],
 ): Promise<RunPlan> {
   return invoke<RunPlan>("create_run_plan", {
     path,
@@ -273,7 +294,7 @@ export async function createRunPlan(
     stallPolicy,
     draftPrAuthorized,
     budgets,
-    phaseAgents,
+    assignments,
   });
 }
 
