@@ -247,6 +247,22 @@ fn record_handoff(root: &Path, plan: &RunPlan, worktree: &Path, pr_url: &str) {
     }
 }
 
+/// Promote the agent-authored phase artifacts from the isolated worktree into
+/// the project's persistent handoff store. Validation and duplicate detection
+/// live in `handoff`; this helper only applies the batch boundary and returns
+/// the first error so the executor can park the phase without losing the
+/// original artifact.
+fn emit_phase_artifacts(
+    root: &Path,
+    worktree: &Path,
+    locs: &[(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)],
+) -> Result<(), AppError> {
+    for (execution_id, _, _) in locs {
+        handoff::copy_agent_artifact(root, worktree, execution_id)?;
+    }
+    Ok(())
+}
+
 /// Managed run worktrees live inside the repo (`.loopdeck/runs/`), so without
 /// an ignore rule every run shows up as untracked noise in the main worktree.
 /// Idempotently append the rule to `.gitignore` — the only file this touches.
@@ -1875,6 +1891,24 @@ async fn execute_run(
                     return Ok(());
                 }
                 let verdict = extract_verdict(&response.result);
+                if verdict == Some(RunVerdict::Pass) {
+                    if let Err(error) = emit_phase_artifacts(root, &worktree, &locs) {
+                        let reason = format!("handoff artifact emission failed: {error}");
+                        park_batch(&mut plan, &batch, &reason);
+                        plan.environment.worktree_kept = true;
+                        for (execution_id, _, _) in &locs {
+                            park_blocked_dependents(&mut plan, execution_id);
+                        }
+                        runplan::save(root, &plan)?;
+                        let loaded = execution::load(root)?;
+                        let abandoned =
+                            loaded
+                                .state
+                                .abandon_current(reason, chrono::Utc::now(), false)?;
+                        execution::save(root, &abandoned, loaded.state.revision)?;
+                        continue;
+                    }
+                }
                 if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
                     // Retained before any delivery decision so a recoverable
                     // record can carry the rubric evidence (retry-recovery).
