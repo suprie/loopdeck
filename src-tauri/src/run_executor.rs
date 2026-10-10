@@ -120,6 +120,11 @@ fn phase_goal_block(execution_id: &str, loc: &LoopLocation, interview: &[PinnedA
         phase = loc.phase,
     );
 
+    let topic = crate::handoff::topic_for_phase(execution_id);
+    block.push_str(&format!(
+        "\n\nBefore declaring this phase complete, write its authoritative contract artifact to `.loopdeck/handoff-artifacts/{topic}.md` in the run worktree. Use the handoff artifact contract in `docs/epics/role-based-orchestration/handoff-artifact-contract.md`. YAML frontmatter must include `artifact: {topic}`, `author_role`, `phase: {execution_id}`, `type`, `created`, `summary`, and optional `cites`, followed by the required Markdown sections. The executor validates and copies this file into the persistent `.loopdeck/handoffs/` store after a passing phase; do not overwrite an existing topic.",
+    ));
+
     if !interview.is_empty() {
         block.push_str(
             "\n\nThe following clarifying questions were already answered by the \
