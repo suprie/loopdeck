@@ -223,6 +223,11 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: Codex could ask a blocking question as ordinary assistant prose even when the `request_user_input` capability was enabled, leaving LoopDeck with no structured event from which to render a popup.
 - **Consequences**: The first Codex task prompt now includes a concise interaction contract requiring `request_user_input` for decisions needed before continuing. Role charters remain first, and the guidance is injected only once per session.
 
+## 2026-10-08 — Advertise Codex experimental API for collaboration discovery
+- **Status**: accepted
+- **Context**: The overnight pre-flight path queries `collaborationMode/list` and `model/list`, but the Codex initialize handshake still advertised `experimentalApi: false`, causing the app-server to reject collaboration-mode listing before the run could start. The separately supervised Code Mode host now covers the earlier reason for opting out.
+- **Consequences**: Codex sessions advertise `experimentalApi: true`, allowing the existing collaboration-mode discovery and Plan interview flow to proceed.
+
 ## 2026-10-08 — Keep Codex integration fixtures aligned with Code Mode transport
 - **Status**: accepted
 - **Context**: PR CI failed because the charter-injection fixture still published the retired WebSocket endpoint after production Code Mode moved to local gRPC/HTTP endpoint validation; strict Clippy also caught an unnecessary borrow.
@@ -242,3 +247,18 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Strict Clippy rejected `HarnessSession` because concrete Claude and Codex session variants have materially different sizes.
 - **Consequences**: Both provider sessions are heap-allocated inside `HarnessSession`, reducing enum size while preserving the existing provider delegation API.
+
+## 2026-10-08 — Separate orchestrator and worker language in run surfaces
+- **Status**: accepted
+- **Context**: The night-run UI labeled the orchestration card and the Codex worker transcript both as “Agent,” making a managed worktree worker look like the project’s interactive agent and making stale activity difficult to interpret.
+- **Consequences**: The detail tab is now “Worker activity”; the night-run card identifies orchestrator status, worker profile, managed-worktree isolation, and current phase; the transcript surface explicitly identifies itself as worker activity.
+
+## 2026-10-09 — Correlate Codex turn failures across the run watchdog
+- **Status**: accepted
+- **Context**: An unattended run ended with a generic “wedged app-server” message after the Codex rollout stopped during a patch call; the existing logs could not distinguish a tool hang, protocol failure, watchdog timeout, or cleanup failure.
+- **Consequences**: Codex sessions now log turn/request IDs, item start/completion, interrupt lifecycle, completion status, and terminal errors; the run queue logs watchdog budgets, worktree/run context, and whether a cached session existed when it was removed. Prompts and full tool arguments remain excluded from the new lifecycle logs.
+
+## 2026-10-10 — Use write-capable Codex policy for unattended runs
+- **Status**: accepted
+- **Context**: Unattended Codex turns used read-only sandboxing with on-request approval, so Cargo could wait for a host popup that the worker UI could not show.
+- **Consequences**: Autonomous turns use `workspaceWrite` with `approvalPolicy: on-request`; interactive turns retain read-only approval cards, while all requests remain subject to LoopDeck's destructive-command floor.

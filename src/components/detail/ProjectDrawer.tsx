@@ -62,7 +62,7 @@ type TopTab = "overview" | "agent" | "loops" | "decisions";
 
 const TABS: { id: TopTab; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
-  { id: "agent", label: "Agent", icon: <Bot size={14} /> },
+  { id: "agent", label: "Worker activity", icon: <Bot size={14} /> },
   { id: "loops", label: "Loops", icon: <Repeat size={14} /> },
   { id: "decisions", label: "Decisions", icon: <Lightbulb size={14} /> },
 ];
@@ -236,7 +236,13 @@ export function ProjectDrawer() {
                 the inner scroll. */}
             {topLevelTab(activeTab) === "agent" ? (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col p-6">
-                {nightPlan && <NightRunTab projectPath={project.path} plan={nightPlan} />}
+                {nightPlan && (
+                  <NightRunTab
+                    projectPath={project.path}
+                    plan={nightPlan}
+                    active={runStatus?.active ?? false}
+                  />
+                )}
                 <AgentPanel projectPath={project.path} />
               </div>
             ) : (

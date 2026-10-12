@@ -9,6 +9,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 
 ## Next Steps
+- [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
+- [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
 - [ ] Review and publish the new beta corporate site in `website/`
 - [ ] Confirm the generated product screenshot’s text artifacts are acceptable for public beta branding
 - [ ] Review the transparent product visual on the dark website background
@@ -20,6 +22,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-08 — Fix overnight collaboration-mode handshake
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Advertised Codex's experimental API capability so the existing `collaborationMode/list` and `model/list` pre-flight handshake is accepted; updated the regression test and recorded the decision.
 
 ### 2026-10-08 — Product visual and app icon integration
 - **Status**: completed

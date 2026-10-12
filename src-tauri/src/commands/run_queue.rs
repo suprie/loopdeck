@@ -331,6 +331,12 @@ fn terminate_session(state: &AppState, path: &Path) -> Result<(), AppError> {
         .lock()
         .map_err(|_| AppError::LockError)?
         .remove(path);
+    info!(
+        target: "loopdeck::run_queue",
+        path = %path.display(),
+        had_session = session.is_some(),
+        "run queue removed cached agent session"
+    );
     drop(session);
     Ok(())
 }
@@ -1769,6 +1775,7 @@ async fn execute_run(
             .map(|(id, _, _)| id.as_str())
             .collect::<Vec<_>>()
             .join(",");
+        let channel_execution_id = event_execution_id.clone();
         let channel: Channel<ClaudeEvent> = Channel::new(move |event| {
             let event = match event.deserialize::<serde_json::Value>() {
                 Ok(event) => event,
@@ -1781,7 +1788,7 @@ async fn execute_run(
                 RUN_QUEUE_EVENT,
                 RunQueueEvent {
                     project_path: event_project_path.clone(),
-                    execution_id: event_execution_id.clone(),
+                    execution_id: channel_execution_id.clone(),
                     event,
                 },
             ) {
@@ -1823,6 +1830,15 @@ async fn execute_run(
             true,
             false,
         );
+        info!(
+            target: "loopdeck::run_queue",
+            run_id = %plan.id,
+            execution_ids = %event_execution_id,
+            worktree = %worktree.display(),
+            watchdog_secs = watchdog_timeout.as_secs(),
+            watchdog_reason,
+            "run queue starting Codex turn"
+        );
         let outcome = match race_with_watchdog(watchdog_timeout, turn).await {
             WatchdogOutcome::Completed(result) => result,
             WatchdogOutcome::TimedOut => {
@@ -1830,6 +1846,15 @@ async fn execute_run(
                 // first, releasing its session lock. Removing the last cached
                 // Arc then invokes the harness Drop path: graceful EOF, bounded
                 // wait, and SIGKILL fallback.
+                warn!(
+                    target: "loopdeck::run_queue",
+                    run_id = %plan.id,
+                    execution_ids = %event_execution_id,
+                    elapsed_secs = phase_started.elapsed().as_secs(),
+                    watchdog_secs = watchdog_timeout.as_secs(),
+                    watchdog_reason,
+                    "run queue watchdog timed out Codex turn"
+                );
                 terminate_session(state, &worktree)?;
                 let error = AppError::RunPlan(format!(
                     "{watchdog_reason} after {} seconds",
