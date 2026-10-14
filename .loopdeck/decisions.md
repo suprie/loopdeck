@@ -2,6 +2,21 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
 
+## 2026-10-14 — Provider events use a versioned semantic envelope
+- **Status**: accepted
+- **Context**: Claude and Codex need a shared durable event meaning before replay and persistence migration.
+- **Consequences**: Added version-1 `RunEvent` with explicit capability gaps, redacted durable fields, diagnostic-only raw references, and exactly-one terminal rules; legacy provider events remain until normalization.
+
+## 2026-10-14 — SQLite is the target operational store with compatibility exports
+- **Status**: accepted
+- **Context**: `prd-domain-contract` Phase 1 inventory found mutable run, phase, decision, session, and delivery state split across YAML, JSONL, manifests, and `AppState`; the canonical fixture is small, but cross-file atomicity and restart reconciliation are the limiting constraints.
+- **Consequences**: Later persistence work may implement SQLite for mutable operational state, but must preserve authored repository files, import provenance, compatibility exports, backup/restore, and a visible divergence gate. The legacy-to-new identity mapping and irrecoverable in-memory cases are documented in `docs/epics/execution-foundations/migration-map.md`.
+
+## 2026-10-14 — Transition edges are pure and terminal attempts are immutable
+- **Status**: accepted
+- **Context**: Phase 2 needs one transition contract across interactive, queued, multi-agent, decision, and delivery state before persistence migration.
+- **Consequences**: `src-tauri/src/transition.rs` owns allowed edges and structured invalid-transition errors; restart reconciliation now routes `running → interrupted` through it, while retries create new attempts.
+
 ## 2026-10-08 — Shared generated brand assets are used across web and desktop
 - **Status**: accepted
 - **Context**: The beta site needed a product visual and the desktop app needed a consistent app icon.

@@ -1,5 +1,5 @@
 schema_version: 1
-revision: 34
+revision: 58
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -179,3 +179,131 @@ history:
       verdict: pass
       checked_at: 2026-09-01T09:49:11.594951Z
       criteria: []
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-08T14:12:19.157301Z
+  completed_at: 2026-10-08T14:53:13.864274Z
+  attempt: 1
+  reason: 'Agent error: Codex did not complete the interrupted turn within 15s; the wedged app-server was terminated'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-08T14:53:37.506770Z
+  completed_at: 2026-10-08T15:07:46.357891Z
+  attempt: 2
+  reason: 'Agent error: Codex did not complete the interrupted turn within 15s; the wedged app-server was terminated'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-08T22:32:42.570610Z
+  completed_at: 2026-10-09T02:58:41.661305Z
+  attempt: 3
+  reason: 'Agent error: Codex did not complete the interrupted turn within 15s; the wedged app-server was terminated'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-09T09:15:02.063267Z
+  completed_at: 2026-10-09T09:34:04.572528Z
+  attempt: 4
+  reason: 'Agent error: Codex did not complete the interrupted turn within 15s; the wedged app-server was terminated'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-09T09:38:56.908826Z
+  completed_at: 2026-10-09T09:40:36.398665Z
+  attempt: 5
+  reason: 'Resource limit exceeded: phase token budget exceeded: 1051728 > 1000000'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-09T09:41:08.510746Z
+  completed_at: 2026-10-09T09:42:08.717610Z
+  attempt: 6
+  reason: 'Resource limit exceeded: phase token budget exceeded: 1002306 > 1000000'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-09T13:29:19.503816Z
+  completed_at: 2026-10-09T16:29:19.614661Z
+  attempt: 7
+  reason: 'Run plan error: phase wall-clock budget exceeded after 10800 seconds'
+- id: agent-handoff/store-model
+  title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+  origin:
+    epic: role-based-orchestration
+    prd: prd-agent-handoff
+    phase: Phase 1 — Handoff store
+  outcome: abandoned
+  started_at: 2026-10-09T22:27:50.553968Z
+  completed_at: 2026-10-09T22:30:42.748969Z
+  attempt: 8
+  reason: green verification passed, but no unattended draft PR URL was recorded
+- id: domain-contract/define-transitions
+  title: Write the state transition table for interactive, queued, and multi-agent runs, including parked, cancelled, killed, interrupted, delivered, and completed outcomes.
+  origin:
+    epic: execution-foundations
+    prd: prd-domain-contract
+    phase: Phase 2 — Transition contract
+  outcome: completed
+  started_at: 2026-10-14T03:43:17.202689Z
+  completed_at: 2026-10-14T03:45:36.740550Z
+  attempt: 1
+- id: domain-contract/implement-transitions
+  title: Add pure Rust transition functions with structured invalid-transition errors; route one low-risk command through them without changing on-disk format.
+  origin:
+    epic: execution-foundations
+    prd: prd-domain-contract
+    phase: Phase 2 — Transition contract
+  outcome: completed
+  started_at: 2026-10-14T03:45:38.252007Z
+  completed_at: 2026-10-14T03:45:39.310891Z
+  attempt: 1
+- id: domain-contract/test-transitions
+  title: Add table-driven tests for every allowed and rejected transition, duplicate command, and restart reconciliation rule; verify existing commands still return compatible results.
+  origin:
+    epic: execution-foundations
+    prd: prd-domain-contract
+    phase: Phase 3 — Verification
+  outcome: completed
+  started_at: 2026-10-14T03:53:45.758878Z
+  completed_at: 2026-10-14T03:54:49.616955Z
+  attempt: 1
+- id: provider-contract/define-events
+  title: Define the versioned event envelope and payload table, including capability differences, redaction, and terminal outcome rules.
+  origin:
+    epic: execution-foundations
+    prd: prd-provider-contract
+    phase: Phase 1 — Event vocabulary
+  outcome: completed
+  started_at: 2026-10-14T04:00:27.064715Z
+  completed_at: 2026-10-14T04:02:03.242886Z
+  attempt: 1

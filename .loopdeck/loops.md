@@ -9,6 +9,7 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 
 ## Next Steps
+- [ ] `execution-foundations` / `prd-domain-contract` Phase 2 — define the transition table and implement the pure Rust transition layer after reviewing the Phase 1 evidence.
 - [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
 - [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
 - [ ] Review and publish the new beta corporate site in `website/`
@@ -22,6 +23,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-14 — execution-foundations / prd-domain-contract Phase 1
+- **Status**: completed
+- **Completed**: 2026-10-14
+- **Summary**: Added the state/ownership inventory, measured SQLite-vs-file decision and rollback procedure, and legacy identity/migration map; accepted SQLite as the target mutable operational store with compatibility exports.
 
 ### 2026-10-08 — Fix overnight collaboration-mode handshake
 - **Status**: completed

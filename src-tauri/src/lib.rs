@@ -24,6 +24,8 @@ mod permission;
 mod persist;
 mod progress;
 mod project;
+#[allow(dead_code)]
+mod provider_event;
 pub mod retry;
 mod run_executor;
 mod runplan;
@@ -32,6 +34,8 @@ mod secret_scan;
 mod secrets;
 mod skills;
 mod state_cli;
+#[allow(dead_code)]
+mod transition;
 
 #[cfg(test)]
 mod charter_injection_tests;

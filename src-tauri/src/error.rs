@@ -39,6 +39,14 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Invalid {entity} transition: {from} -> {to} ({reason})")]
+    InvalidTransition {
+        entity: String,
+        from: String,
+        to: String,
+        reason: String,
+    },
+
     #[error("Agent error: {0}")]
     Agent(String),
 
@@ -89,6 +97,7 @@ impl Serialize for AppError {
                 AppError::LockError => "lockError",
                 AppError::ProjectAlreadyExists(_) => "projectAlreadyExists",
                 AppError::Conflict(_) => "conflict",
+                AppError::InvalidTransition { .. } => "invalidTransition",
                 AppError::Agent(_) => "agent",
                 AppError::TurnParked { .. } => "turnParked",
                 AppError::BlockingTask(_) => "blockingTask",
