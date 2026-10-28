@@ -292,10 +292,28 @@ fn record_handoff(root: &Path, plan: &RunPlan, worktree: &Path, pr_url: &str) {
 fn emit_phase_artifacts(
     root: &Path,
     worktree: &Path,
+    plan: &RunPlan,
     locs: &[(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)],
 ) -> Result<(), AppError> {
     for (execution_id, _, _) in locs {
-        handoff::copy_agent_artifact(root, worktree, execution_id)?;
+        let phase = plan
+            .phases
+            .iter()
+            .find(|phase| phase.execution_id == *execution_id)
+            .ok_or_else(|| {
+                AppError::RunPlan(format!(
+                    "phase \"{execution_id}\" is missing from its run plan"
+                ))
+            })?;
+        // Handoffs are opt-in per phase (`prd-agent-handoff` Phase 1): a phase
+        // without a configured topic has no artifact contract, so legacy plans
+        // keep executing unchanged (ADR-3). Once a topic is configured the
+        // slug is authoritative — the executor never derives one from the
+        // execution id, and a missing/mismatched artifact parks the phase.
+        let Some(topic) = phase.handoff_topic.as_deref() else {
+            continue;
+        };
+        handoff::copy_agent_artifact(root, worktree, execution_id, topic)?;
     }
     Ok(())
 }
@@ -470,6 +488,46 @@ fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Apply queue-time handoff topics to a freshly built plan
+/// (`prd-agent-handoff` Phase 1). One artifact = one topic = one file, so a
+/// topic must be a kebab-case slug, belong to a phase in this plan, and be
+/// unique both per phase and across the plan — a duplicate would otherwise
+/// park the second phase at emission time ("original preserved"). The slug is
+/// always supplied by the caller; the executor never derives it from the
+/// execution id.
+fn apply_handoff_topics(
+    plan: &mut RunPlan,
+    execution_ids: &[String],
+    handoff_topics: Vec<runplan::PhaseHandoffTopic>,
+) -> Result<(), AppError> {
+    let mut configured_phases = HashSet::new();
+    let mut configured_topics = HashSet::new();
+    for configured in handoff_topics {
+        if !execution_ids.contains(&configured.execution_id) {
+            return Err(AppError::RunPlan(format!(
+                "handoff topic references phase \"{}\", which is not part of this plan",
+                configured.execution_id
+            )));
+        }
+        if configured.topic.is_empty()
+            || handoff::topic_for_phase(&configured.topic) != configured.topic
+            || !configured_phases.insert(configured.execution_id.clone())
+            || !configured_topics.insert(configured.topic.clone())
+        {
+            return Err(AppError::RunPlan(
+                "handoff topics must be unique kebab-case slugs configured once per phase".into(),
+            ));
+        }
+        let phase = plan
+            .phases
+            .iter_mut()
+            .find(|phase| phase.execution_id == configured.execution_id)
+            .expect("validated phase id");
+        phase.handoff_topic = Some(configured.topic);
+    }
+    Ok(())
+}
+
 /// Build and persist a new `.loopdeck/run-plan.yaml` from a picker selection
 /// (Phase 5): the phases the user checked, in the order they were selected,
 /// under one queue-time `stall_policy` and draft-PR consent.
@@ -490,6 +548,9 @@ fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
 /// meant to start a new plan, not merge into a stale one — but refuses while
 /// a run is actively executing (same guard `queue_run` uses), so a picker
 /// selection can't clobber the plan an in-flight executor is reading.
+// Tauri commands receive their arguments as a flat IPC object, so the queue
+// request's independent knobs stay top-level rather than nesting new structs.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_run_plan(
     path: String,
@@ -500,6 +561,7 @@ pub async fn create_run_plan(
     // Per-phase agent staffing (`prd-role-foundations` Phase 4). Optional
     // and sparse — phases without an entry stay on the default agent.
     assignments: Option<Vec<runplan::PhaseAgentAssignment>>,
+    handoff_topics: Option<Vec<runplan::PhaseHandoffTopic>>,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
@@ -590,6 +652,11 @@ pub async fn create_run_plan(
         draft_pr_authorized,
         &resolved_assignments,
     );
+    apply_handoff_topics(
+        &mut plan,
+        &execution_ids,
+        handoff_topics.unwrap_or_default(),
+    )?;
     plan.budgets = budgets;
 
     runplan::save(&root, &plan)?;
@@ -1814,7 +1881,7 @@ async fn execute_run(
         let phase_token_cap = resolved_phase_token_cap(&plan).saturating_mul(batch_len);
         let phase_timeout = resolved_phase_timeout(&plan) * batch.len() as u32;
         let run_timeout = resolved_run_timeout(&plan);
-        let prompt = build_combined_phase_prompt(
+        let mut prompt = build_combined_phase_prompt(
             &locs,
             plan.consent.draft_pr_authorized,
             ResolvedBudgets {
@@ -1823,6 +1890,21 @@ async fn execute_run(
                 run_wall_clock_secs: run_timeout.as_secs(),
             },
         );
+        for (execution_id, _, _) in &locs {
+            let topic = plan
+                .phases
+                .iter()
+                .find(|phase| phase.execution_id == *execution_id)
+                .and_then(|phase| phase.handoff_topic.as_deref());
+            // Only phases opted into a handoff carry an artifact contract; the
+            // topic is fixed by the plan so a downstream consumer's reference
+            // never changes.
+            if let Some(topic) = topic {
+                prompt.push_str(&format!(
+                    "\n\nFor phase `{execution_id}`, write its required contract artifact to `.loopdeck/handoff-artifacts/{topic}.md`. Use YAML frontmatter with `artifact: {topic}`, `author_role` set to the assigned role name or `planner`, `phase: {execution_id}`, `type: report`, `created` as today's date, and a one-line `summary`; then include `## Summary` and concise sections matching `docs/epics/role-based-orchestration/handoff-artifact-contract.md`. Do not choose or derive a different topic."
+                ));
+            }
+        }
         let event_app = app.clone();
         let event_project_path = root.to_string_lossy().into_owned();
         let event_execution_id = locs
@@ -1963,7 +2045,7 @@ async fn execute_run(
                 }
                 let verdict = extract_verdict(&response.result);
                 if verdict == Some(RunVerdict::Pass) {
-                    if let Err(error) = emit_phase_artifacts(root, &worktree, &locs) {
+                    if let Err(error) = emit_phase_artifacts(root, &worktree, &plan, &locs) {
                         let reason = format!("handoff artifact emission failed: {error}");
                         park_batch(&mut plan, &batch, &reason);
                         plan.environment.worktree_kept = true;
@@ -2705,6 +2787,64 @@ mod unattended_tests {
         assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
         assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
         assert!(plan.phases[2].park_payload.is_none());
+    }
+
+    // ── Handoff topics (`prd-agent-handoff` Phase 1) ─────────────────────
+
+    fn topic(execution_id: &str, topic: &str) -> runplan::PhaseHandoffTopic {
+        runplan::PhaseHandoffTopic {
+            execution_id: execution_id.into(),
+            topic: topic.into(),
+        }
+    }
+
+    #[test]
+    fn apply_handoff_topics_configures_only_the_listed_phases() {
+        let mut plan = parked_chain();
+        apply_handoff_topics(
+            &mut plan,
+            &["phase-a".into(), "phase-b".into(), "phase-c".into()],
+            vec![topic("phase-a", "phase-a-notes")],
+        )
+        .expect("valid topic applies");
+
+        assert_eq!(
+            plan.phases[0].handoff_topic.as_deref(),
+            Some("phase-a-notes")
+        );
+        assert!(plan.phases[1].handoff_topic.is_none());
+        assert!(plan.phases[2].handoff_topic.is_none());
+    }
+
+    #[test]
+    fn apply_handoff_topics_rejects_a_duplicate_topic_across_phases() {
+        let mut plan = parked_chain();
+        let error = apply_handoff_topics(
+            &mut plan,
+            &["phase-a".into(), "phase-b".into()],
+            vec![topic("phase-a", "shared"), topic("phase-b", "shared")],
+        )
+        .expect_err("one topic maps to one file");
+
+        assert!(error.to_string().contains("unique kebab-case slugs"));
+    }
+
+    #[test]
+    fn apply_handoff_topics_rejects_a_non_kebab_slug_or_unknown_phase() {
+        let mut plan = parked_chain();
+        let ids = ["phase-a".into(), "phase-b".into()];
+        assert!(
+            apply_handoff_topics(&mut plan, &ids, vec![topic("phase-a", "Phase A Notes")],)
+                .is_err()
+        );
+        assert!(
+            apply_handoff_topics(&mut plan, &ids, vec![topic("not-in-plan", "topic")],).is_err()
+        );
+        // A rejected topic leaves the plan untouched.
+        assert!(plan
+            .phases
+            .iter()
+            .all(|phase| phase.handoff_topic.is_none()));
     }
 
     #[test]

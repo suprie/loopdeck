@@ -19,6 +19,33 @@ const HANDOFFS_DIR: &str = "handoffs";
 const AGENT_ARTIFACTS_DIR: &str = "handoff-artifacts";
 const MAX_FRONTMATTER_BYTES: usize = 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024;
+const LEDGER_FILE: &str = "ledger.json";
+
+/// Graph-native handoff audit data. Artifacts remain Markdown; the ledger is
+/// deliberately plain JSON so nodes and edges can be queried independently.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HandoffLedger {
+    #[serde(default)]
+    pub nodes: Vec<HandoffLedgerNode>,
+    #[serde(default)]
+    pub links: Vec<HandoffLedgerLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoffLedgerNode {
+    pub topic: String,
+    pub path: String,
+    pub author_role: String,
+    pub phase: String,
+    pub artifact_type: ArtifactType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoffLedgerLink {
+    pub from_topic: String,
+    pub to_topic: String,
+    pub relation: String,
+}
 
 /// The kinds of contract artifacts that can cross a phase boundary.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +111,29 @@ pub fn store_dir(repo_path: &Path) -> PathBuf {
     repo_path.join(".loopdeck").join(HANDOFFS_DIR)
 }
 
+pub fn ledger_path(repo_path: &Path) -> PathBuf {
+    store_dir(repo_path).join(LEDGER_FILE)
+}
+
+pub fn load_ledger(repo_path: &Path) -> Result<HandoffLedger, AppError> {
+    let path = ledger_path(repo_path);
+    if !path.exists() {
+        return Ok(HandoffLedger::default());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    serde_json::from_str(&raw)
+        .map_err(|error| AppError::RunPlan(format!("handoff ledger is invalid JSON: {error}")))
+}
+
+pub fn save_ledger(repo_path: &Path, ledger: &HandoffLedger) -> Result<(), AppError> {
+    let path = ledger_path(repo_path);
+    let contents = serde_json::to_string_pretty(ledger).map_err(|error| {
+        AppError::RunPlan(format!("could not serialize the handoff ledger: {error}"))
+    })?;
+    crate::persist::atomic_write(&path, &contents)?;
+    Ok(())
+}
+
 /// Stable topic slug used by the executor when it asks an agent to emit a
 /// phase artifact. The full execution id is retained, with separators mapped
 /// to hyphens so it cannot escape the store directory.
@@ -116,8 +166,8 @@ pub fn artifact_path(repo_path: &Path, topic: &str) -> Result<PathBuf, AppError>
 /// location is the executor's staging convention; the second is accepted for
 /// agents that follow the public store path literally. Neither location is
 /// ever used as the persistent destination in the main checkout.
-pub fn agent_artifact_path(worktree: &Path, phase: &str) -> Result<PathBuf, AppError> {
-    let topic = topic_for_phase(phase);
+pub fn agent_artifact_path(worktree: &Path, topic: &str) -> Result<PathBuf, AppError> {
+    let topic = topic_for_phase(topic);
     if topic.is_empty() {
         return Err(AppError::Conflict("handoff topic cannot be empty".into()));
     }
@@ -151,6 +201,11 @@ pub fn load_artifact(repo_path: &Path, topic: &str) -> Result<Option<Artifact>, 
 /// Validate and persist a new artifact. Existing topics are deliberately not
 /// replaceable: retries must fail while preserving the original handoff.
 pub fn save_artifact(repo_path: &Path, artifact: &Artifact) -> Result<(), AppError> {
+    // Normalize before validation so a directly-constructed artifact gets the
+    // same schema headings a copied agent artifact does.
+    let mut artifact = artifact.clone();
+    normalize_schema_headings(&mut artifact);
+    let artifact = &artifact;
     validate_artifact(artifact, None)?;
     let destination = artifact_path(repo_path, &artifact.record.artifact)?;
     if destination.exists() {
@@ -161,6 +216,30 @@ pub fn save_artifact(repo_path: &Path, artifact: &Artifact) -> Result<(), AppErr
     }
     let contents = render_artifact(artifact)?;
     crate::persist::atomic_write(&destination, &contents)?;
+    let mut ledger = load_ledger(repo_path)?;
+    ledger.nodes.push(HandoffLedgerNode {
+        topic: artifact.record.artifact.clone(),
+        path: destination
+            .strip_prefix(repo_path)
+            .unwrap_or(&destination)
+            .to_string_lossy()
+            .into_owned(),
+        author_role: artifact.record.author_role.clone(),
+        phase: artifact.record.phase.clone(),
+        artifact_type: artifact.record.artifact_type,
+    });
+    ledger.links.extend(
+        artifact
+            .record
+            .cites
+            .iter()
+            .map(|source| HandoffLedgerLink {
+                from_topic: source.clone(),
+                to_topic: artifact.record.artifact.clone(),
+                relation: "cites".into(),
+            }),
+    );
+    save_ledger(repo_path, &ledger)?;
     Ok(())
 }
 
@@ -170,8 +249,15 @@ pub fn copy_agent_artifact(
     repo_path: &Path,
     worktree: &Path,
     phase: &str,
+    topic: &str,
 ) -> Result<Artifact, AppError> {
-    let source = agent_artifact_path(worktree, phase)?;
+    let topic = topic_for_phase(topic);
+    if topic.is_empty() {
+        return Err(AppError::RunPlan(format!(
+            "phase \"{phase}\" has no configured handoff topic"
+        )));
+    }
+    let source = agent_artifact_path(worktree, &topic)?;
     if !source.is_file() {
         return Err(AppError::RunPlan(format!(
             "phase \"{phase}\" completed without its handoff artifact at {}",
@@ -179,7 +265,6 @@ pub fn copy_agent_artifact(
         )));
     }
     let contents = std::fs::read_to_string(&source)?;
-    let topic = topic_for_phase(phase);
     let mut artifact = parse_artifact(&contents, &topic, source)?;
     if artifact.record.phase != phase {
         return Err(AppError::RunPlan(format!(
@@ -215,12 +300,128 @@ fn parse_artifact(contents: &str, topic: &str, path: PathBuf) -> Result<Artifact
         )));
     }
     let record: ArtifactRecord = serde_yaml::from_str(frontmatter)?;
-    let artifact = Artifact {
+    let mut artifact = Artifact {
         record: ArtifactRecord { path, ..record },
         body: body.to_string(),
     };
+    normalize_schema_headings(&mut artifact);
     validate_artifact(&artifact, Some(topic))?;
     Ok(artifact)
+}
+
+/// Rewrite the producer's body into the contract's schema headings. The spike
+/// observed producer-side heading drift (free-form `##` sections instead of
+/// `## Summary` / `## Requirements`), so the executor normalizes here rather
+/// than trusting the agent: known aliases are canonicalized, unknown
+/// top-level headings are demoted (they cannot masquerade as schema
+/// sections), and a missing `## Summary` is generated from the record's
+/// one-line summary. Content is preserved, never dropped.
+fn normalize_schema_headings(artifact: &mut Artifact) {
+    struct Section {
+        heading: String,
+        body: String,
+    }
+
+    // Preserve the producer's trailing-newline convention: an artifact that
+    // did not end with a newline must round-trip byte-identically.
+    let ended_with_newline = artifact.body.ends_with('\n');
+    let mut preamble = String::new();
+    let mut sections: Vec<Section> = Vec::new();
+    for line in artifact.body.lines() {
+        if let Some(title) = line.strip_prefix("## ") {
+            let heading = match canonical_section(title) {
+                Some(canonical) => format!("## {canonical}"),
+                None => format!("### {}", title.trim()),
+            };
+            sections.push(Section {
+                heading,
+                body: String::new(),
+            });
+        } else if line.starts_with("# ") {
+            // A document title above the schema sections: nest it so it can
+            // never be mistaken for one of the contract's top-level headings.
+            let nested = format!("##{line}");
+            match sections.last_mut() {
+                Some(section) => {
+                    section.body.push_str(&nested);
+                    section.body.push('\n');
+                }
+                None => {
+                    preamble.push_str(&nested);
+                    preamble.push('\n');
+                }
+            }
+        } else {
+            match sections.last_mut() {
+                Some(section) => {
+                    section.body.push_str(line);
+                    section.body.push('\n');
+                }
+                None => {
+                    preamble.push_str(line);
+                    preamble.push('\n');
+                }
+            }
+        }
+    }
+
+    match sections
+        .iter()
+        .position(|section| section.heading == "## Summary")
+    {
+        Some(index) => {
+            if !preamble.is_empty() {
+                sections[index].body = format!("{preamble}{}", sections[index].body);
+            }
+        }
+        None => {
+            let mut body = artifact.record.summary.clone();
+            if !preamble.is_empty() {
+                body.push_str("\n\n");
+                body.push_str(&preamble);
+            }
+            body.push('\n');
+            sections.insert(
+                0,
+                Section {
+                    heading: "## Summary".into(),
+                    body,
+                },
+            );
+        }
+    }
+
+    let mut body = String::new();
+    for section in sections {
+        body.push_str(&section.heading);
+        body.push('\n');
+        body.push_str(&section.body);
+    }
+    if ended_with_newline {
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+    } else {
+        while body.ends_with('\n') {
+            body.pop();
+        }
+    }
+    artifact.body = body;
+}
+
+/// Map a free-form heading to the contract's canonical section name. Matching
+/// is case-insensitive and tolerant of whitespace and a trailing colon.
+fn canonical_section(title: &str) -> Option<&'static str> {
+    let normalized = title.trim().trim_end_matches(':').to_ascii_lowercase();
+    let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    match normalized.as_str() {
+        "summary" | "overview" | "description" | "goal" | "goals" => Some("Summary"),
+        "requirement" | "requirements" | "scope" => Some("Requirements"),
+        "constraint" | "constraints" | "limitation" | "limitations" => Some("Constraints"),
+        "non-goal" | "non-goals" | "non goal" | "non goals" => Some("Non-Goals"),
+        "open question" | "open questions" | "question" | "questions" => Some("Open Questions"),
+        _ => None,
+    }
 }
 
 fn validate_artifact(artifact: &Artifact, expected_topic: Option<&str>) -> Result<(), AppError> {
@@ -411,12 +612,43 @@ mod tests {
         assert_eq!(loaded.record.artifact, "store-model");
         assert_eq!(loaded.record.author_role, "engineering-manager");
         assert_eq!(loaded.record.artifact_type, ArtifactType::Plan);
+        assert_eq!(loaded.record.phase, original.record.phase);
         assert_eq!(loaded.body, original.body);
         assert_eq!(
             loaded.record.path,
             artifact_path(&dir, "store-model").unwrap()
         );
+        let ledger = load_ledger(&dir).unwrap();
+        assert_eq!(ledger.nodes.len(), 1);
+        assert_eq!(ledger.nodes[0].topic, "store-model");
+        assert_eq!(ledger.nodes[0].author_role, "engineering-manager");
+        assert!(ledger.links.is_empty());
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ledger_roundtrips_as_plain_json_nodes_and_links() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-ledger-{}", uuid::Uuid::new_v4()));
+        let ledger = HandoffLedger {
+            nodes: vec![HandoffLedgerNode {
+                topic: "upstream-plan".into(),
+                path: ".loopdeck/handoffs/upstream-plan.md".into(),
+                author_role: "planner".into(),
+                phase: "epic/plan".into(),
+                artifact_type: ArtifactType::Plan,
+            }],
+            links: vec![HandoffLedgerLink {
+                from_topic: "upstream-plan".into(),
+                to_topic: "downstream-analysis".into(),
+                relation: "cites".into(),
+            }],
+        };
+        save_ledger(&dir, &ledger).unwrap();
+        assert_eq!(load_ledger(&dir).unwrap(), ledger);
+        let raw = std::fs::read_to_string(ledger_path(&dir)).unwrap();
+        assert!(raw.contains("\"nodes\""));
+        assert!(raw.contains("\"links\""));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -459,7 +691,13 @@ mod tests {
         );
         std::fs::write(&source, render_artifact(&written).unwrap()).unwrap();
 
-        let copied = copy_agent_artifact(&root, &worktree, "agent-handoff/store-model").unwrap();
+        let copied = copy_agent_artifact(
+            &root,
+            &worktree,
+            "agent-handoff/store-model",
+            "agent-handoff-store-model",
+        )
+        .unwrap();
         assert_eq!(
             copied.record.path,
             artifact_path(&root, "agent-handoff-store-model").unwrap()
@@ -470,5 +708,89 @@ mod tests {
             .exists());
 
         std::fs::remove_dir_all(root).ok();
+    }
+
+    fn copy_from_worktree(
+        root: &Path,
+        worktree: &Path,
+        contents: &str,
+    ) -> Result<Artifact, AppError> {
+        let source = worktree.join(".loopdeck/handoff-artifacts/drifted.md");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, contents).unwrap();
+        copy_agent_artifact(root, worktree, "agent-handoff/artifact-write", "drifted")
+    }
+
+    /// The executor, not the agent, owns the schema headings (spike finding:
+    /// producers drifted into free-form `##` sections).
+    #[test]
+    fn copy_normalizes_drifted_headings_into_the_schema() {
+        let root = std::env::temp_dir().join(format!("loopdeck-drift-{}", uuid::Uuid::new_v4()));
+        let worktree = root.join("worktree");
+        let copied = copy_from_worktree(
+            &root,
+            &worktree,
+            "---\nartifact: drifted\nauthor_role: planner\nphase: agent-handoff/artifact-write\ntype: report\ncreated: 2026-10-28\nsummary: Notes from the phase.\n---\n## Overview\nHigh level.\n\n## Findings\n- one\n- two\n",
+        )
+        .expect("drifted artifact is normalized, not rejected");
+
+        assert!(copied.body.starts_with("## Summary\nHigh level.\n"));
+        assert!(copied.body.contains("High level."));
+        assert!(copied.body.contains("### Findings"));
+        assert!(!copied.body.contains("\n## Findings"));
+        assert_eq!(
+            load_artifact(&root, "drifted").unwrap().unwrap().body,
+            copied.body
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn copy_generates_summary_when_the_producer_omits_one() {
+        let root = std::env::temp_dir().join(format!("loopdeck-summary-{}", uuid::Uuid::new_v4()));
+        let worktree = root.join("worktree");
+        let copied = copy_from_worktree(
+            &root,
+            &worktree,
+            "---\nartifact: drifted\nauthor_role: planner\nphase: agent-handoff/artifact-write\ntype: report\ncreated: 2026-10-28\nsummary: One-line summary from frontmatter.\n---\nPlain body without headings.\n",
+        )
+        .expect("missing Summary is generated mechanically");
+
+        assert!(copied
+            .body
+            .starts_with("## Summary\nOne-line summary from frontmatter.\n\nPlain body"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn copy_rejects_a_missing_configured_topic() {
+        let root = std::env::temp_dir().join(format!("loopdeck-topic-{}", uuid::Uuid::new_v4()));
+        let error = copy_agent_artifact(&root, &root, "agent-handoff/artifact-write", "")
+            .expect_err("empty topic must not derive one from the phase id");
+        assert!(error.to_string().contains("no configured handoff topic"));
+    }
+
+    #[test]
+    fn cites_become_ledger_links() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-cites-{}", uuid::Uuid::new_v4()));
+        let mut upstream = artifact(
+            "upstream",
+            "agent-handoff/store-model",
+            ArtifactType::Report,
+        );
+        save_artifact(&dir, &upstream).unwrap();
+        upstream.record.artifact = "downstream".into();
+        upstream.record.cites = vec!["upstream".into()];
+        upstream.record.author_role = "qa".into();
+        save_artifact(&dir, &upstream).unwrap();
+
+        let ledger = load_ledger(&dir).unwrap();
+        assert_eq!(ledger.nodes.len(), 2);
+        assert_eq!(ledger.links.len(), 1);
+        assert_eq!(ledger.links[0].from_topic, "upstream");
+        assert_eq!(ledger.links[0].to_topic, "downstream");
+        assert_eq!(ledger.links[0].relation, "cites");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

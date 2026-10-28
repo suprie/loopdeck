@@ -27,6 +27,7 @@ import type {
   ProgressSnapshot,
   RunBudgets,
   PhaseAgentAssignment,
+  PhaseHandoffTopic,
   RunPlan,
   RunReport,
   RunQueueStatus,
@@ -278,7 +279,10 @@ export async function exportExecutionSummary(path: string): Promise<string> {
  * resolve to a real PRD checklist loop.
  * `assignments` (prd-role-foundations Phase 4) staffs phases with roster
  * agents; unlisted phases run with the default agent.
- * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments) -> Result<RunPlan, AppError>
+ * `handoffTopics` (prd-agent-handoff Phase 1) opts phases into a contract
+ * artifact; unlisted phases emit nothing. Each topic is a unique kebab-case
+ * slug fixed at queue time.
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments, handoff_topics) -> Result<RunPlan, AppError>
  */
 export async function createRunPlan(
   path: string,
@@ -287,6 +291,7 @@ export async function createRunPlan(
   draftPrAuthorized: boolean,
   budgets: RunBudgets,
   assignments: PhaseAgentAssignment[] = [],
+  handoffTopics: PhaseHandoffTopic[] = [],
 ): Promise<RunPlan> {
   return invoke<RunPlan>("create_run_plan", {
     path,
@@ -295,6 +300,7 @@ export async function createRunPlan(
     draftPrAuthorized,
     budgets,
     assignments,
+    handoffTopics,
   });
 }
 
