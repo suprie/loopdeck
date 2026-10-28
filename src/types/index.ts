@@ -623,6 +623,10 @@ export interface RunPhase {
   /** Roster entry name captured at queue time — durable per-role
    * attribution for the run report. */
   assigned_agent_name?: string;
+  /** Stable handoff artifact topic configured for this phase
+   * (`prd-agent-handoff` Phase 1). Absent = the phase has no artifact
+   * contract; the executor emits nothing for it. */
+  handoff_topic?: string;
 }
 
 /** Queue-time per-phase staffing choice passed to `create_run_plan`
@@ -633,6 +637,14 @@ export interface PhaseAgentAssignment {
   execution_id: string;
   agent_id: string;
   agent_name?: string;
+}
+
+/** Queue-time stable Markdown artifact topic for a phase that publishes a
+ * handoff (`prd-agent-handoff` Phase 1). Topics are explicit — the executor
+ * never derives one from the execution id. Mirrors Rust `PhaseHandoffTopic`. */
+export interface PhaseHandoffTopic {
+  execution_id: string;
+  topic: string;
 }
 
 /** The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`. */

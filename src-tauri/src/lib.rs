@@ -42,6 +42,8 @@ mod transition;
 mod charter_injection_tests;
 #[cfg(test)]
 mod role_assignment_tests;
+#[cfg(test)]
+mod role_foundations_tests;
 
 #[cfg(test)]
 mod role_demo_tests;

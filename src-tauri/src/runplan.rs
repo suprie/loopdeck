@@ -166,6 +166,11 @@ pub struct RunPhase {
     /// an unresolvable UUID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_agent_name: Option<String>,
+    /// Stable handoff artifact topic configured for this phase. `None` means
+    /// this phase has no artifact contract and completion must not infer one
+    /// from the execution id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_topic: Option<String>,
 }
 
 /// Queue-time per-phase staffing choice (`prd-role-foundations` Phase 4):
@@ -181,6 +186,15 @@ pub struct PhaseAgentAssignment {
     /// is ignored) so the persisted attribution is authoritative.
     #[serde(default)]
     pub agent_name: Option<String>,
+}
+
+/// Queue-time stable Markdown artifact topic for a phase that publishes a
+/// handoff. Topics are explicit so the executor never changes a consumer's
+/// reference by deriving a slug from a phase identifier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhaseHandoffTopic {
+    pub execution_id: String,
+    pub topic: String,
 }
 
 /// The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`.

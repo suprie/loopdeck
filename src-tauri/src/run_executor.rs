@@ -532,6 +532,7 @@ pub(crate) fn build_run_plan(
                 wall_clock_secs: 0,
                 assigned_agent_id: assignment.map(|a| a.agent_id.clone()),
                 assigned_agent_name: assignment.and_then(|a| a.agent_name.clone()),
+                handoff_topic: None,
             }
         })
         .collect();
