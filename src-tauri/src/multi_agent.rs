@@ -546,6 +546,7 @@ async fn execute_subrun(
         title,
         &callback,
         None,
+        None,
         Some(&assignment.config),
         Some(&linked.path),
         true,

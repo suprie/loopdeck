@@ -23,6 +23,8 @@ use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::handoff;
 use crate::limits;
+use crate::provider_event::{RunEvent, RunEventEnvelope};
+use crate::provider_normalize::RunEventChannel;
 use crate::run_executor::{
     self, build_batch_interview_prompt, build_codex_batch_interview_prompt,
     build_codex_interview_prompt, build_combined_phase_prompt, build_interview_prompt,
@@ -47,6 +49,41 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 const RUN_QUEUE_EVENT: &str = "run-queue-event";
+
+/// Additive normalized event topic. The legacy `RUN_QUEUE_EVENT` above keeps
+/// its exact `ClaudeEvent` payload; this stream carries the provider-neutral
+/// `RunEvent` produced by the same adapter conversion.
+const RUN_EVENT_TOPIC: &str = "run-event";
+
+/// A `Channel<RunEvent>` whose sink re-broadcasts on the app-wide topic. The
+/// detached executor cannot hold a frontend-owned IPC channel, so this
+/// mirrors the legacy channel's re-emit trick.
+fn normalized_run_channel(
+    app: AppHandle,
+    project_path: String,
+    execution_id: String,
+) -> Channel<RunEvent> {
+    Channel::new(move |event| {
+        let event = match event.deserialize::<RunEvent>() {
+            Ok(event) => event,
+            Err(error) => {
+                warn!("failed to decode normalized run activity: {error}");
+                return Ok(());
+            }
+        };
+        if let Err(error) = app.emit(
+            RUN_EVENT_TOPIC,
+            RunEventEnvelope {
+                project_path: project_path.clone(),
+                execution_id: execution_id.clone(),
+                event,
+            },
+        ) {
+            warn!("failed to emit normalized run activity: {error}");
+        }
+        Ok(())
+    })
+}
 
 #[derive(Clone, Serialize)]
 struct RunQueueEvent {
@@ -1361,6 +1398,7 @@ pub async fn run_phase_interview(
         Some(loc.title.clone()),
         &channel,
         None,
+        None,
         Some(&agent_config),
         None,
         false,
@@ -1478,6 +1516,7 @@ pub async fn run_batch_phase_interviews(
         &prompt,
         Some(format!("Pre-flight interview ({} phases)", phases.len())),
         &channel,
+        None,
         None,
         Some(&agent_config),
         None,
@@ -1792,6 +1831,8 @@ async fn execute_run(
             .collect::<Vec<_>>()
             .join(",");
         let channel_execution_id = event_execution_id.clone();
+        let run_project_path = event_project_path.clone();
+        let run_execution_id = channel_execution_id.clone();
         let channel: Channel<ClaudeEvent> = Channel::new(move |event| {
             let event = match event.deserialize::<serde_json::Value>() {
                 Ok(event) => event,
@@ -1812,6 +1853,10 @@ async fn execute_run(
             }
             Ok(())
         });
+        let run_events = Some(RunEventChannel::new(
+            plan.id.clone(),
+            normalized_run_channel(app.clone(), run_project_path, run_execution_id),
+        ));
         let token_budget = TokenBudget::new(phase_token_cap);
         let phase_started = Instant::now();
         let run_remaining = run_timeout.saturating_sub(run_started.elapsed());
@@ -1838,6 +1883,7 @@ async fn execute_run(
             Some(turn_title),
             &channel,
             Some(&token_budget),
+            run_events,
             // The batch's staffing resolved above — the assigned roster
             // entry's connection settings *and* charter, or the default
             // agent config when the phase is unassigned.

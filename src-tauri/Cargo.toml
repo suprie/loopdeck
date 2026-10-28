@@ -32,6 +32,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 tokio = { version = "1.52.3", features = ["process", "io-util", "rt", "macros", "time"] }
 regex = "1"
+# TypeScript bindings for the provider-neutral run-event contract. Generated
+# files live in `src/types/generated/` and CI fails on drift.
+ts-rs = { version = "12", features = ["chrono-impl"] }
 
 [profile.release]
 panic = "abort"

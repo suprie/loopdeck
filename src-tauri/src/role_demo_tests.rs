@@ -236,6 +236,7 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
             Some(loc.title.clone()),
             &channel,
             Some(&token_budget),
+            None,
             Some(&agent_config),
             None,
             true,

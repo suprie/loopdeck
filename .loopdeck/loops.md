@@ -4,15 +4,16 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Status**: ready — the `updatedInput` fix is committed on `feat/provider-event-fixtures`, and a fresh run plan is queued against worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`, cut from that branch. Rebuild/restart LoopDeck, then start the queued run.
-- **Next**: start the queued `provider-contract` run and let the four phases execute in order.
+- **Status**: in_progress — `provider-contract` Phases 2–3 are implemented in worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`: both adapters dual-emit normalized `RunEvent`s, ts-rs bindings are CI-drift-checked, the run-queue consumer migrated, fixture/frontend contract tests pass, and the verify gate is PASS. Draft PR #110 is open.
+- **Next**: review and merge draft PR #110; then start the next queued `execution-foundations` PRD.
 
 ## Next Steps
 - [x] Fix the Claude control_response schema and commit it.
 - [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
-- [ ] Rebuild/restart LoopDeck, then start the queued `provider-contract` run.
+- [x] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope.
+- [x] `execution-foundations` / `prd-provider-contract` Phase 3 — fixture-based contract tests plus the migrated consumer's projection test.
+- [ ] Review & merge draft PR #110: https://github.com/suprie/loopdeck/pull/110
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/109
-- [ ] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope (fixtures are ready under `src-tauri/tests/fixtures/provider-events/`).
 - [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
 - [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
 - [ ] Review and publish the new beta corporate site in `website/`
@@ -26,6 +27,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-28 — execution-foundations / prd-provider-contract Phases 2–3
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: Both adapters now convert provider output at their boundary into the versioned `RunEvent` envelope and dual-emit it alongside the unchanged `ClaudeEvent` channel. Claude lines and Codex app-server messages map to started/content/tool/decision/usage/terminal/unsupported with a per-segment terminal gate, redaction, and `auto-allow` encoded as `allowed` + summary prefix. `ts-rs` generates `src/types/generated/` with a CI drift check; `useRunQueueEvents` migrated to the `run-event` topic through the pure `runEventProjection` reducer. Fixture parity tests (`provider_contract_tests.rs`) and reducer tests prove one terminal per segment, preserved approval payloads, and typed bindings. Full Rust suite, clippy, frontend build, and frontend tests pass.
 
 ### 2026-10-28 — Fix Claude control_response schema blocking unattended mutations
 - **Status**: completed

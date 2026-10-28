@@ -8,6 +8,8 @@ use crate::conversation::Attachment;
 use crate::error::AppError;
 use crate::harness::HarnessAdapter;
 use crate::permission::{Decision, PermissionPolicy};
+use crate::provider_event::{DecisionState, Provider, TerminalOutcome};
+use crate::provider_normalize::{terminal_outcome_for_error, RunEventChannel, RunEventSink};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -38,14 +40,14 @@ const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// question. We intercept this *before* the auto-permission policy so the
 /// question can be surfaced to the human instead of auto-allowed with empty
 /// answers.
-const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+pub(crate) const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 
 /// The tool name Claude uses to leave `plan` permission mode once it has
 /// finished planning. Intercepted with the same precedence as
 /// `ASK_USER_QUESTION_TOOL` — before the destructive floor / manual-approval /
 /// auto-policy arms — since it's neither a mutating tool call nor a floor
 /// candidate, just a request for the human to review the plan.
-const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
+pub(crate) const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
 
 enum ReadOutcome {
     ReadResult(usize),
@@ -252,9 +254,45 @@ pub struct ClaudeSession {
     // fix it. `None` forces the next call to always re-send and revalidate,
     // regardless of which mode it requests.
     plan_mode_active: Option<bool>,
+    /// Optional provider-neutral dual-emit target, attached by the command
+    /// layer for the duration of a run. When absent, the legacy `ClaudeEvent`
+    /// channel behaves exactly as before.
+    run_event_channel: Option<RunEventChannel>,
+    /// Per-turn sink; created from `run_event_channel` at the start of a
+    /// streaming send and cleared on every exit path.
+    run_events: Option<RunEventSink>,
 }
 
 impl ClaudeSession {
+    /// Attach the separate normalized `RunEvent` stream. The legacy
+    /// `Channel<ClaudeEvent>` is untouched — this is the additive half of the
+    /// dual-emit.
+    pub fn attach_run_events(&mut self, channel: RunEventChannel) {
+        self.run_event_channel = Some(channel);
+    }
+
+    fn begin_run_event_segment(&mut self) {
+        // Every turn is its own run segment. The provider's `system` init line
+        // supplies `started` (with the session ID) on a fresh process; a
+        // cached session that never re-emits init simply has no start event
+        // for that later segment, which the contract allows.
+        self.run_events = self.run_event_channel.as_ref().map(|config| {
+            RunEventSink::new(
+                config.run_id.clone(),
+                Provider::Claude,
+                config.channel.clone(),
+            )
+        });
+    }
+
+    fn end_run_event_segment(&mut self, result: &Result<AgentResponse, AppError>) {
+        if let Err(error) = result {
+            if let Some(sink) = self.run_events.as_mut() {
+                sink.terminal(terminal_outcome_for_error(error), Some(error.to_string()));
+            }
+        }
+        self.run_events = None;
+    }
     /// Spawn a persistent `claude --input-format stream-json` process.
     ///
     /// `resume_session_id` is forwarded to claude as `--resume <id>` when set,
@@ -405,6 +443,8 @@ impl ClaudeSession {
             // a real confirmed fact, not an assumption, so `Some(false)` is
             // correct here rather than `None`.
             plan_mode_active: Some(false),
+            run_event_channel: None,
+            run_events: None,
         })
     }
 
@@ -507,6 +547,22 @@ impl ClaudeSession {
             });
         }
 
+        if let Some(sink) = self.run_events.as_mut() {
+            let state = match &decision {
+                Decision::Allow => DecisionState::Allowed,
+                Decision::Deny(_) => DecisionState::Denied,
+            };
+            let event = sink.normalizer().approval_resolved(
+                request_id,
+                &request.tool_name,
+                &request.input,
+                state,
+                decision.reason(),
+                autonomous_auto_allow,
+            );
+            sink.send(event);
+        }
+
         Ok(())
     }
 
@@ -566,10 +622,20 @@ impl ClaudeSession {
             if let Some(channel) = channel {
                 let _ = channel.send(ClaudeEvent::PlanApproval {
                     request_id: request_id.to_string(),
-                    plan,
+                    plan: plan.clone(),
                     decision: String::from("auto-allow"),
                     reason: String::new(),
                 });
+            }
+            if let Some(sink) = self.run_events.as_mut() {
+                let event = sink.normalizer().plan_resolved(
+                    request_id,
+                    &plan,
+                    DecisionState::Allowed,
+                    "",
+                    true,
+                );
+                sink.send(event);
             }
             return Ok(());
         }
@@ -652,10 +718,21 @@ impl ClaudeSession {
         if let Some(channel) = channel {
             let _ = channel.send(ClaudeEvent::PlanApproval {
                 request_id: request_id.to_string(),
-                plan,
+                plan: plan.clone(),
                 decision: decision.behavior().to_string(),
                 reason: decision.reason().to_string(),
             });
+        }
+
+        if let Some(sink) = self.run_events.as_mut() {
+            let state = match &decision {
+                Decision::Allow => DecisionState::Allowed,
+                Decision::Deny(_) => DecisionState::Denied,
+            };
+            let event =
+                sink.normalizer()
+                    .plan_resolved(request_id, &plan, state, decision.reason(), false);
+            sink.send(event);
         }
 
         Ok(())
@@ -820,8 +897,16 @@ impl ClaudeSession {
             );
         }
 
-        self.write_allow_with_updated_input(request_id, updated_input)
-            .await
+        let write = self
+            .write_allow_with_updated_input(request_id, updated_input)
+            .await;
+        if write.is_ok() {
+            if let Some(sink) = self.run_events.as_mut() {
+                let event = sink.normalizer().question_answered(request_id, &questions);
+                sink.send(event);
+            }
+        }
+        write
     }
 
     /// Handle a `can_use_tool` request for a mutating/executing tool by parking
@@ -977,6 +1062,22 @@ impl ClaudeSession {
                 decision: decision.behavior().to_string(),
                 reason: decision.reason().to_string(),
             });
+        }
+
+        if let Some(sink) = self.run_events.as_mut() {
+            let state = match &decision {
+                Decision::Allow => DecisionState::Allowed,
+                Decision::Deny(_) => DecisionState::Denied,
+            };
+            let event = sink.normalizer().approval_resolved(
+                request_id,
+                &request.tool_name,
+                &request.input,
+                state,
+                decision.reason(),
+                false,
+            );
+            sink.send(event);
         }
 
         Ok(())
@@ -1278,6 +1379,7 @@ impl ClaudeSession {
         // holding it forever. The deadline is captured here once and threaded
         // into `answer_control_request` below.
         let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
+        self.begin_run_event_segment();
         let result = async {
             // ---- write the user turn to stdin ----
             let stdin = self
@@ -1522,6 +1624,16 @@ impl ClaudeSession {
                     // event never arrives on interrupt, so we synthesize a
                     // minimal response + emit Result so the frontend
                     // reconciles (clears streaming bubble, reloads transcript).
+                    // The provider never sends a terminal line for an
+                    // interrupt, so the normalized stream records the
+                    // LoopDeck-owned outcome here. The terminal gate makes
+                    // this a no-op if a real result already landed.
+                    if let Some(sink) = self.run_events.as_mut() {
+                        sink.terminal(
+                            TerminalOutcome::Interrupted,
+                            Some("turn interrupted by user".into()),
+                        );
+                    }
                     let partial = acc.clone_partial();
                     let _ = channel.send(ClaudeEvent::Result {
                         text: partial.text.clone(),
@@ -1551,6 +1663,13 @@ impl ClaudeSession {
                     continue;
                 }
                 tracing::debug!(target: "loopdeck::claude_wire", "← claude: {trimmed}");
+                // Dual-emit: convert the same wire line into the normalized
+                // stream before any legacy handling. Control requests become
+                // a pending decision here; their resolution is emitted by the
+                // answer_* methods below.
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.convert_claude_line(trimmed);
+                }
                 let stream_event = match parse_stream_line(trimmed) {
                     Some(ev) => ev,
                     None => continue, // unrecognized line — skip
@@ -1698,6 +1817,12 @@ impl ClaudeSession {
             Ok(response)
         }
         .await;
+
+        // Close the normalized segment: an Err that produced no provider
+        // terminal gets one synthesized from the adapter's error taxonomy.
+        // A normal result already emitted its terminal, so the gate drops any
+        // duplicate here.
+        self.end_run_event_segment(&result);
 
         // Defensive: clear any stale parking entries. A normal turn end already
         // cleared them via the result/answer paths, but an errored / timed-out /

@@ -222,6 +222,7 @@ pub async fn run_delivery_rubric(
         &prompt,
         Some(active.title.clone()),
         &channel,
+        None,
     )
     .await?;
     let rubric = extract_rubric_result(&response.result, Utc::now()).ok_or_else(|| {

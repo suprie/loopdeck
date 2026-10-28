@@ -1,23 +1,31 @@
 //! Versioned provider-neutral run-event contract.
 //!
-//! Adapters will convert Claude/Codex wire events into this envelope before
-//! persistence. The current `ClaudeEvent` channel remains unchanged until the
-//! provider-normalization phase.
+//! Adapters convert Claude/Codex wire events into this envelope at their
+//! boundary. During the normalization phase the legacy `ClaudeEvent` channel
+//! keeps its exact payloads and every normalized event is dual-emitted on a
+//! separate `RunEvent` stream, so the two surfaces can be compared before the
+//! replay migration retires the legacy channel.
+//!
+//! The TypeScript bindings under `src/types/generated/` are generated from
+//! these types with `ts-rs`; CI regenerates them and fails on drift.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 pub const RUN_EVENT_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum Provider {
     Claude,
     Codex,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum Capability {
     Text,
     Thinking,
@@ -29,7 +37,8 @@ pub enum Capability {
     Interrupt,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub struct CapabilitySet {
     pub provider: Provider,
     pub supported: Vec<Capability>,
@@ -68,29 +77,33 @@ impl CapabilitySet {
 /// A diagnostic pointer, never a product identity and never the raw provider
 /// payload. Raw payloads remain in provider-scoped diagnostics under the
 /// existing redaction policy.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub struct RawProviderRef {
     pub provider_event_id: Option<String>,
     pub payload_sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum ContentKind {
     Text,
     Thinking,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum DecisionKind {
     Approval,
     Question,
     PlanApproval,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum DecisionState {
     Pending,
     Allowed,
@@ -99,8 +112,9 @@ pub enum DecisionState {
     Expired,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum TerminalOutcome {
     Completed,
     Error,
@@ -109,8 +123,9 @@ pub enum TerminalOutcome {
     Killed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub enum RunEventPayload {
     Started {
         session_id: Option<String>,
@@ -128,10 +143,23 @@ pub enum RunEventPayload {
         decision_id: String,
         kind: DecisionKind,
         state: DecisionState,
+        /// Short redacted narration (tool/question/plan). Automatic policy
+        /// approval is encoded here with the stable `auto-allow:` prefix.
         summary: Option<String>,
+        /// Kind-specific redacted render detail: question specs, plan markdown,
+        /// or the approval tool input as JSON. Present so a consumer never has
+        /// to re-read the provider payload to render a decision card; it is
+        /// redacted and truncated, never a raw provider payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail_redacted: Option<String>,
     },
     Usage {
+        // Token counts stay JS `number` (well under 2^53) so the frontend
+        // contract matches the existing UI shape; `bigint` would force a
+        // conversion at every render site for no benefit.
+        #[ts(type = "number")]
         input_tokens: u64,
+        #[ts(type = "number")]
         output_tokens: u64,
         total_cost_usd: Option<f64>,
     },
@@ -150,12 +178,14 @@ pub enum RunEventPayload {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../../src/types/generated/")]
 pub struct RunEvent {
     pub version: u16,
     pub run_id: String,
     /// Reserved for the durable event store; adapters leave this `None` until
     /// the store assigns a monotonic per-run sequence.
+    #[ts(type = "number")]
     pub sequence: Option<u64>,
     pub event_id: String,
     pub timestamp: DateTime<Utc>,
@@ -163,6 +193,19 @@ pub struct RunEvent {
     pub payload: RunEventPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_ref: Option<RawProviderRef>,
+}
+
+/// Transport envelope for the app-wide additive stream.
+///
+/// `event.run_id` identifies the LoopDeck run; `project_path` routes the
+/// stream to the frontend's per-project stores, and `execution_id` names the
+/// queued phase batch that produced it.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/generated/")]
+pub struct RunEventEnvelope {
+    pub project_path: String,
+    pub execution_id: String,
+    pub event: RunEvent,
 }
 
 impl RunEvent {

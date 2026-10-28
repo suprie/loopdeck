@@ -68,6 +68,19 @@ pub fn find_secret(diff: &str) -> Option<(&'static str, &str)> {
     })
 }
 
+/// Mask every known-secret pattern in `text`.
+///
+/// Used by the provider normalizer before a provider payload becomes durable
+/// product state. This is the same pattern set the pre-push scan uses, so a
+/// value that would abort a push can never enter a normalized event.
+pub fn redact_secrets(text: &str) -> String {
+    let mut redacted = text.to_owned();
+    for pattern in patterns() {
+        redacted = pattern.re.replace_all(&redacted, "[redacted]").into_owned();
+    }
+    redacted
+}
+
 /// `git diff --cached` in `repo_path` via the vetted, resolved `git` binary
 /// (same cwd-hijack defenses as every other git spawn in this codebase —
 /// see `binary.rs`).
@@ -278,5 +291,21 @@ mod tests {
     #[test]
     fn run_secret_scan_cli_rejects_unknown_flag() {
         assert_eq!(run_secret_scan_cli(vec!["--bogus".to_string()]), 2);
+    }
+
+    #[test]
+    fn redact_secrets_masks_known_patterns_and_leaves_ordinary_text() {
+        // Build the credential-shaped value at runtime so this test's own
+        // source cannot trip the pre-push scan it exercises.
+        let fake_token = format!("gh{}_1234567890abcdefghijklmnopqrstuvwx", 'p');
+        let text = format!("cargo test --token {fake_token} for /repo");
+        let redacted = redact_secrets(&text);
+        assert!(!redacted.contains(&fake_token));
+        assert!(redacted.contains("/repo"));
+        assert!(find_secret(&redacted).is_none());
+        assert_eq!(
+            redact_secrets("ordinary command output"),
+            "ordinary command output"
+        );
     }
 }
