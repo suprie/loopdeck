@@ -17,6 +17,10 @@ use crate::conversation::{Attachment, ToolCallRecord};
 use crate::error::AppError;
 use crate::harness::HarnessAdapter;
 use crate::permission::{Decision, PermissionPolicy};
+use crate::provider_event::{DecisionState, Provider};
+use crate::provider_normalize::{
+    redact_value, terminal_outcome_for_error, RunEventChannel, RunEventSink,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -75,9 +79,36 @@ pub struct CodexSession {
     /// *first* task prompt sent on this session (role identity first, task
     /// second) and consumed — later turns already share the thread's context.
     charter_prompt: Option<String>,
+    /// Optional provider-neutral dual-emit target (see the provider contract).
+    /// Legacy `ClaudeEvent` channel payloads are unchanged when this is set.
+    run_event_channel: Option<RunEventChannel>,
+    run_events: Option<RunEventSink>,
 }
 
 impl CodexSession {
+    /// Attach the separate normalized `RunEvent` stream for this run.
+    pub fn attach_run_events(&mut self, channel: RunEventChannel) {
+        self.run_event_channel = Some(channel);
+    }
+
+    fn begin_run_event_segment(&mut self) {
+        self.run_events = self.run_event_channel.as_ref().map(|config| {
+            RunEventSink::new(
+                config.run_id.clone(),
+                Provider::Codex,
+                config.channel.clone(),
+            )
+        });
+    }
+
+    fn end_run_event_segment(&mut self, result: &Result<AgentResponse, AppError>) {
+        if let Err(error) = result {
+            if let Some(sink) = self.run_events.as_mut() {
+                sink.terminal(terminal_outcome_for_error(error), Some(error.to_string()));
+            }
+        }
+        self.run_events = None;
+    }
     pub fn spawn(
         cwd: &Path,
         config: &AgentConfig,
@@ -168,6 +199,8 @@ impl CodexSession {
                 .as_ref()
                 .filter(|charter| !charter.is_empty())
                 .map(crate::config::RoleCharter::render),
+            run_event_channel: None,
+            run_events: None,
         })
     }
 
@@ -315,6 +348,7 @@ impl CodexSession {
         token_budget: Option<&TokenBudget>,
         plan_mode: bool,
     ) -> Result<AgentResponse, AppError> {
+        self.begin_run_event_segment();
         let result = self
             .send_turn_inner(
                 text,
@@ -327,6 +361,7 @@ impl CodexSession {
                 plan_mode,
             )
             .await;
+        self.end_run_event_segment(&result);
         match &result {
             Ok(response) => tracing::info!(
                 target: "loopdeck::codex_lifecycle",
@@ -511,7 +546,17 @@ impl CodexSession {
                 continue;
             }
 
-            if message.get("id").is_some() && message.get("method").is_some() {
+            let is_server_request = message.get("id").is_some() && message.get("method").is_some();
+            if !is_server_request {
+                // Dual-emit: notifications convert here. Server requests are
+                // handled below with their richer resolved tool context so a
+                // pending approval is never emitted twice.
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.convert_codex_message(&message);
+                }
+            }
+
+            if is_server_request {
                 self.handle_server_request(
                     &message,
                     channel,
@@ -796,6 +841,9 @@ impl CodexSession {
                     arguments = %truncate_log_value(&arguments),
                     "Codex dynamic tool call requested"
                 );
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.unsupported("client_declared_dynamic_tool", Some(redact_value(&params)));
+                }
                 // Code Mode's host currently owns execution. This response is
                 // retained as a truthful fallback for client-declared dynamic
                 // tools that Selasar has not registered.
@@ -816,9 +864,12 @@ impl CodexSession {
                     questions: questions.clone(),
                     sender: Some(sender),
                 });
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.question_pending(&request_id, &questions);
+                }
                 if let Some(channel) = channel {
                     let _ = channel.send(ClaudeEvent::AskUserQuestion {
-                        request_id,
+                        request_id: request_id.clone(),
                         tool_name: "AskUserQuestion".into(),
                         questions: questions.clone(),
                     });
@@ -843,9 +894,15 @@ impl CodexSession {
                     "result": { "answers": mapped }
                 }))
                 .await?;
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.question_answered(&request_id, &questions);
+                }
             }
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                 let (tool_name, input) = approval_tool_context(method, &params, item_tools);
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.approval_pending(&request_id, &tool_name, &input);
+                }
                 let decision = self
                     .resolve_permission(request_id, tool_name, input, channel, permission_slot)
                     .await?;
@@ -864,6 +921,9 @@ impl CodexSession {
                     "permissions": params.get("permissions").cloned().unwrap_or_else(|| json!({})),
                     "cwd": params.get("cwd").cloned().unwrap_or(Value::Null),
                 });
+                if let Some(sink) = self.run_events.as_mut() {
+                    sink.approval_pending(&request_id, "RequestPermissions", &input);
+                }
                 let decision = self
                     .resolve_permission(
                         request_id,
@@ -887,6 +947,16 @@ impl CodexSession {
                 .await?;
             }
             _ => {
+                if let Some(sink) = self.run_events.as_mut() {
+                    // Codex has no plan-approval capability; an attempted plan
+                    // request stays an explicit gap, not a generic request.
+                    let capability = if method.contains("plan") {
+                        "plan_approval"
+                    } else {
+                        "codex_server_request"
+                    };
+                    sink.unsupported(capability, Some(redact_value(&params)));
+                }
                 // Unknown client-side request: return a JSON-RPC-style error so
                 // Codex can recover instead of hanging forever.
                 self.write_message(json!({
@@ -903,7 +973,7 @@ impl CodexSession {
     }
 
     async fn resolve_permission(
-        &self,
+        &mut self,
         request_id: String,
         tool_name: String,
         input: Value,
@@ -914,9 +984,29 @@ impl CodexSession {
             match &decision {
                 Decision::Deny(reason) => {
                     emit_permission(channel, &request_id, &tool_name, &input, "deny", reason);
+                    if let Some(sink) = self.run_events.as_mut() {
+                        sink.approval_resolved(
+                            &request_id,
+                            &tool_name,
+                            &input,
+                            DecisionState::Denied,
+                            reason,
+                            false,
+                        );
+                    }
                 }
                 Decision::Allow => {
                     emit_permission(channel, &request_id, &tool_name, &input, "auto-allow", "");
+                    if let Some(sink) = self.run_events.as_mut() {
+                        sink.approval_resolved(
+                            &request_id,
+                            &tool_name,
+                            &input,
+                            DecisionState::Allowed,
+                            "",
+                            true,
+                        );
+                    }
                 }
             }
             return Ok(decision);
@@ -941,6 +1031,20 @@ impl CodexSession {
             decision.behavior(),
             decision.reason(),
         );
+        if let Some(sink) = self.run_events.as_mut() {
+            let state = match &decision {
+                Decision::Allow => DecisionState::Allowed,
+                Decision::Deny(_) => DecisionState::Denied,
+            };
+            sink.approval_resolved(
+                &request_id,
+                &tool_name,
+                &input,
+                state,
+                decision.reason(),
+                false,
+            );
+        }
         Ok(decision)
     }
 
@@ -1317,7 +1421,7 @@ fn emit_permission(
     }
 }
 
-fn codex_questions(params: &Value) -> Vec<AskUserQuestionSpec> {
+pub(crate) fn codex_questions(params: &Value) -> Vec<AskUserQuestionSpec> {
     params
         .get("questions")
         .and_then(Value::as_array)
@@ -1364,7 +1468,7 @@ fn first_turn_prompt(charter: Option<String>, task: &str) -> String {
     }
 }
 
-fn tool_from_item(item: &Value) -> Option<(String, Value)> {
+pub(crate) fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     match item.get("type")?.as_str()? {
         "commandExecution" => Some((
             "Bash".into(),
@@ -1577,7 +1681,7 @@ fn preferred_codex_model(response: &Value) -> Option<&Value> {
 /// App-server documents `item/started` before its approval request, so the
 /// item map is authoritative. The request-only fallback keeps all context the
 /// approval payload itself exposes if a future server violates that ordering.
-fn approval_tool_context(
+pub(crate) fn approval_tool_context(
     method: &str,
     params: &Value,
     item_tools: &HashMap<String, (String, Value)>,

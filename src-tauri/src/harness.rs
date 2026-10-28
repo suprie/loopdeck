@@ -82,6 +82,19 @@ impl HarnessSession {
         }
     }
 
+    /// Attach the additive normalized `RunEvent` stream for the next turn.
+    ///
+    /// The legacy `Channel<ClaudeEvent>` passed to `send_message_streaming` is
+    /// unchanged; providers dual-emit both surfaces from the same adapter
+    /// boundary. Passing `None` at the call site simply leaves the normalized
+    /// stream disabled for that turn.
+    pub fn attach_run_events(&mut self, channel: crate::provider_normalize::RunEventChannel) {
+        match self {
+            Self::Claude(session) => session.attach_run_events(channel),
+            Self::Codex(session) => session.attach_run_events(channel),
+        }
+    }
+
     pub fn spawn(
         cwd: &Path,
         config: &AgentConfig,

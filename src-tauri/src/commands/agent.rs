@@ -13,6 +13,8 @@ use crate::error::AppError;
 use crate::harness::HarnessSession;
 use crate::limits;
 use crate::permission::{Decision as PermissionDecision, PermissionMode, PermissionPolicy};
+use crate::provider_event::Provider;
+use crate::provider_normalize::{retrying_event, RunEventChannel};
 use crate::retry;
 use crate::retry::MAX_ATTEMPTS;
 use serde::Deserialize;
@@ -103,7 +105,8 @@ pub async fn agent_start_loop_streaming(
     let root = resolve_root(&state, &path)?;
 
     let (prompt, title) = build_next_loop_prompt(&root);
-    let _ = start_fresh_and_record_streaming(&state, &root, &prompt, title, &on_event).await?;
+    let _ =
+        start_fresh_and_record_streaming(&state, &root, &prompt, title, &on_event, None).await?;
     info!("agent_start_loop_streaming complete for: {path}");
     Ok(())
 }
@@ -137,7 +140,16 @@ pub async fn agent_send_message_streaming(
     let root = resolve_root(&state, &path)?;
     let attachments = validate_attachments(attachments.unwrap_or_default())?;
 
-    send_and_record_streaming(&state, &root, &prompt, &attachments, &on_event, plan_mode).await?;
+    send_and_record_streaming(
+        &state,
+        &root,
+        &prompt,
+        &attachments,
+        &on_event,
+        None,
+        plan_mode,
+    )
+    .await?;
     info!("agent_send_message_streaming complete for: {path}");
     Ok(())
 }
@@ -1145,6 +1157,7 @@ async fn send_streaming_with_retry(
     channel: &Channel<ClaudeEvent>,
     slots: &ParkSlots<'_>,
     interrupt_slot: &crate::claude_session::InterruptSlot,
+    run_events: Option<&RunEventChannel>,
     plan_mode: bool,
     token_budget: Option<&TokenBudget>,
 ) -> Result<AgentResponse, AppError> {
@@ -1186,6 +1199,22 @@ async fn send_streaming_with_retry(
                     backoff_ms: delay,
                     error: response.result.clone(),
                 });
+                // Dual-emit the transient retry signal. It is not a durable
+                // terminal; each attempt is its own segment and the final
+                // terminal stays authoritative.
+                if let Some(run_events) = run_events {
+                    let provider = match session.harness() {
+                        crate::config::AgentHarness::Claude => Provider::Claude,
+                        crate::config::AgentHarness::Codex => Provider::Codex,
+                    };
+                    let _ = run_events.channel.send(retrying_event(
+                        &run_events.run_id,
+                        provider,
+                        attempt + 2,
+                        MAX_ATTEMPTS,
+                        &response.result,
+                    ));
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 elapsed_ms = elapsed_ms.saturating_add(delay);
                 attempt += 1;
@@ -1506,10 +1535,14 @@ async fn send_and_record_streaming(
     prompt: &str,
     attachments: &[Attachment],
     channel: &Channel<ClaudeEvent>,
+    run_events: Option<RunEventChannel>,
     plan_mode: bool,
 ) -> Result<(), AppError> {
     let session_arc = with_session(state, path).await?;
     let mut session = session_arc.lock().await;
+    if let Some(events) = run_events.clone() {
+        session.attach_run_events(events);
+    }
     let qslot = question_slot(state, path)?;
     let pslot = permission_slot(state, path)?;
     let plnslot = plan_slot(state, path)?;
@@ -1539,6 +1572,7 @@ async fn send_and_record_streaming(
         channel,
         &slots,
         &islot,
+        run_events.as_ref(),
         plan_mode,
         None,
     )
@@ -1785,6 +1819,7 @@ pub(crate) async fn start_fresh_and_record_streaming(
     prompt: &str,
     title: Option<String>,
     channel: &Channel<ClaudeEvent>,
+    run_events: Option<RunEventChannel>,
 ) -> Result<AgentResponse, AppError> {
     start_fresh_and_record_streaming_in_root(
         state,
@@ -1793,7 +1828,10 @@ pub(crate) async fn start_fresh_and_record_streaming(
         prompt,
         title,
         channel,
-        StreamingRunOptions::default(),
+        StreamingRunOptions {
+            run_events,
+            ..StreamingRunOptions::default()
+        },
     )
     .await
 }
@@ -1803,6 +1841,8 @@ pub(crate) struct StreamingRunOptions<'a> {
     pub(crate) token_budget: Option<&'a TokenBudget>,
     pub(crate) force_autonomous: bool,
     pub(crate) plan_mode: bool,
+    /// Additive normalized stream for this turn; `None` keeps dual-emit off.
+    pub(crate) run_events: Option<RunEventChannel>,
 }
 
 /// Streaming fresh turn whose process/transcript live in `path`, but whose
@@ -1827,6 +1867,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root(
         title,
         channel,
         options.token_budget,
+        options.run_events,
         None,
         None,
         options.force_autonomous,
@@ -1847,6 +1888,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     title: Option<String>,
     channel: &Channel<ClaudeEvent>,
     token_budget: Option<&TokenBudget>,
+    run_events: Option<RunEventChannel>,
     agent_config: Option<&crate::config::AgentConfig>,
     // The key used for cached sessions and interactive control slots. Legacy
     // worktree callers retain `policy_root`; multi-agent workers pass their
@@ -1862,6 +1904,9 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         None => spawn_fresh(state, path, policy_root, force_autonomous).await?,
     };
     let mut session = session_arc.lock().await;
+    if let Some(events) = run_events.clone() {
+        session.attach_run_events(events);
+    }
     let control_key = control_key.unwrap_or(policy_root);
     let qslot = question_slot(state, control_key)?;
     let pslot = permission_slot(state, control_key)?;
@@ -1902,6 +1947,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         channel,
         &slots,
         &islot,
+        run_events.as_ref(),
         plan_mode,
         token_budget,
     )

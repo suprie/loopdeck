@@ -57,13 +57,13 @@ events, not their wire syntax.
 
 ### Phase 2 — Provider normalization
 
-- [ ] `provider-contract/normalize-claude` Convert Claude output at its adapter boundary while preserving the current channel behavior.
-- [ ] `provider-contract/normalize-codex` Convert Codex output to the same semantic events while preserving the current channel behavior.
-- [ ] `provider-contract/share-types` Generate or mechanically validate TypeScript event bindings from Rust and migrate one consumer to them.
+- [x] `provider-contract/normalize-claude` Convert Claude output at its adapter boundary while preserving the current channel behavior. See `src-tauri/src/provider_normalize.rs` and the dual-emit in `claude_session.rs`.
+- [x] `provider-contract/normalize-codex` Convert Codex output to the same semantic events while preserving the current channel behavior. See the app-server mapping in `provider_normalize.rs` and the dual-emit in `codex_session.rs`.
+- [x] `provider-contract/share-types` Generate or mechanically validate TypeScript event bindings from Rust and migrate one consumer to them. `ts-rs` generates `src/types/generated/`, CI fails on drift, and `useRunQueueEvents` now consumes the `run-event` stream.
 
 ### Phase 3 — Verification
 
-- [ ] `provider-contract/test-contract` Run fixture-based contract tests for both providers and a frontend type/render test for the migrated consumer; verify no duplicate terminal event or lost approval payload.
+- [x] `provider-contract/test-contract` Run fixture-based contract tests for both providers and a frontend type/render test for the migrated consumer; verify no duplicate terminal event or lost approval payload. Rust fixtures: `src-tauri/src/provider_contract_tests.rs`; reducer test: `tests/frontend/runEventProjection.test.mjs` (no DOM render — the pure projection is the renderable unit; see the handoff artifact).
 
 ## Acceptance Criteria
 

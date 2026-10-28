@@ -26,6 +26,7 @@ mod progress;
 mod project;
 #[allow(dead_code)]
 mod provider_event;
+mod provider_normalize;
 pub mod retry;
 mod run_executor;
 mod runplan;
@@ -47,6 +48,9 @@ mod role_demo_tests;
 
 #[cfg(test)]
 mod provider_fixture_tests;
+
+#[cfg(test)]
+mod provider_contract_tests;
 
 /// Entry point for the `loopdeck state` subcommand (Phase 3 `state-command`).
 /// Branch is taken in `main.rs` when the binary's first arg is `state`.

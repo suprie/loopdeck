@@ -43,6 +43,18 @@ fragments, not full sessions: only `completed`, `error`, `interrupt`, and
 - Every file must pass `secret_scan::find_secret`; the integrity test in
   `provider_fixture_tests.rs` enforces this.
 
+## Contract tests
+
+`cargo test provider_contract_tests` normalizes every paired fragment through
+`provider_normalize` and asserts semantic parity:
+
+- both providers produce every payload the manifest declares;
+- equivalent text, token counts, decision kinds/states, and terminal outcomes;
+- exactly one terminal per declared run segment, including when the provider's
+  terminal line is replayed;
+- approval command/tool and question specs survive in `detail_redacted`;
+- Codex omits `plan_approval` from its capability set.
+
 ## Integrity checks
 
 `cargo test provider_fixture_tests` verifies that:

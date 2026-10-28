@@ -2,6 +2,16 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
 
+## 2026-10-28 — Dual-emit normalized provider events during migration
+- **Status**: accepted
+- **Context**: `prd-provider-contract` Phase 2 must normalize Claude and Codex output without breaking existing `ClaudeEvent` consumers before the replay migration.
+- **Consequences**: Both adapters keep their legacy `Channel<ClaudeEvent>` payload byte-compatible and additionally feed `provider_normalize::RunEventNormalizer`; the detached run queue re-broadcasts the normalized stream on the additive `run-event` topic. A per-segment terminal gate guarantees one durable terminal, retries are new segments with transient `retrying` signals, and capability gaps become explicit `unsupported` events. Interactive commands and multi-agent workers do not attach a normalized stream yet.
+
+## 2026-10-28 — ts-rs owns the run-event TypeScript bindings
+- **Status**: accepted
+- **Context**: P1 requires generated or mechanically validated TypeScript bindings, and hand-maintained event shapes drift from Rust.
+- **Consequences**: `provider_event.rs` derives `ts_rs::TS`; `cargo test export_bindings` writes `src/types/generated/`, and CI regenerates then requires a clean `git diff --exit-code`. Token counts and the sequence placeholder are generated as `number` (not `bigint`). Decision render details travel in an additive `detail_redacted` JSON field so approval/question/plan payloads are not lost; automatic approval stays `DecisionState::Allowed` with an `auto-allow: ` summary prefix rather than a new enum variant.
+
 ## 2026-10-28 — Every Claude control_response allow must echo updatedInput
 - **Status**: accepted
 - **Context**: The unattended provider-contract run stalled because every mutating tool call failed before execution with `Tool permission request failed: ZodError ... updatedInput ... / behavior "deny"`. LoopDeck wrote a bare `{"behavior":"allow"}` for policy auto-approvals and plan approvals; the Claude CLI's response schema now requires a record `updatedInput` on every allow (and a string `message` on every deny).

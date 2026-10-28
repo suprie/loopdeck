@@ -73,6 +73,20 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # `prd-provider-contract` requires CI to detect Rust/TypeScript event
+      # contract drift. Rust owns the contract (`provider_event.rs`); the
+      # committed bindings in `src/types/generated/` are produced by
+      # `cargo test export_bindings` (ts-rs). Regenerating and then requiring a
+      # clean diff fails the build when one side changed without the other.
+      # Run from `src-tauri` so the default `./bindings` base resolves to
+      # `src/types/generated` via the per-type `export_to` attribute.
+      - name: Regenerate TypeScript event bindings
+        working-directory: src-tauri
+        run: cargo test export_bindings
+
+      - name: Fail on Rust/TypeScript event contract drift
+        run: git diff --exit-code -- src/types/generated
+
       # ---------------- Frontend ----------------
       - name: Install Node.js
         uses: actions/setup-node@v5        # v5 = Node.js 24 runtime
