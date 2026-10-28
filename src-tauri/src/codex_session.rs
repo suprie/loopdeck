@@ -1450,6 +1450,7 @@ fn app_server_args(code_mode_host_url: Option<&str>) -> Vec<String> {
 /// managed worktree without a host filesystem popup, while approval requests
 /// still pass through LoopDeck's autonomous policy and destructive-command
 /// floor.
+#[allow(clippy::too_many_arguments)]
 fn turn_start_params(
     thread_id: &str,
     text: &str,

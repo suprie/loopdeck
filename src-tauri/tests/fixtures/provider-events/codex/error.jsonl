@@ -1,0 +1,3 @@
+{"method":"turn/started","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"inProgress"}}}
+{"method":"error","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","error":{"message":"Codex app-server reported a turn failure."}}}
+{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"failed","error":{"message":"Codex app-server reported a turn failure."}}}}

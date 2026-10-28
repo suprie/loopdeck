@@ -4,12 +4,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Started**: 2026-09-01
-- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phases 2-3 — three loops done in one unattended run: charter injection across spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
-- **Status**: completed
+- **Status**: idle — no active loop
+- **Next**: `provider-contract/normalize-claude` (promote from `docs/epics/execution-foundations/prd-provider-contract.md`)
 
 ## Next Steps
-- [ ] `execution-foundations` / `prd-domain-contract` Phase 2 — define the transition table and implement the pure Rust transition layer after reviewing the Phase 1 evidence.
+- [ ] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope (fixtures are ready under `src-tauri/tests/fixtures/provider-events/`).
 - [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
 - [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
 - [ ] Review and publish the new beta corporate site in `website/`
@@ -23,6 +22,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-28 — execution-foundations / prd-provider-contract capture-fixtures
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: Added sanitized Claude and Codex wire fixtures for text, tool use, approval/question, usage, error, interrupt, and successful completion under `src-tauri/tests/fixtures/provider-events/`, with a manifest mapping each scenario to both providers and its expected semantic payloads. Added `provider_fixture_tests.rs` to enforce JSON validity, Claude-parser compatibility, Codex envelope shape, payload coverage, one terminal event per terminating fragment, and secret/home-path cleanliness. Fixtures are hand-authored from the adapters' documented wire shapes (no live capture available); replace with sanitized live captures when possible. Also allowed `too_many_arguments` on `codex_session::turn_start_params` to keep `clippy -D warnings` green.
 
 ### 2026-10-14 — execution-foundations / prd-domain-contract Phase 1
 - **Status**: completed
@@ -48,6 +52,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Removed the icon’s white outer corners and regenerated the favicon plus Tauri PNG, ICO, ICNS, Windows, iOS, and Android assets.
+
+### 2026-09-01 — role-based-orchestration / prd-role-foundations Phases 2-3
+- **Status**: completed
+- **Completed**: 2026-09-01
+- **Summary**: Charter injection across all three spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
 
 ### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
 - **Status**: completed

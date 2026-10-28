@@ -1,5 +1,5 @@
 schema_version: 1
-revision: 58
+revision: 60
 queue: []
 history:
 - id: selasar-revamp/visual-pass-in-light-dark-and-system-auto-against-every-existing
@@ -306,4 +306,14 @@ history:
   outcome: completed
   started_at: 2026-10-14T04:00:27.064715Z
   completed_at: 2026-10-14T04:02:03.242886Z
+  attempt: 1
+- id: provider-contract/capture-fixtures
+  title: Add sanitized Claude and Codex fixtures for text, tool use, approval/question, usage, error, interrupt, and successful completion.
+  origin:
+    epic: execution-foundations
+    prd: prd-provider-contract
+    phase: Phase 1 — Event vocabulary
+  outcome: completed
+  started_at: 2026-10-28T06:14:39.282152Z
+  completed_at: 2026-10-28T06:19:19.345146Z
   attempt: 1

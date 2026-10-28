@@ -1,0 +1,7 @@
+{"method":"turn/started","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"inProgress"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","itemId":"item-msg-1","delta":"Implemented the transition layer."}}
+{"method":"item/started","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","item":{"id":"item-cmd-1","type":"commandExecution","command":"cargo test","cwd":"/repo","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","item":{"id":"item-cmd-1","type":"commandExecution","command":"cargo test","cwd":"/repo","status":"completed","exitCode":0}}}
+{"method":"item/completed","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","item":{"id":"item-msg-1","type":"agentMessage","text":"Implemented the transition layer.","phase":"final_answer"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","tokenUsage":{"last":{"inputTokens":720,"outputTokens":140,"totalTokens":860},"total":{"inputTokens":720,"outputTokens":140,"totalTokens":860}}}}
+{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"completed"}}}

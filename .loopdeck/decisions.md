@@ -2,6 +2,11 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
 
+## 2026-10-28 — Provider fixtures are manifest-backed and synthetic until sanitized captures exist
+- **Status**: accepted
+- **Context**: `prd-provider-contract` Phase 1 needs both providers' wire shapes for text, tools, decisions, usage, error, interrupt, and completion before normalization can be tested, but no live account capture was available in this environment.
+- **Consequences**: Added hand-authored sanitized fixtures under `src-tauri/tests/fixtures/provider-events/` with a `manifest.json` mapping each scenario to both provider files, expected semantic payloads, and the terminal outcome. `provider_fixture_tests.rs` enforces JSON validity, Claude-parser compatibility, Codex envelope shape, payload coverage, exactly one terminal event per terminating fragment, and secret/home-path cleanliness. Replace them with sanitized live captures when available without changing the manifest shape.
+
 ## 2026-10-14 — Provider events use a versioned semantic envelope
 - **Status**: accepted
 - **Context**: Claude and Codex need a shared durable event meaning before replay and persistence migration.

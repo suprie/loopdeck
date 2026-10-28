@@ -53,7 +53,7 @@ events, not their wire syntax.
 ### Phase 1 — Event vocabulary
 
 - [x] `provider-contract/define-events` Define the versioned event envelope and payload table, including capability differences, redaction, and terminal outcome rules. See [provider-event-contract.md](provider-event-contract.md) and `src-tauri/src/provider_event.rs`.
-- [ ] `provider-contract/capture-fixtures` Add sanitized Claude and Codex fixtures for text, tool use, approval/question, usage, error, interrupt, and successful completion.
+- [x] `provider-contract/capture-fixtures` Add sanitized Claude and Codex fixtures for text, tool use, approval/question, usage, error, interrupt, and successful completion. See [fixtures](../../../src-tauri/tests/fixtures/provider-events/README.md) and `src-tauri/src/provider_fixture_tests.rs`.
 
 ### Phase 2 — Provider normalization
 

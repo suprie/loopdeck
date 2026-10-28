@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "description": "Sanitized provider wire fixtures for the provider-neutral run-event contract. Each scenario is a fragment of the provider's native stream; the paired files are expected to normalize to the same semantic payloads.",
+  "scenarios": [
+    {
+      "id": "text",
+      "claude": "claude/text.jsonl",
+      "codex": "codex/text.jsonl",
+      "expected_payloads": ["content"],
+      "terminal": null
+    },
+    {
+      "id": "tool-use",
+      "claude": "claude/tool-use.jsonl",
+      "codex": "codex/tool-use.jsonl",
+      "expected_payloads": ["tool"],
+      "terminal": null
+    },
+    {
+      "id": "decisions",
+      "claude": "claude/decisions.jsonl",
+      "codex": "codex/decisions.jsonl",
+      "expected_payloads": ["decision"],
+      "terminal": null
+    },
+    {
+      "id": "usage",
+      "claude": "claude/usage.jsonl",
+      "codex": "codex/usage.jsonl",
+      "expected_payloads": ["usage", "terminal"],
+      "terminal": "completed"
+    },
+    {
+      "id": "error",
+      "claude": "claude/error.jsonl",
+      "codex": "codex/error.jsonl",
+      "expected_payloads": ["terminal"],
+      "terminal": "error"
+    },
+    {
+      "id": "interrupt",
+      "claude": "claude/interrupt.jsonl",
+      "codex": "codex/interrupt.jsonl",
+      "expected_payloads": ["content", "terminal"],
+      "terminal": "interrupted"
+    },
+    {
+      "id": "completed",
+      "claude": "claude/completed.jsonl",
+      "codex": "codex/completed.jsonl",
+      "expected_payloads": ["started", "content", "tool", "usage", "terminal"],
+      "terminal": "completed"
+    }
+  ]
+}
