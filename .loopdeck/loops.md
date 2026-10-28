@@ -8,6 +8,7 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Next**: `provider-contract/normalize-claude` (promote from `docs/epics/execution-foundations/prd-provider-contract.md`)
 
 ## Next Steps
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/109
 - [ ] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope (fixtures are ready under `src-tauri/tests/fixtures/provider-events/`).
 - [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
 - [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
