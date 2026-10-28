@@ -4,14 +4,15 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Status**: in_progress — `provider-contract` Phases 2–3 are implemented in worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`: both adapters dual-emit normalized `RunEvent`s, ts-rs bindings are CI-drift-checked, the run-queue consumer migrated, and fixture/frontend contract tests pass.
-- **Next**: run the Phase 6 verify gate, then open the combined draft PR for the four loops.
+- **Status**: in_progress — `provider-contract` Phases 2–3 are implemented in worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`: both adapters dual-emit normalized `RunEvent`s, ts-rs bindings are CI-drift-checked, the run-queue consumer migrated, fixture/frontend contract tests pass, and the verify gate is PASS. Draft PR #110 is open.
+- **Next**: review and merge draft PR #110; then start the next queued `execution-foundations` PRD.
 
 ## Next Steps
 - [x] Fix the Claude control_response schema and commit it.
 - [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
 - [x] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope.
 - [x] `execution-foundations` / `prd-provider-contract` Phase 3 — fixture-based contract tests plus the migrated consumer's projection test.
+- [ ] Review & merge draft PR #110: https://github.com/suprie/loopdeck/pull/110
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/109
 - [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
 - [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
