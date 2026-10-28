@@ -4,11 +4,17 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Started**: 2026-09-01
-- **Goal**: `role-based-orchestration` / `prd-role-foundations` Phases 2-3 — three loops done in one unattended run: charter injection across spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
-- **Status**: completed
+- **Status**: ready — the `updatedInput` fix is committed on `feat/provider-event-fixtures`, and a fresh run plan is queued against worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`, cut from that branch. Rebuild/restart LoopDeck, then start the queued run.
+- **Next**: start the queued `provider-contract` run and let the four phases execute in order.
 
 ## Next Steps
+- [x] Fix the Claude control_response schema and commit it.
+- [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
+- [ ] Rebuild/restart LoopDeck, then start the queued `provider-contract` run.
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/109
+- [ ] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope (fixtures are ready under `src-tauri/tests/fixtures/provider-events/`).
+- [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
+- [ ] Run the overnight pre-flight smoke again after the Codex handshake fix
 - [ ] Review and publish the new beta corporate site in `website/`
 - [ ] Confirm the generated product screenshot’s text artifacts are acceptable for public beta branding
 - [ ] Review the transparent product visual on the dark website background
@@ -20,6 +26,26 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-28 — Fix Claude control_response schema blocking unattended mutations
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: The overnight provider-contract run could not write files: every mutating tool call failed with a harness `ZodError` because LoopDeck emitted `{"behavior":"allow"}` without `updatedInput`. `ControlResponsePayload::allow` now requires and serializes the original tool input, deny always carries a `message`, and regression tests cover both allow shapes. `cargo test` (692 passed), `cargo clippy -D warnings`, and `cargo fmt --check` are green. The parked run still needs a rebuild + re-queue.
+
+### 2026-10-28 — execution-foundations / prd-provider-contract capture-fixtures
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: Added sanitized Claude and Codex wire fixtures for text, tool use, approval/question, usage, error, interrupt, and successful completion under `src-tauri/tests/fixtures/provider-events/`, with a manifest mapping each scenario to both providers and its expected semantic payloads. Added `provider_fixture_tests.rs` to enforce JSON validity, Claude-parser compatibility, Codex envelope shape, payload coverage, one terminal event per terminating fragment, and secret/home-path cleanliness. Fixtures are hand-authored from the adapters' documented wire shapes (no live capture available); replace with sanitized live captures when possible. Also allowed `too_many_arguments` on `codex_session::turn_start_params` to keep `clippy -D warnings` green.
+
+### 2026-10-14 — execution-foundations / prd-domain-contract Phase 1
+- **Status**: completed
+- **Completed**: 2026-10-14
+- **Summary**: Added the state/ownership inventory, measured SQLite-vs-file decision and rollback procedure, and legacy identity/migration map; accepted SQLite as the target mutable operational store with compatibility exports.
+
+### 2026-10-08 — Fix overnight collaboration-mode handshake
+- **Status**: completed
+- **Completed**: 2026-10-08
+- **Summary**: Advertised Codex's experimental API capability so the existing `collaborationMode/list` and `model/list` pre-flight handshake is accepted; updated the regression test and recorded the decision.
 
 ### 2026-10-08 — Product visual and app icon integration
 - **Status**: completed
@@ -35,6 +61,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Removed the icon’s white outer corners and regenerated the favicon plus Tauri PNG, ICO, ICNS, Windows, iOS, and Android assets.
+
+### 2026-09-01 — role-based-orchestration / prd-role-foundations Phases 2-3
+- **Status**: completed
+- **Completed**: 2026-09-01
+- **Summary**: Charter injection across all three spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
 
 ### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
 - **Status**: completed

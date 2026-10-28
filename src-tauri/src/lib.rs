@@ -24,6 +24,8 @@ mod permission;
 mod persist;
 mod progress;
 mod project;
+#[allow(dead_code)]
+mod provider_event;
 pub mod retry;
 mod run_executor;
 mod runplan;
@@ -32,6 +34,8 @@ mod secret_scan;
 mod secrets;
 mod skills;
 mod state_cli;
+#[allow(dead_code)]
+mod transition;
 
 #[cfg(test)]
 mod charter_injection_tests;
@@ -40,6 +44,9 @@ mod role_assignment_tests;
 
 #[cfg(test)]
 mod role_demo_tests;
+
+#[cfg(test)]
+mod provider_fixture_tests;
 
 /// Entry point for the `loopdeck state` subcommand (Phase 3 `state-command`).
 /// Branch is taken in `main.rs` when the binary's first arg is `state`.

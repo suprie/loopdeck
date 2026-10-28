@@ -1,0 +1,3 @@
+{"method":"turn/started","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"inProgress"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","itemId":"item-msg-1","delta":"I started reading the fixture"}}
+{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"interrupted"}}}

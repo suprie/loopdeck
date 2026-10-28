@@ -1,50 +1,39 @@
-id: run-82e31b93-5022-4742-87c3-d5c2ac3228d4
-project: /Users/supriyantop/Workspace/others/loopdeck
-created: 2026-09-01T07:57:56.662210Z
+id: run-13b7727c-f405-491b-bf4a-63794a939dfc
+project: /Users/suprie/Workspace/others/loopdeck
+created: 2026-10-09T13:24:24.189848Z
 consent:
   draft_pr_authorized: true
 budgets:
-  per_phase_token_cap: 500000
+  per_phase_token_cap: 5000000
   per_phase_wall_clock_secs: 5400
   total_run_wall_clock_secs: 28800
 environment:
-  worktree_path: /Users/supriyantop/Workspace/others/loopdeck/.loopdeck/runs/run/role-foundations-prompt-injection-plus2-d5c2ac3228d4
-  worktree_branch: run/role-foundations-prompt-injection-plus2-d5c2ac3228d4
+  worktree_path: /Users/suprie/Workspace/others/loopdeck/.loopdeck/runs/run/agent-handoff-store-model-plus1-63794a939dfc
+  worktree_branch: run/agent-handoff-store-model-plus1-63794a939dfc
   worktree_kept: true
-wall_clock_secs: 1566
+wall_clock_secs: 172
 stall_policy: continue_independent
 phases:
-- execution_id: role-foundations/prompt-injection
-  status: completed
+- execution_id: agent-handoff/store-model
+  status: parked
   interview:
-  - question: Which injection mechanism, given Codex (app-server, stdio) has no `--append-system-prompt` equivalent?
-    answer: Flag + prepend — Claude sessions get `--append-system-prompt`; Codex sessions get the charter prepended to the task prompt. One shared charter-rendering helper on the `HarnessAdapter` path keeps it harness-neutral.
-  - question: What gets injected and how does it compose with `build_next_loop_prompt` boilerplate?
-    answer: Full charter (persona + allowed skills + output contract) rendered as one block, placed ahead of the loop-prompt boilerplate — role identity first, task second.
+  - question: Should `.loopdeck/handoffs/` persist artifacts across runs, or should each run have an isolated/clean handoff store?
+    answer: Persist across runs.
   interview_status: answered
   depends_on: []
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/102'
-  token_usage: 95183
-  wall_clock_secs: 520
-- execution_id: role-foundations/injection-tests
-  status: completed
+  park_payload: green verification passed, but no unattended draft PR URL was recorded
+  token_usage: 992583
+  wall_clock_secs: 85
+- execution_id: agent-handoff/artifact-write
+  status: parked
   interview:
-  - question: How should the per-path fixtures verify injection?
-    answer: Fake child binaries — fake `claude`/`codex` executables on PATH that write their argv (and charter-bearing flags/prompt) to a file; integration-test all three paths (interactive, run-queue, multi-agent) against the real spawn code.
+  - question: What should the executor treat as the authoritative artifact source?
+    answer: Agent-written file; executor locates, validates, and records/copies it.
+  - question: If a retry emits the same topic again, what should happen?
+    answer: Fail and preserve the original.
   interview_status: answered
   depends_on:
-  - role-foundations/prompt-injection
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/102'
-  token_usage: 95183
-  wall_clock_secs: 520
-- execution_id: role-foundations/role-policy
-  status: completed
-  interview:
-  - question: Where do per-role rules live and what can they match?
-    answer: Charter field, tool+cmd — new optional rules field on `RoleCharter` (allowed tool names / bash command allow-patterns). `PermissionPolicy::decide` accepts the role's rules and grants autonomy (skips confirmation) above the destructive floor; the floor always wins.
-  interview_status: answered
-  depends_on:
-  - role-foundations/injection-tests
-  park_payload: 'draft PR: https://github.com/suprie/loopdeck/pull/102'
-  token_usage: 95183
-  wall_clock_secs: 520
+  - agent-handoff/store-model
+  park_payload: green verification passed, but no unattended draft PR URL was recorded
+  token_usage: 992583
+  wall_clock_secs: 85

@@ -1,0 +1,4 @@
+{"method":"turn/started","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"inProgress"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","itemId":"item-msg-1","delta":"I'll inspect the repository first."}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","itemId":"item-msg-1","delta":" The execution module owns loop transitions."}}
+{"method":"item/completed","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","item":{"id":"item-msg-1","type":"agentMessage","text":"I'll inspect the repository first. The execution module owns loop transitions.","phase":"final_answer"}}}

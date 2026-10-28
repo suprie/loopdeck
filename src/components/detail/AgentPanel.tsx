@@ -1065,6 +1065,17 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
           width so the empty space splits evenly left/right (and the floating
           TaskPanel sits in the right-hand gutter at fullscreen). */}
       <div className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-1 flex-col">
+      <div className="mb-3 flex shrink-0 items-center justify-between gap-3 border-b border-border pb-3">
+        <div>
+          <div className="text-sm font-semibold tracking-tight">Worker activity</div>
+          <div className="text-[11px] text-muted-foreground">
+            Live transcript from the configured agent session
+          </div>
+        </div>
+        <span className="rounded-full border border-border bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground">
+          Managed worktree
+        </span>
+      </div>
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-2 pb-3 mb-3 border-b border-border shrink-0">
         <PermissionModeBadge mode={autonomous ? "autonomous" : "confirm"} />

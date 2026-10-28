@@ -1,0 +1,13 @@
+execution_ids:
+- agent-handoff/store-model
+- agent-handoff/artifact-write
+branch: run/agent-handoff-store-model-plus1-63794a939dfc
+worktree: /Users/suprie/Workspace/others/loopdeck/.loopdeck/runs/run/agent-handoff-store-model-plus1-63794a939dfc
+stage: nothing_mutated
+reason: green verification passed, but no unattended draft PR URL was recorded
+rubric:
+  verdict: pass
+  checked_at: 2026-10-09T22:30:41.992937Z
+  criteria: []
+pr_title: Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+recorded_at: 2026-10-09T22:30:42.733991Z

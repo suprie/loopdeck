@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Moon } from "lucide-react";
+import { Activity, Moon } from "lucide-react";
 import type { Epic, RunPhase, RunPlan } from "../../types";
 import {
   budgetGauges,
@@ -13,7 +13,15 @@ import { buildIdToTitle } from "./EpicsPanel";
 import * as api from "../../lib/tauri";
 import { ParkedQuestionInbox } from "./ParkedQuestionInbox";
 
-export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: RunPlan }) {
+export function NightRunTab({
+  projectPath,
+  plan,
+  active,
+}: {
+  projectPath: string;
+  plan: RunPlan;
+  active: boolean;
+}) {
   const [idToTitle, setIdToTitle] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -30,6 +38,14 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
   }, [projectPath]);
 
   const title = (phase: RunPhase) => idToTitle[phase.execution_id] ?? phase.execution_id;
+  const runningPhase = plan.phases.find((phase) => phase.status === "running");
+  const workerState = active
+    ? runningPhase
+      ? "Running"
+      : "Starting"
+    : plan.phases.some((phase) => phase.status === "parked")
+      ? "Needs attention"
+      : "Finished";
 
   return (
     <section className="mx-auto mb-4 w-full max-w-3xl shrink-0 rounded-xl border border-border bg-card p-4 shadow-[var(--shadow-sm)]">
@@ -41,6 +57,35 @@ export function NightRunTab({ projectPath, plan }: { projectPath: string; plan: 
           {plan.stall_policy === "halt" ? "halt on stall" : "continue independent"}
           {plan.environment.worktree_kept ? " · worktree kept for review" : ""}
         </span>
+      </div>
+
+      <div className="mb-4 rounded-lg border border-border bg-background/60 p-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Activity size={13} className={active ? "text-[var(--primary)]" : "text-muted-foreground"} />
+            <span className="text-xs font-semibold">Orchestrator status</span>
+          </div>
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            {workerState}
+          </span>
+        </div>
+        <div className="grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
+          <span>
+            <strong className="font-medium text-foreground">Worker:</strong> configured Codex/agent profile
+          </span>
+          <span>
+            <strong className="font-medium text-foreground">Workspace:</strong> managed worktree
+          </span>
+          {runningPhase && (
+            <span className="sm:col-span-2">
+              <strong className="font-medium text-foreground">Current phase:</strong> {title(runningPhase)}
+            </span>
+          )}
+        </div>
+        <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+          Open <span className="font-medium text-foreground">Worker activity</span> below for the live
+          transcript and tool activity. Changes are isolated until the run is reviewed.
+        </p>
       </div>
 
       <details className="mt-3 text-xs">

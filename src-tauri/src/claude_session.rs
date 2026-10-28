@@ -478,7 +478,7 @@ impl ClaudeSession {
             .as_mut()
             .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
         let payload = match &decision {
-            Decision::Allow => ControlResponsePayload::allow(request_id),
+            Decision::Allow => ControlResponsePayload::allow(request_id, request.input.clone()),
             Decision::Deny(reason) => ControlResponsePayload::deny(request_id, reason),
         };
         let mut line = payload.to_json().to_string();
@@ -514,9 +514,10 @@ impl ClaudeSession {
     /// the user approves or rejects the plan via `agent_answer_plan`.
     ///
     /// Mirrors `answer_manual_permission`'s park-then-write shape (same
-    /// `Decision` payload, plain allow/deny — no `updatedInput`), but keyed on
-    /// the dedicated `plan_slot` so a plan approval can never collide with an
-    /// unrelated tool approval, and with its own autonomous short-circuit.
+    /// `Decision` payload, with an allow echoing the `ExitPlanMode` input as
+    /// `updatedInput`), but keyed on the dedicated `plan_slot` so a plan
+    /// approval can never collide with an unrelated tool approval, and with
+    /// its own autonomous short-circuit.
     ///
     /// **Autonomous projects skip the park.** The entire point of autonomous
     /// mode is unattended operation (see `PermissionPolicy::is_autonomous`);
@@ -558,7 +559,7 @@ impl ClaudeSession {
                 request_id = %request_id,
                 "ExitPlanMode auto-allowed (autonomous mode)",
             );
-            self.write_allow(request_id).await?;
+            self.write_allow(request_id, request.input.clone()).await?;
             // Delivered — the CLI's own ExitPlanMode handler reverts out of
             // plan mode internally now that it has received the allow.
             self.plan_mode_active = Some(false);
@@ -639,7 +640,7 @@ impl ClaudeSession {
                 // reverts out of plan mode once it receives this allow, so a
                 // write/flush failure means the approval was never delivered.
                 self.plan_mode_active = None;
-                self.write_allow(request_id).await?;
+                self.write_allow(request_id, request.input.clone()).await?;
                 // Delivered — confirmed.
                 self.plan_mode_active = Some(false);
             }
@@ -952,7 +953,7 @@ impl ClaudeSession {
             .as_mut()
             .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
         let payload = match &decision {
-            Decision::Allow => ControlResponsePayload::allow(request_id),
+            Decision::Allow => ControlResponsePayload::allow(request_id, request.input.clone()),
             Decision::Deny(reason) => ControlResponsePayload::deny(request_id, reason),
         };
         let mut line = payload.to_json().to_string();
@@ -1030,15 +1031,19 @@ impl ClaudeSession {
         Ok(())
     }
 
-    /// Write a plain allow control_response to stdin. Factored out for the
-    /// plan-approval arm, which (unlike the question/permission arms) never
-    /// needs `updatedInput` — mirrors `write_deny`.
-    async fn write_allow(&mut self, request_id: &str) -> Result<(), AppError> {
+    /// Write an allow control_response to stdin, echoing the original tool
+    /// input as `updatedInput` (required by the CLI's response schema).
+    /// Factored out for the plan-approval arm — mirrors `write_deny`.
+    async fn write_allow(
+        &mut self,
+        request_id: &str,
+        updated_input: serde_json::Value,
+    ) -> Result<(), AppError> {
         let stdin = self
             .stdin
             .as_mut()
             .ok_or_else(|| AppError::Agent("session stdin already closed".into()))?;
-        let payload = ControlResponsePayload::allow(request_id);
+        let payload = ControlResponsePayload::allow(request_id, updated_input);
         let mut line = payload.to_json().to_string();
         line.push('\n');
         tracing::debug!(target: "loopdeck::claude_wire", "→ control_response: {}", line.trim());

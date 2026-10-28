@@ -2,6 +2,31 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
 
+## 2026-10-28 — Every Claude control_response allow must echo updatedInput
+- **Status**: accepted
+- **Context**: The unattended provider-contract run stalled because every mutating tool call failed before execution with `Tool permission request failed: ZodError ... updatedInput ... / behavior "deny"`. LoopDeck wrote a bare `{"behavior":"allow"}` for policy auto-approvals and plan approvals; the Claude CLI's response schema now requires a record `updatedInput` on every allow (and a string `message` on every deny).
+- **Consequences**: `ControlResponsePayload::allow` now takes the original tool input and always serializes `updatedInput`; permission, manual-approval, plan-approval, and AskUserQuestion paths all pass it through. `deny` always serializes a `message` string. Regression tests cover plain allow and rewritten-input allow. This unblocks unattended runs once the app is rebuilt and the parked run is re-queued.
+
+## 2026-10-28 — Provider fixtures are manifest-backed and synthetic until sanitized captures exist
+- **Status**: accepted
+- **Context**: `prd-provider-contract` Phase 1 needs both providers' wire shapes for text, tools, decisions, usage, error, interrupt, and completion before normalization can be tested, but no live account capture was available in this environment.
+- **Consequences**: Added hand-authored sanitized fixtures under `src-tauri/tests/fixtures/provider-events/` with a `manifest.json` mapping each scenario to both provider files, expected semantic payloads, and the terminal outcome. `provider_fixture_tests.rs` enforces JSON validity, Claude-parser compatibility, Codex envelope shape, payload coverage, exactly one terminal event per terminating fragment, and secret/home-path cleanliness. Replace them with sanitized live captures when available without changing the manifest shape.
+
+## 2026-10-14 — Provider events use a versioned semantic envelope
+- **Status**: accepted
+- **Context**: Claude and Codex need a shared durable event meaning before replay and persistence migration.
+- **Consequences**: Added version-1 `RunEvent` with explicit capability gaps, redacted durable fields, diagnostic-only raw references, and exactly-one terminal rules; legacy provider events remain until normalization.
+
+## 2026-10-14 — SQLite is the target operational store with compatibility exports
+- **Status**: accepted
+- **Context**: `prd-domain-contract` Phase 1 inventory found mutable run, phase, decision, session, and delivery state split across YAML, JSONL, manifests, and `AppState`; the canonical fixture is small, but cross-file atomicity and restart reconciliation are the limiting constraints.
+- **Consequences**: Later persistence work may implement SQLite for mutable operational state, but must preserve authored repository files, import provenance, compatibility exports, backup/restore, and a visible divergence gate. The legacy-to-new identity mapping and irrecoverable in-memory cases are documented in `docs/epics/execution-foundations/migration-map.md`.
+
+## 2026-10-14 — Transition edges are pure and terminal attempts are immutable
+- **Status**: accepted
+- **Context**: Phase 2 needs one transition contract across interactive, queued, multi-agent, decision, and delivery state before persistence migration.
+- **Consequences**: `src-tauri/src/transition.rs` owns allowed edges and structured invalid-transition errors; restart reconciliation now routes `running → interrupted` through it, while retries create new attempts.
+
 ## 2026-10-08 — Shared generated brand assets are used across web and desktop
 - **Status**: accepted
 - **Context**: The beta site needed a product visual and the desktop app needed a consistent app icon.
@@ -223,6 +248,11 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Context**: Codex could ask a blocking question as ordinary assistant prose even when the `request_user_input` capability was enabled, leaving LoopDeck with no structured event from which to render a popup.
 - **Consequences**: The first Codex task prompt now includes a concise interaction contract requiring `request_user_input` for decisions needed before continuing. Role charters remain first, and the guidance is injected only once per session.
 
+## 2026-10-08 — Advertise Codex experimental API for collaboration discovery
+- **Status**: accepted
+- **Context**: The overnight pre-flight path queries `collaborationMode/list` and `model/list`, but the Codex initialize handshake still advertised `experimentalApi: false`, causing the app-server to reject collaboration-mode listing before the run could start. The separately supervised Code Mode host now covers the earlier reason for opting out.
+- **Consequences**: Codex sessions advertise `experimentalApi: true`, allowing the existing collaboration-mode discovery and Plan interview flow to proceed.
+
 ## 2026-10-08 — Keep Codex integration fixtures aligned with Code Mode transport
 - **Status**: accepted
 - **Context**: PR CI failed because the charter-injection fixture still published the retired WebSocket endpoint after production Code Mode moved to local gRPC/HTTP endpoint validation; strict Clippy also caught an unnecessary borrow.
@@ -242,3 +272,18 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Strict Clippy rejected `HarnessSession` because concrete Claude and Codex session variants have materially different sizes.
 - **Consequences**: Both provider sessions are heap-allocated inside `HarnessSession`, reducing enum size while preserving the existing provider delegation API.
+
+## 2026-10-08 — Separate orchestrator and worker language in run surfaces
+- **Status**: accepted
+- **Context**: The night-run UI labeled the orchestration card and the Codex worker transcript both as “Agent,” making a managed worktree worker look like the project’s interactive agent and making stale activity difficult to interpret.
+- **Consequences**: The detail tab is now “Worker activity”; the night-run card identifies orchestrator status, worker profile, managed-worktree isolation, and current phase; the transcript surface explicitly identifies itself as worker activity.
+
+## 2026-10-09 — Correlate Codex turn failures across the run watchdog
+- **Status**: accepted
+- **Context**: An unattended run ended with a generic “wedged app-server” message after the Codex rollout stopped during a patch call; the existing logs could not distinguish a tool hang, protocol failure, watchdog timeout, or cleanup failure.
+- **Consequences**: Codex sessions now log turn/request IDs, item start/completion, interrupt lifecycle, completion status, and terminal errors; the run queue logs watchdog budgets, worktree/run context, and whether a cached session existed when it was removed. Prompts and full tool arguments remain excluded from the new lifecycle logs.
+
+## 2026-10-10 — Use write-capable Codex policy for unattended runs
+- **Status**: accepted
+- **Context**: Unattended Codex turns used read-only sandboxing with on-request approval, so Cargo could wait for a host popup that the worker UI could not show.
+- **Consequences**: Autonomous turns use `workspaceWrite` with `approvalPolicy: on-request`; interactive turns retain read-only approval cards, while all requests remain subject to LoopDeck's destructive-command floor.

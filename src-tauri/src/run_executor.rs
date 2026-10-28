@@ -567,7 +567,8 @@ pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
     let mut changed = false;
     for phase in &mut plan.phases {
         if phase.status == RunPhaseStatus::Running {
-            phase.status = RunPhaseStatus::Interrupted;
+            phase.status =
+                crate::transition::transition_phase(phase.status, RunPhaseStatus::Interrupted)?;
             changed = true;
         }
     }

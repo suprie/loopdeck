@@ -1,0 +1,2 @@
+{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture-1","turnId":"turn-fixture-1","tokenUsage":{"last":{"inputTokens":512,"outputTokens":64,"totalTokens":576},"total":{"inputTokens":512,"outputTokens":64,"totalTokens":576}}}}
+{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-fixture-1","status":"completed"}}}

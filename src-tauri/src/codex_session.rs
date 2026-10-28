@@ -172,7 +172,8 @@ impl CodexSession {
     }
 
     /// `slots.plan` is unused here — Codex has no `ExitPlanMode` concept (its
-    /// own approval model is always `readOnly` + `on-request`), so only the
+    /// own approval model is `readOnly` + `on-request` for interactive turns
+    /// and `workspaceWrite` + `never` for autonomous turns), so only the
     /// question/permission slots this session actually parks on are threaded
     /// down to `send_turn`. `ParkSlots` is accepted (rather than separate
     /// `question_slot`/`permission_slot` params) purely so `HarnessSession`
@@ -326,6 +327,21 @@ impl CodexSession {
                 plan_mode,
             )
             .await;
+        match &result {
+            Ok(response) => tracing::info!(
+                target: "loopdeck::codex_lifecycle",
+                thread_id = self.thread_id.as_deref().unwrap_or("unknown"),
+                duration_ms = response.duration_ms,
+                tool_count = response.tool_calls.len(),
+                "Codex turn finished"
+            ),
+            Err(error) => tracing::warn!(
+                target: "loopdeck::codex_lifecycle",
+                thread_id = self.thread_id.as_deref().unwrap_or("unknown"),
+                error = %error,
+                "Codex turn failed"
+            ),
+        }
         let _ = interrupt_slot.lock().ok().and_then(|mut g| g.take());
         let _ = question_slot.lock().ok().and_then(|mut g| g.take());
         let _ = permission_slot.lock().ok().and_then(|mut g| g.take());
@@ -371,6 +387,7 @@ impl CodexSession {
             } else {
                 None
             },
+            self.policy.is_autonomous(),
         );
         self.write_message(json!({
             "method": "turn/start",
@@ -378,6 +395,13 @@ impl CodexSession {
             "params": params
         }))
         .await?;
+        tracing::info!(
+            target: "loopdeck::codex_lifecycle",
+            request_id,
+            thread_id,
+            cwd = %self.cwd.display(),
+            "Codex turn start requested"
+        );
 
         let (interrupt_tx, mut interrupt_rx) = oneshot::channel::<()>();
         *interrupt_slot.lock().map_err(|_| AppError::LockError)? = Some(interrupt_tx);
@@ -419,6 +443,12 @@ impl CodexSession {
                 interrupt = &mut interrupt_rx, if !interrupt_requested => {
                     if interrupt.is_ok() {
                         interrupt_requested = true;
+                        tracing::warn!(
+                            target: "loopdeck::codex_lifecycle",
+                            thread_id,
+                            turn_id = active_turn_id.as_deref().unwrap_or("unknown"),
+                            "Codex turn interrupt requested"
+                        );
                         interrupt_deadline =
                             Some(tokio::time::Instant::now() + INTERRUPT_GRACE_TIMEOUT);
                         if let Some(turn_id) = active_turn_id.as_deref() {
@@ -429,6 +459,12 @@ impl CodexSession {
                                 "params": { "threadId": thread_id, "turnId": turn_id }
                             })).await?;
                             interrupt_sent = true;
+                            tracing::info!(
+                                target: "loopdeck::codex_lifecycle",
+                                thread_id,
+                                turn_id,
+                                "Codex turn interrupt sent"
+                            );
                         }
                     }
                     continue;
@@ -451,6 +487,13 @@ impl CodexSession {
                     .pointer("/result/turn/id")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
+                tracing::info!(
+                    target: "loopdeck::codex_lifecycle",
+                    request_id,
+                    thread_id,
+                    turn_id = active_turn_id.as_deref().unwrap_or("unknown"),
+                    "Codex turn start accepted"
+                );
                 if interrupt_requested && !interrupt_sent {
                     if let Some(turn_id) = active_turn_id.as_deref() {
                         let id = self.next_id();
@@ -490,6 +533,12 @@ impl CodexSession {
                         .pointer("/turn/id")
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned);
+                    tracing::info!(
+                        target: "loopdeck::codex_lifecycle",
+                        thread_id,
+                        turn_id = active_turn_id.as_deref().unwrap_or("unknown"),
+                        "Codex turn started event received"
+                    );
                 }
                 "item/agentMessage/delta" => {
                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
@@ -515,6 +564,14 @@ impl CodexSession {
                 }
                 "item/started" => {
                     if let Some(item) = params.get("item") {
+                        tracing::debug!(
+                            target: "loopdeck::codex_lifecycle",
+                            thread_id,
+                            turn_id = active_turn_id.as_deref().unwrap_or("unknown"),
+                            item_id = item.get("id").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                            item_type = item.get("type").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                            "Codex item started"
+                        );
                         if item.get("type").and_then(Value::as_str) == Some("dynamicToolCall") {
                             log_dynamic_tool_call("started", item);
                         }
@@ -545,6 +602,14 @@ impl CodexSession {
                 }
                 "item/completed" => {
                     if let Some(item) = params.get("item") {
+                        tracing::debug!(
+                            target: "loopdeck::codex_lifecycle",
+                            thread_id,
+                            turn_id = active_turn_id.as_deref().unwrap_or("unknown"),
+                            item_id = item.get("id").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                            item_type = item.get("type").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                            "Codex item completed"
+                        );
                         if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                             if let Some(final_text) = item.get("text").and_then(Value::as_str) {
                                 if item.get("phase").and_then(Value::as_str) == Some("final_answer")
@@ -626,6 +691,17 @@ impl CodexSession {
                     };
                     let duration_ms =
                         u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    tracing::info!(
+                        target: "loopdeck::codex_lifecycle",
+                        thread_id,
+                        turn_id = active_turn_id.as_deref().unwrap_or("unknown"),
+                        status,
+                        duration_ms,
+                        tool_count = tool_calls.len(),
+                        has_error = is_error,
+                        interrupted = interrupt_requested || status == "interrupted",
+                        "Codex turn completed event received"
+                    );
                     let response = AgentResponse {
                         text: text_acc.clone(),
                         thinking: (!thinking_acc.is_empty()).then_some(thinking_acc.clone()),
@@ -919,6 +995,10 @@ impl CodexSession {
                 .map_err(|e| AppError::Agent(format!("read from Codex failed: {e}")))?,
         };
         if bytes == 0 {
+            tracing::warn!(
+                target: "loopdeck::codex_lifecycle",
+                "Codex app-server closed stdout unexpectedly"
+            );
             return Err(AppError::Agent(
                 "Codex app-server closed stdout unexpectedly".into(),
             ));
@@ -1326,9 +1406,9 @@ fn tool_from_item(item: &Value) -> Option<(String, Value)> {
 
 /// Build the app-server capability contract advertised by Selasar.
 ///
-/// Code Mode's client-hosted dynamic tools are experimental. Selasar does
-/// not provide their JavaScript runtime, so opting in can leave a turn waiting
-/// for a tool result that it cannot produce.
+/// The app-server's collaboration-mode and model discovery methods are gated
+/// behind this capability. Code Mode is safe to advertise here because its
+/// separate host is supervised and passed to the app-server at spawn time.
 fn initialize_params() -> Value {
     json!({
         "clientInfo": {
@@ -1336,7 +1416,7 @@ fn initialize_params() -> Value {
             "title": "Selasar",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "capabilities": { "experimentalApi": false }
+        "capabilities": { "experimentalApi": true }
     })
 }
 
@@ -1364,10 +1444,13 @@ fn app_server_args(code_mode_host_url: Option<&str>) -> Vec<String> {
 
 /// Build the per-turn security boundary and optional model overrides.
 ///
-/// `readOnly` is intentional even for autonomous projects. It makes Codex
-/// request approval before commands or edits, allowing Selasar's
-/// `PermissionPolicy` to decide whether to park for the user or auto-allow,
-/// while always retaining the destructive-command floor.
+/// Interactive sessions stay on `readOnly` + `on-request` so LoopDeck can
+/// render approval cards. Autonomous run-queue sessions use
+/// `workspaceWrite` + `on-request`: they can write build artifacts inside the
+/// managed worktree without a host filesystem popup, while approval requests
+/// still pass through LoopDeck's autonomous policy and destructive-command
+/// floor.
+#[allow(clippy::too_many_arguments)]
 fn turn_start_params(
     thread_id: &str,
     text: &str,
@@ -1376,6 +1459,7 @@ fn turn_start_params(
     model: Option<&str>,
     effort: Option<&str>,
     collaboration_mode: Option<&Value>,
+    autonomous: bool,
 ) -> Value {
     let mut input: Vec<Value> = vec![json!({ "type": "text", "text": text })];
     input.extend(attachments.iter().map(|a| {
@@ -1384,14 +1468,27 @@ fn turn_start_params(
             "url": format!("data:{};base64,{}", a.media_type, a.data),
         })
     }));
+    let (approval_policy, sandbox_policy) = if autonomous {
+        (
+            "on-request",
+            json!({
+                "type": "workspaceWrite"
+            }),
+        )
+    } else {
+        (
+            "on-request",
+            json!({
+                "type": "readOnly"
+            }),
+        )
+    };
     let mut params = json!({
         "threadId": thread_id,
         "input": input,
         "cwd": cwd,
-        "approvalPolicy": "on-request",
-        "sandboxPolicy": {
-            "type": "readOnly"
-        }
+        "approvalPolicy": approval_policy,
+        "sandboxPolicy": sandbox_policy
     });
     if let Some(model) = model.filter(|value| !value.is_empty()) {
         params["model"] = Value::String(model.to_owned());
@@ -1649,11 +1746,11 @@ mod tests {
     }
 
     #[test]
-    fn initialize_does_not_opt_into_unsupported_experimental_api() {
+    fn initialize_opts_into_experimental_api_for_collaboration_discovery() {
         let params = initialize_params();
 
         assert_eq!(params["clientInfo"]["name"], "loopdeck");
-        assert_eq!(params["capabilities"]["experimentalApi"], false);
+        assert_eq!(params["capabilities"]["experimentalApi"], true);
     }
 
     #[test]
@@ -1757,12 +1854,30 @@ mod tests {
             Some("gpt-test"),
             Some("high"),
             None,
+            false,
         );
 
         assert_eq!(params["approvalPolicy"], "on-request");
         assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
         assert_eq!(params["model"], "gpt-test");
         assert_eq!(params["effort"], "high");
+    }
+
+    #[test]
+    fn autonomous_turn_uses_worktree_write_without_host_approval() {
+        let params = turn_start_params(
+            "thread-1",
+            "Run the unattended loop",
+            &[],
+            Path::new("/repo"),
+            None,
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(params["approvalPolicy"], "on-request");
+        assert_eq!(params["sandboxPolicy"]["type"], "workspaceWrite");
     }
 
     #[test]
@@ -1775,6 +1890,7 @@ mod tests {
             Some(""),
             Some(""),
             None,
+            false,
         );
 
         assert!(params.get("model").is_none());
@@ -1791,6 +1907,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
@@ -1813,6 +1930,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
