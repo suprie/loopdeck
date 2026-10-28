@@ -2,6 +2,11 @@
 
 _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._ 
 
+## 2026-10-28 — Every Claude control_response allow must echo updatedInput
+- **Status**: accepted
+- **Context**: The unattended provider-contract run stalled because every mutating tool call failed before execution with `Tool permission request failed: ZodError ... updatedInput ... / behavior "deny"`. LoopDeck wrote a bare `{"behavior":"allow"}` for policy auto-approvals and plan approvals; the Claude CLI's response schema now requires a record `updatedInput` on every allow (and a string `message` on every deny).
+- **Consequences**: `ControlResponsePayload::allow` now takes the original tool input and always serializes `updatedInput`; permission, manual-approval, plan-approval, and AskUserQuestion paths all pass it through. `deny` always serializes a `message` string. Regression tests cover plain allow and rewritten-input allow. This unblocks unattended runs once the app is rebuilt and the parked run is re-queued.
+
 ## 2026-10-28 — Provider fixtures are manifest-backed and synthetic until sanitized captures exist
 - **Status**: accepted
 - **Context**: `prd-provider-contract` Phase 1 needs both providers' wire shapes for text, tools, decisions, usage, error, interrupt, and completion before normalization can be tested, but no live account capture was available in this environment.

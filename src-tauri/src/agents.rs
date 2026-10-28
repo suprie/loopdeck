@@ -474,34 +474,35 @@ pub(crate) struct ControlRequestBody {
 /// ```json
 /// { "type":"control_response", "response": {
 ///     "subtype":"success", "request_id":"<id>",
-///     "response": { "behavior":"allow" }            // or
-///     "response": { "behavior":"deny", "message":"…" }   // or
-///     "response": { "behavior":"allow", "updatedInput": { … } }
+///     "response": { "behavior":"allow", "updatedInput": { … } }   // or
+///     "response": { "behavior":"deny", "message":"…" }
 /// }}
 /// ```
-/// Matched by `request_id`, not tool_use_id. Built from a `Decision` so the
-/// `permission` module stays the single source of policy truth. The
-/// `updated_input` arm is used by `AskUserQuestion`: the tool is allowed to
-/// run, but with its input rewritten to carry the user's answers (per the
-/// Claude Code "Handle approvals and user input" protocol).
+/// The CLI's response schema requires `updatedInput` on every allow and
+/// `message` on every deny; a bare `{ "behavior":"allow" }` is rejected
+/// before the tool runs. Matched by `request_id`, not tool_use_id. Built from
+/// a `Decision` so the `permission` module stays the single source of policy
+/// truth. Plain approvals echo the original tool input; `AskUserQuestion`
+/// rewrites it to carry the user's answers (per the Claude Code "Handle
+/// approvals and user input" protocol).
 pub(crate) struct ControlResponsePayload {
     request_id: String,
     behavior: &'static str,
-    /// Present only on deny — Claude surfaces this to the model as the reason.
+    /// Present on deny — Claude surfaces this to the model as the reason.
     message: Option<String>,
-    /// Present only on the `AskUserQuestion` allow path — the rewritten tool
-    /// input, carrying the user's answers. When set, this is serialized as
-    /// `response.response.updatedInput` alongside `behavior: "allow"`.
+    /// Present on allow — the tool input to execute. Plain approvals echo the
+    /// originating input; `AskUserQuestion` rewrites it with the user's
+    /// answers. Serialized as `response.response.updatedInput`.
     updated_input: Option<serde_json::Value>,
 }
 
 impl ControlResponsePayload {
-    pub(crate) fn allow(request_id: impl Into<String>) -> Self {
+    pub(crate) fn allow(request_id: impl Into<String>, updated_input: serde_json::Value) -> Self {
         Self {
             request_id: request_id.into(),
             behavior: "allow",
             message: None,
-            updated_input: None,
+            updated_input: Some(updated_input),
         }
     }
 
@@ -517,45 +518,35 @@ impl ControlResponsePayload {
     /// Allow the tool call but rewrite its input before it runs. Used to feed
     /// the user's answers back into `AskUserQuestion` — Claude executes the
     /// tool with `updated_input` (which contains `answers`), reads the result,
-    /// and continues the turn. The envelope is identical to `allow()`; only
-    /// the inner `response` object gains an `updatedInput` key.
+    /// and continues the turn. Every allow carries `updatedInput`, so this is
+    /// a named alias for `allow()` at rewrite call sites.
     pub(crate) fn allow_with_updated_input(
         request_id: impl Into<String>,
         updated_input: serde_json::Value,
     ) -> Self {
-        Self {
-            request_id: request_id.into(),
-            behavior: "allow",
-            message: None,
-            updated_input: Some(updated_input),
-        }
+        Self::allow(request_id, updated_input)
     }
 
     /// Serialize to the single NDJSON line to write to stdin (trailing `\n`
     /// added by the caller).
     pub(crate) fn to_json(&self) -> serde_json::Value {
-        // Allow-with-updatedInput: behavior + updatedInput, no message.
-        if self.behavior == "allow" {
-            if let Some(updated) = &self.updated_input {
-                return serde_json::json!({
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": self.request_id,
-                        "response": {
-                            "behavior": "allow",
-                            "updatedInput": updated,
-                        },
-                    }
-                });
-            }
-        }
-        let inner = match &self.message {
-            Some(msg) => serde_json::json!({
+        // The CLI schema requires `updatedInput` for allow and `message` for
+        // deny. Constructors populate the matching field; the empty fallbacks
+        // keep a malformed payload off the wire if a future caller bypasses
+        // them.
+        let inner = if self.behavior == "allow" {
+            serde_json::json!({
+                "behavior": "allow",
+                "updatedInput": self
+                    .updated_input
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            })
+        } else {
+            serde_json::json!({
                 "behavior": self.behavior,
-                "message": msg,
-            }),
-            None => serde_json::json!({ "behavior": self.behavior }),
+                "message": self.message.clone().unwrap_or_default(),
+            })
         };
         serde_json::json!({
             "type": "control_response",
@@ -1352,7 +1343,9 @@ mod tests {
     #[test]
     fn test_control_response_allow_shape_matches_protocol() {
         // The exact wire shape Claude expects (PRD "Sample → Response").
-        let payload = ControlResponsePayload::allow("4cce7fc0-bcde-4297-9689-ebd53b1ada0e");
+        let input = serde_json::json!({ "command": "cargo test" });
+        let payload =
+            ControlResponsePayload::allow("4cce7fc0-bcde-4297-9689-ebd53b1ada0e", input.clone());
         let json = payload.to_json();
         assert_eq!(json["type"], "control_response");
         assert_eq!(json["response"]["subtype"], "success");
@@ -1361,6 +1354,7 @@ mod tests {
             "4cce7fc0-bcde-4297-9689-ebd53b1ada0e"
         );
         assert_eq!(json["response"]["response"]["behavior"], "allow");
+        assert_eq!(json["response"]["response"]["updatedInput"], input);
         // Allow carries no message.
         assert!(
             json["response"]["response"]["message"].is_null(),
@@ -1407,22 +1401,16 @@ mod tests {
             json["response"]["response"]["message"].is_null(),
             "allow-with-updatedInput must not carry a message"
         );
-        // And the plain-allow keys must be absent.
-        assert!(
-            json["response"]["response"].get("updatedInput").is_some(),
-            "updatedInput key must be present"
-        );
     }
 
     #[test]
-    fn test_plain_allow_does_not_carry_updated_input() {
-        // Regression guard: the original allow() path must not accidentally
-        // emit `updatedInput`. Only allow_with_updated_input does.
-        let json = ControlResponsePayload::allow("req-a").to_json();
-        assert!(
-            json["response"]["response"].get("updatedInput").is_none(),
-            "plain allow must not carry updatedInput"
-        );
+    fn test_plain_allow_echoes_original_input() {
+        // Regression guard for the CLI's response schema: every allow must
+        // carry `updatedInput`, even when the policy made no rewrite. A bare
+        // `{"behavior":"allow"}` is rejected before the tool runs.
+        let input = serde_json::json!({ "command": "cargo test" });
+        let json = ControlResponsePayload::allow("req-a", input.clone()).to_json();
+        assert_eq!(json["response"]["response"]["updatedInput"], input);
     }
 
     #[test]

@@ -4,10 +4,13 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Status**: idle — no active loop
-- **Next**: `provider-contract/normalize-claude` (promote from `docs/epics/execution-foundations/prd-provider-contract.md`)
+- **Status**: ready — the `updatedInput` fix is committed on `feat/provider-event-fixtures`, and a fresh run plan is queued against worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`, cut from that branch. Rebuild/restart LoopDeck, then start the queued run.
+- **Next**: start the queued `provider-contract` run and let the four phases execute in order.
 
 ## Next Steps
+- [x] Fix the Claude control_response schema and commit it.
+- [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
+- [ ] Rebuild/restart LoopDeck, then start the queued `provider-contract` run.
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/109
 - [ ] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope (fixtures are ready under `src-tauri/tests/fixtures/provider-events/`).
 - [ ] Re-run a single overnight phase with `loopdeck::codex_lifecycle` and `loopdeck::run_queue` logs enabled; compare the last lifecycle event with the watchdog decision.
@@ -23,6 +26,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-28 — Fix Claude control_response schema blocking unattended mutations
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: The overnight provider-contract run could not write files: every mutating tool call failed with a harness `ZodError` because LoopDeck emitted `{"behavior":"allow"}` without `updatedInput`. `ControlResponsePayload::allow` now requires and serializes the original tool input, deny always carries a `message`, and regression tests cover both allow shapes. `cargo test` (692 passed), `cargo clippy -D warnings`, and `cargo fmt --check` are green. The parked run still needs a rebuild + re-queue.
 
 ### 2026-10-28 — execution-foundations / prd-provider-contract capture-fixtures
 - **Status**: completed
