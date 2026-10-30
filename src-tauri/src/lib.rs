@@ -19,6 +19,7 @@ mod logging;
 mod memory;
 mod migration;
 mod multi_agent;
+mod operational_store;
 mod paths;
 mod permission;
 mod persist;
@@ -27,6 +28,8 @@ mod project;
 #[allow(dead_code)]
 mod provider_event;
 mod provider_normalize;
+#[cfg(test)]
+mod recovery_tests;
 pub mod retry;
 mod run_executor;
 mod runplan;

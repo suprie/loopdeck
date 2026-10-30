@@ -155,7 +155,7 @@ export function RunQueuePanel({
       setPlan(updated);
       useStreamingState.getState().beginTurn(projectPath);
       await api.queueRun(projectPath);
-      toast.success("Parked phase restarted unattended");
+      toast.success("Unfinished phase continued unattended");
       await loadPlan();
     } catch (err) {
       useStreamingState.getState().clear(projectPath);
@@ -173,7 +173,7 @@ export function RunQueuePanel({
       setPlan(updated);
       useStreamingState.getState().beginTurn(projectPath);
       await api.queueRun(projectPath);
-      toast.success("Failed phases restarted as one combined run");
+      toast.success("Unfinished phases continued");
       await loadPlan();
     } catch (err) {
       useStreamingState.getState().clear(projectPath);
@@ -413,7 +413,7 @@ export function RunQueuePanel({
                   <button
                     onClick={handleRetryFailed}
                     disabled={retryingAll}
-                    title={`Requeue all ${retryableCount} parked/failed phase(s) and restart the run as one combined session`}
+                    title={`Continue ${retryableCount} unfinished phase(s) using the retained worktree and saved progress`}
                     className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {retryingAll ? (
@@ -421,7 +421,7 @@ export function RunQueuePanel({
                     ) : (
                       <RotateCcw size={11} />
                     )}
-                    Retry failed ({retryableCount})
+                    Continue unfinished ({retryableCount})
                   </button>
                 )}
                 {pendingInterviewCount > 1 && (
@@ -452,6 +452,11 @@ export function RunQueuePanel({
             )}
           </div>
 
+          {!isRunning && retryableCount > 0 && (
+            <p className="mb-2 text-[11px] text-muted-foreground">
+              Continue from saved progress in the existing worktree. Completed phases stay complete.
+            </p>
+          )}
           <ul className="space-y-1">
             {plan.phases.map((phase) => (
               <RunPhaseRow
@@ -746,7 +751,7 @@ function RunPhaseRow({
           className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)] transition-colors hover:bg-accent disabled:opacity-50"
         >
           {retrying ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} />}
-          Retry unattended
+          {phase.status === "interrupted" ? "Continue unfinished loop" : "Continue unattended"}
         </button>
       ) : (
         phase.status === "queued" && (

@@ -1701,6 +1701,24 @@ pub(crate) fn spawn_fresh_with_config(
     agent_config: &crate::config::AgentConfig,
     force_autonomous: bool,
 ) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
+    spawn_fresh_with_config_resuming(
+        state,
+        path,
+        policy_root,
+        agent_config,
+        force_autonomous,
+        None,
+    )
+}
+
+pub(crate) fn spawn_fresh_with_config_resuming(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    agent_config: &crate::config::AgentConfig,
+    force_autonomous: bool,
+    resume_session_id: Option<&str>,
+) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
     // The caller has already performed the busy check / archive steps when it
     // is the normal `spawn_fresh` path. Multi-agent worktrees are unique, so
     // their maps cannot collide with an existing session.
@@ -1710,7 +1728,15 @@ pub(crate) fn spawn_fresh_with_config(
         resolve_permission_policy(state, policy_root)
     };
 
-    let session = HarnessSession::spawn(path, agent_config, None, policy)?;
+    let session = match HarnessSession::spawn(path, agent_config, resume_session_id, policy.clone())
+    {
+        Ok(session) => session,
+        Err(error) if resume_session_id.is_some() && native_resume_unavailable(&error) => {
+            tracing::warn!("native session could not be resumed before dispatch; falling back to repository recovery prompt: {error}");
+            HarnessSession::spawn(path, agent_config, None, policy)?
+        }
+        Err(error) => return Err(error),
+    };
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state
         .claude_sessions
@@ -1719,6 +1745,18 @@ pub(crate) fn spawn_fresh_with_config(
         .insert(path.to_path_buf(), Arc::clone(&arc));
 
     Ok(arc)
+}
+
+fn native_resume_unavailable(error: &AppError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "session not found",
+        "no conversation found",
+        "invalid session",
+        "no conversation found with session id",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Fresh-start send pipeline used by `agent_start_loop`. Mirrors
@@ -1897,10 +1935,49 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     force_autonomous: bool,
     plan_mode: bool,
 ) -> Result<AgentResponse, AppError> {
+    start_fresh_and_record_streaming_in_root_with_config_and_resume(
+        state,
+        path,
+        policy_root,
+        prompt,
+        title,
+        channel,
+        token_budget,
+        run_events,
+        agent_config,
+        control_key,
+        force_autonomous,
+        plan_mode,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_and_resume(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    prompt: &str,
+    title: Option<String>,
+    channel: &Channel<ClaudeEvent>,
+    token_budget: Option<&TokenBudget>,
+    run_events: Option<RunEventChannel>,
+    agent_config: Option<&crate::config::AgentConfig>,
+    control_key: Option<&Path>,
+    force_autonomous: bool,
+    plan_mode: bool,
+    resume_session_id: Option<&str>,
+) -> Result<AgentResponse, AppError> {
     let session_arc = match agent_config {
-        Some(config) => {
-            spawn_fresh_with_config(state, path, policy_root, config, force_autonomous)?
-        }
+        Some(config) => spawn_fresh_with_config_resuming(
+            state,
+            path,
+            policy_root,
+            config,
+            force_autonomous,
+            resume_session_id,
+        )?,
         None => spawn_fresh(state, path, policy_root, force_autonomous).await?,
     };
     let mut session = session_arc.lock().await;
@@ -1940,7 +2017,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     // exception and deliberately use interactive Plan mode.
     // No attachments — the loop prompt is text by construction (see the
     // non-streaming fresh-start path).
-    let response = match send_streaming_with_retry(
+    let mut outcome = send_streaming_with_retry(
         &mut session,
         prompt,
         &[],
@@ -1951,8 +2028,38 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
         plan_mode,
         token_budget,
     )
-    .await
-    {
+    .await;
+    drop(session);
+    // Claude can reject --resume in its terminal response, after spawn.
+    // Only this explicit rejection with no tool activity is safe to replay.
+    if let (Some(config), Ok(response)) = (agent_config, &outcome) {
+        if resume_session_id.is_some()
+            && response.is_error
+            && response.tool_calls.is_empty()
+            && native_resume_unavailable(&AppError::Agent(response.result.clone()))
+        {
+            drop(session_arc);
+            let fresh =
+                spawn_fresh_with_config(state, path, policy_root, config, force_autonomous)?;
+            let mut session = fresh.lock().await;
+            if let Some(events) = run_events.clone() {
+                session.attach_run_events(events);
+            }
+            outcome = send_streaming_with_retry(
+                &mut session,
+                prompt,
+                &[],
+                channel,
+                &slots,
+                &islot,
+                run_events.as_ref(),
+                plan_mode,
+                token_budget,
+            )
+            .await;
+        }
+    }
+    let response = match outcome {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(policy_root, &e);

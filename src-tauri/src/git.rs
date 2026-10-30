@@ -36,6 +36,19 @@ fn git_command(repo_path: &Path) -> Option<Command> {
     Some(cmd)
 }
 
+/// Return Git's absolute common directory for stable project identity across
+/// linked worktrees. Uses the vetted git executable used by all app Git calls.
+pub(crate) fn common_dir(repo_path: &Path) -> Option<PathBuf> {
+    let output = git_command(repo_path)?
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+}
+
 /// Best-effort `git init` for a fresh project directory. Never fails the
 /// caller: a missing git binary or failed spawn returns `false`, and a
 /// project without git simply degrades (epics stay authorable; promote-with-

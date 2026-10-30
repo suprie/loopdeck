@@ -339,19 +339,10 @@ impl ClaudeSession {
         // dead code. See docs/PRD-trust-boundary-hardening.md FR1.
         cmd.args(["--permission-mode", "default"]);
 
-        // Role charter (`prd-role-foundations`): a chartered roster entry has
-        // its charter (persona + allowed skills + output contract) appended to
-        // the CLI's system prompt, so the role identity rides above every user
-        // turn without occupying the task-prompt space. An empty or missing
-        // charter injects nothing — plain connection profile (ADR-3).
-        if let Some(rendered) = agent_config
-            .charter
-            .as_ref()
-            .filter(|charter| !charter.is_empty())
-            .map(crate::config::RoleCharter::render)
-        {
-            cmd.args(["--append-system-prompt", &rendered]);
-        }
+        // Shared writing guidance applies to every session. An optional role
+        // charter precedes it in the same system-prompt argument.
+        let prompt = crate::harness::session_prompt(agent_config);
+        cmd.args(["--append-system-prompt", &prompt]);
 
         if let Some(model) = agent_config.model.clone() {
             cmd.args(["--model", &model]);

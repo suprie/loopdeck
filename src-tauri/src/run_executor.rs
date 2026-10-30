@@ -645,6 +645,9 @@ pub(crate) fn build_run_plan(
             RunPhase {
                 execution_id: exec_id.clone(),
                 status: RunPhaseStatus::Queued,
+                attempt: 0,
+                provider_session_id: None,
+                recovery_requested: false,
                 interview: Vec::new(),
                 interview_status: InterviewStatus::Pending,
                 depends_on: if i == 0 {
