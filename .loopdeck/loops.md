@@ -4,10 +4,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Status**: in_progress — all six `prd-parallel-scheduling` loops are implemented in worktree `run/parallel-scheduling-one-turn-per-phase-plus5-d13a619fe69b`: per-phase turns, dependency-aware fan-out with per-phase worktrees, the `Waiting` gate, multi-phase restart reconciliation, per-phase budgets, and scheduler property/worktree tests. Verify gate is PASS.
+- **Status**: in_progress — all six `prd-parallel-scheduling` loops are implemented in worktree `run/parallel-scheduling-one-turn-per-phase-plus5-d13a619fe69b`: per-phase turns, dependency-aware fan-out with per-phase worktrees, the `Waiting` gate, multi-phase restart reconciliation, per-phase budgets, and scheduler property/worktree tests. Verify gate is PASS; draft PR #113 is open.
 - **Next**: review and merge the parallel-scheduling draft PR; then run a real overnight plan with two disjoint phases to confirm concurrent draft PRs on the user's machine.
 
 ## Next Steps
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/113
 - [x] `role-based-orchestration` / `prd-parallel-scheduling` — all six loops (one-turn-per-phase, parallel-batches, gated-start, restart-reconcile, budget-split, tests).
 - [x] Fix the Claude control_response schema and commit it.
 - [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
