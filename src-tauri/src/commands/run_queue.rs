@@ -9,7 +9,10 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::{mark_turn_terminal, start_fresh_and_record_streaming_in_root_with_config};
+use super::agent::{
+    mark_turn_terminal, start_fresh_and_record_streaming_in_root_with_config,
+    start_fresh_and_record_streaming_in_root_with_config_and_resume,
+};
 use super::state::{
     fire_interrupt, resolve_agent_config, resolve_agent_config_by_id, resolve_root, AppState,
 };
@@ -62,6 +65,8 @@ fn normalized_run_channel(
     app: AppHandle,
     project_path: String,
     execution_id: String,
+    project_root: PathBuf,
+    phase_ids: Vec<String>,
 ) -> Channel<RunEvent> {
     Channel::new(move |event| {
         let event = match event.deserialize::<RunEvent>() {
@@ -71,6 +76,24 @@ fn normalized_run_channel(
                 return Ok(());
             }
         };
+        if let crate::provider_event::RunEventPayload::Started {
+            session_id: Some(id),
+            ..
+        } = &event.payload
+        {
+            let id = if event.provider == crate::provider_event::Provider::Codex
+                && !id.starts_with("codex:")
+            {
+                format!("codex:{id}")
+            } else {
+                id.clone()
+            };
+            if let Err(error) =
+                runplan::checkpoint_session(&project_root, &event.run_id, &phase_ids, &id)
+            {
+                warn!("failed to persist provider session checkpoint: {error}");
+            }
+        }
         if let Err(error) = app.emit(
             RUN_EVENT_TOPIC,
             RunEventEnvelope {
@@ -1032,6 +1055,28 @@ fn reconcile_inactive_execution_state(
     Ok(Some(next))
 }
 
+/// Change limits on the existing plan without discarding saved progress.
+#[tauri::command]
+pub async fn update_run_budgets(
+    path: String,
+    budgets: RunBudgets,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    validate_budgets(&budgets)?;
+    let root = resolve_root(&state, &path)?;
+    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    if handles.contains_key(&root) {
+        return Err(AppError::RunPlan(
+            "cannot change budgets while the run is still active".into(),
+        ));
+    }
+    let mut plan = runplan::load(&root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
+    plan.budgets = budgets;
+    runplan::save(&root, &plan)?;
+    Ok(plan)
+}
+
 /// Requeue one retryable terminal phase and any phases parked only because
 /// they depend on it. The next `queue_run` starts a fresh unattended turn.
 #[tauri::command]
@@ -1256,7 +1301,7 @@ pub(crate) fn requeue_terminal_phase(
         )));
     }
     phase.status = RunPhaseStatus::Queued;
-    phase.park_payload = None;
+    phase.recovery_requested = true;
 
     let mut requeued = HashSet::from([execution_id.to_string()]);
     loop {
@@ -1271,6 +1316,7 @@ pub(crate) fn requeue_terminal_phase(
             if blocked_by_requeued_phase {
                 phase.status = RunPhaseStatus::Queued;
                 phase.park_payload = None;
+                phase.recovery_requested = false;
                 requeued.insert(phase.execution_id.clone());
                 changed = true;
             }
@@ -1283,7 +1329,7 @@ pub(crate) fn requeue_terminal_phase(
 }
 
 /// Requeue every retryable terminal phase (`Parked`/`Failed`/`Interrupted`/
-/// `Killed`), clearing its park payload. Returns how many phases were
+/// `Killed`), retaining diagnostics for recovery. Returns how many phases were
 /// requeued — 0 means the plan had nothing to retry. `Completed`/`Queued`/
 /// `Running` phases are left untouched.
 fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
@@ -1297,7 +1343,7 @@ fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
                 | RunPhaseStatus::Killed
         ) {
             phase.status = RunPhaseStatus::Queued;
-            phase.park_payload = None;
+            phase.recovery_requested = true;
             requeued += 1;
         }
     }
@@ -1856,6 +1902,7 @@ async fn execute_run(
         // than a phase that silently never started.
         for &idx in &batch {
             plan.phases[idx].status = RunPhaseStatus::Running;
+            plan.phases[idx].attempt = plan.phases[idx].attempt.saturating_add(1);
         }
         runplan::save(root, &plan)?;
 
@@ -1890,6 +1937,20 @@ async fn execute_run(
                 run_wall_clock_secs: run_timeout.as_secs(),
             },
         );
+        let recovery_requested = batch.iter().any(|&idx| plan.phases[idx].recovery_requested);
+        if recovery_requested {
+            prompt.push_str("\n\nRECOVERY CONTINUATION: Continue this interrupted loop from the existing managed worktree and prior attempt. Inspect the current branch, diff, files, and completed phase artifacts first. Preserve and build on all existing changes. Identify what was already finished, what remains, and complete only the remaining work. Do not reset, clean, overwrite, or recreate the worktree. If provider history is unavailable, use the repository state and this recovery instruction to continue the existing work.");
+            for &idx in &batch {
+                let phase = &plan.phases[idx];
+                if let Some(reason) = &phase.park_payload {
+                    prompt.push_str(&format!(
+                        "\nPrevious outcome for `{}`: {}",
+                        phase.execution_id,
+                        reason.chars().take(4000).collect::<String>()
+                    ));
+                }
+            }
+        }
         for (execution_id, _, _) in &locs {
             let topic = plan
                 .phases
@@ -1937,7 +1998,13 @@ async fn execute_run(
         });
         let run_events = Some(RunEventChannel::new(
             plan.id.clone(),
-            normalized_run_channel(app.clone(), run_project_path, run_execution_id),
+            normalized_run_channel(
+                app.clone(),
+                run_project_path,
+                run_execution_id,
+                root.to_path_buf(),
+                locs.iter().map(|(id, _, _)| id.clone()).collect(),
+            ),
         ));
         let token_budget = TokenBudget::new(phase_token_cap);
         let phase_started = Instant::now();
@@ -1957,7 +2024,16 @@ async fn execute_run(
         // — replaces the default-config spawn, so each phase group runs under
         // its own role. `None` falls back to the default-agent resolution
         // inside the wrapper, unchanged from Phase 2.
-        let turn = start_fresh_and_record_streaming_in_root_with_config(
+        let resume_session_id = batch
+            .iter()
+            .map(|&idx| plan.phases[idx].provider_session_id.as_deref())
+            .collect::<Option<Vec<_>>>()
+            .and_then(|ids| {
+                ids.first()
+                    .copied()
+                    .filter(|first| ids.iter().all(|id| id == first))
+            });
+        let turn = start_fresh_and_record_streaming_in_root_with_config_and_resume(
             state,
             &worktree,
             root,
@@ -1973,6 +2049,7 @@ async fn execute_run(
             None,
             true,
             false,
+            resume_session_id,
         );
         info!(
             target: "loopdeck::run_queue",
@@ -2008,6 +2085,24 @@ async fn execute_run(
                 Err(error)
             }
         };
+        // The start-event callback checkpoints the native ID while this local
+        // plan is in flight. Retain that update in every terminal write, even
+        // when the provider never returns a final response.
+        if let Some(checkpoint) = runplan::load(root)? {
+            if checkpoint.id == plan.id {
+                for &idx in &batch {
+                    if let Some(saved) = checkpoint
+                        .phases
+                        .iter()
+                        .find(|phase| phase.execution_id == plan.phases[idx].execution_id)
+                    {
+                        plan.phases[idx]
+                            .provider_session_id
+                            .clone_from(&saved.provider_session_id);
+                    }
+                }
+            }
+        }
         let per_phase_secs = phase_started.elapsed().as_secs() / batch_len.max(1);
         for &idx in &batch {
             plan.phases[idx].wall_clock_secs = per_phase_secs;
@@ -2017,6 +2112,9 @@ async fn execute_run(
 
         match outcome {
             Ok(response) => {
+                for &idx in &batch {
+                    plan.phases[idx].recovery_requested = false;
+                }
                 let tokens = response
                     .usage
                     .as_ref()
@@ -2537,7 +2635,13 @@ mod unattended_tests {
             .phases
             .iter()
             .all(|phase| phase.status == RunPhaseStatus::Queued));
-        assert!(plan.phases.iter().all(|phase| phase.park_payload.is_none()));
+        assert_eq!(
+            plan.phases[0].park_payload.as_deref(),
+            Some("approval required")
+        );
+        assert!(plan.phases[1..]
+            .iter()
+            .all(|phase| phase.park_payload.is_none()));
     }
 
     #[test]
@@ -2581,7 +2685,11 @@ mod unattended_tests {
                 .expect("failed and interrupted phases should be retryable");
 
             assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
-            assert!(plan.phases[0].park_payload.is_none());
+            assert_eq!(
+                plan.phases[0].park_payload.as_deref(),
+                Some("turn interrupted")
+            );
+            assert!(plan.phases[0].recovery_requested);
         }
     }
 
@@ -2615,7 +2723,18 @@ mod unattended_tests {
             .phases
             .iter()
             .all(|phase| phase.status == RunPhaseStatus::Queued));
-        assert!(plan.phases.iter().all(|phase| phase.park_payload.is_none()));
+        assert_eq!(
+            plan.phases
+                .iter()
+                .map(|phase| phase.park_payload.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("harness spawn failed"),
+                Some("total run wall-clock budget exceeded"),
+                Some("verify verdict: BLOCK")
+            ]
+        );
+        assert!(plan.phases.iter().all(|phase| phase.recovery_requested));
     }
 
     #[test]
@@ -2632,7 +2751,11 @@ mod unattended_tests {
         assert_eq!(plan.phases[0].status, RunPhaseStatus::Completed);
         assert_eq!(plan.phases[1].status, RunPhaseStatus::Running);
         assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
-        assert!(plan.phases[2].park_payload.is_none());
+        assert_eq!(
+            plan.phases[2].park_payload.as_deref(),
+            Some("turn interrupted")
+        );
+        assert!(plan.phases[2].recovery_requested);
     }
 
     #[test]
@@ -2878,6 +3001,32 @@ mod unattended_tests {
         set_batch_token_usage(&mut plan, &[0, 1, 2], 900, 3);
 
         assert!(plan.phases.iter().all(|phase| phase.token_usage == 300));
+    }
+
+    #[test]
+    fn edited_budgets_reject_zero_for_every_limit() {
+        for budgets in [
+            RunBudgets {
+                per_phase_token_cap: Some(0),
+                ..Default::default()
+            },
+            RunBudgets {
+                per_phase_wall_clock_secs: Some(0),
+                ..Default::default()
+            },
+            RunBudgets {
+                total_run_wall_clock_secs: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_budgets(&budgets).is_err());
+        }
+        assert!(validate_budgets(&RunBudgets {
+            per_phase_token_cap: Some(5_000_000),
+            ..Default::default()
+        })
+        .is_ok());
+        assert!(validate_budgets(&RunBudgets::default()).is_ok());
     }
 
     #[test]

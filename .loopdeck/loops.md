@@ -8,6 +8,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Next**: review and merge draft PR #110; then start the next queued `execution-foundations` PRD.
 
 ## Next Steps
+- [ ] Split oversized execution/session modules, especially commands/run_queue.rs, commands/agent.rs, claude_session.rs, codex_session.rs, and epic.rs.
+- [ ] Smoke-test queued-loop continuation with live Codex/Claude after interruption; verify retained edits and shared state.
 - [x] Fix the Claude control_response schema and commit it.
 - [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
 - [x] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope.
@@ -28,6 +30,30 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## History
 
+### 2026-10-30 — Adjust stopped-run budgets
+- **Status**: completed
+- **Completed**: 2026-10-30
+- Added an existing-run budget editor for token and time limits; save limits before continuing unfinished phases. Active runs reject budget updates.
+- Validation: TypeScript type-check passed; backend budget tests recorded in session results.
+- Follow-up: smoke-test a real resource-limit stop, budget increase, and continuation in the desktop app.
+
+### 2026-10-30 — Codex sub-agent activity visibility
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Show collaboration call starts/results in live and persisted Worker activity through both event paths. Keep call completion separate from child status. Added event and display regression tests.
+- **Validation**: All 36 frontend tests, TypeScript, formatting, and diff checks passed. Rust regression test is queued behind an existing Cargo build lock.
+- **Follow-up**: Live smoke with delegated Codex work; child transcript subscription and reconciliation of authored loop status with provider lifecycle remain separate work.
+
+### 2026-10-30 — Shared agent writing guidance
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Added shared ASD-STE100 writing guidance to Claude system instructions and the initial Codex prompt, including profiles without role charters.
+
+### 2026-10-30 — Central queued-run state and unfinished-loop continuation
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Centralized run plans and execution snapshots in SQLite and added recovery-aware continuation with retained worktrees, provider checkpoints, and completed-phase preservation.
+
 ### 2026-10-28 — execution-foundations / prd-provider-contract Phases 2–3
 - **Status**: completed
 - **Completed**: 2026-10-28
@@ -47,122 +73,3 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Status**: completed
 - **Completed**: 2026-10-14
 - **Summary**: Added the state/ownership inventory, measured SQLite-vs-file decision and rollback procedure, and legacy identity/migration map; accepted SQLite as the target mutable operational store with compatibility exports.
-
-### 2026-10-08 — Fix overnight collaboration-mode handshake
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Advertised Codex's experimental API capability so the existing `collaborationMode/list` and `model/list` pre-flight handshake is accepted; updated the regression test and recorded the decision.
-
-### 2026-10-08 — Product visual and app icon integration
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Added the supplied dashboard screenshot to the site hero and reused the supplied icon for the website favicon and Tauri PNG bundle assets.
-
-### 2026-10-08 — Transparent dark-mode product visual
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Edited the product screenshot so the area outside the app frame is transparent and blends with the site’s dark background.
-
-### 2026-10-08 — Transparent-corner Selasar icon
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Removed the icon’s white outer corners and regenerated the favicon plus Tauri PNG, ICO, ICNS, Windows, iOS, and Android assets.
-
-### 2026-09-01 — role-based-orchestration / prd-role-foundations Phases 2-3
-- **Status**: completed
-- **Completed**: 2026-09-01
-- **Summary**: Charter injection across all three spawn paths (Claude `--append-system-prompt`, Codex first-turn prepend, shared `RoleCharter::render`), fake-child argv-capture integration tests for all three paths (env-override binaries in `binary.rs`), and per-role permission rules above the destructive floor. Verifier PASS 3/3. Shipped as draft PR.
-
-### 2026-09-01 — prd-verified-delivery-reconciliation Phases 4-5 (clean-handoff, retry-recovery, delivery-integration-tests, prd-acceptance-audit)
-- **Status**: completed
-- **Completed**: 2026-09-01
-- **Summary**: handoff.rs + delivery_retry.rs + stub-gh integration tests + acceptance audit; all 6 P0 goals PASS. Detail: decisions.md 2026-08-31 / 2026-09-01 entries.
-
-### 2026-08-31 — prd-verified-delivery-reconciliation Phases 1-3
-- **Status**: completed
-- **Completed**: 2026-08-31
-- **Summary**: Seven loops in one unattended session — `delivery.rs` (DeliveryLinks + pure reconcile/gates + rubric extraction), `DeliveryReportTab` + report/rubric commands, worktrees under `.loopdeck/runs/` with resume-from-branch, external-worktree detection (detect-only), executor delivery gates on a fresh rubric, rubric summary in the delivery commit, checklist completion only after the PR exists. Detail: decisions.md 2026-08-31 entries.
-
-- ✅ **`selasar-revamp` / `prd-night-run-surfaces` Phase 3 — morning report, rail badge, requeue** (2026-08-30) — `MorningReportTab.tsx` (verdict table + kill callouts + collapsible `AuditSlice` tail, Agent-tab slot), the rail door's sun "morning report ready" badge (clear-once-opened via `appStore.morningReportSeen`), and the report's parked-questions requeue via the shared `ParkedQuestionInbox.tsx` extracted from `NightRunTab.tsx` (both paths: `answerParkedQuestion` / `requeueRunPhase`+`queueRun`; stay-on-report latch + 5s report refetch). Draft PR #92.
-
-- ✅ **`prd-night-run-surfaces` Phase 2 items 1-2 — plan-tonight wizard + queue-run wiring** (2026-08-28) — Branch started by merging draft PRs #87 + #88 (run's pre-answered clarification) so the wizard's mount point (`PlanTonightButton`, item 3) and Phase 1's night variant exist. Item 1: new `PlanTonightWizard.tsx` — a 3-step shadcn-`Dialog` opened from the drawer header. Step 1: queueable-loop picker (same `!done && !noId` gate, grouped by epic · PRD · phase) where each checked loop shows its dependency label from new pure `dependencyLabel()` (`lib/nightRun.ts`, mirrors `run_executor.rs::build_run_plan`'s authored-order predecessor chain — selection order IS the dependency chain), plus stall-policy select, budget inputs, and draft-PR consent checkbox. `createRunPlan` fires on the 1→2 transition (clarification: interviews need a plan; abandonment leaves it queued-but-unstarted, same state the panel leaves). Step 2: live pre-flight interviews inline — per-phase Run-interview/Skip controls (same IPC as `RunQueuePanel`'s rows); a running interview polls `listPendingQuestions` at 1s and renders a parked `AskUserQuestionCard` inline below the row (the "text inputs"); submitting answers via `agentAnswerQuestion` unblocks the turn — `runPhaseInterview` then resolves with answers pinned (clarification named `answerParkedQuestion`, which only applies to phases parked mid-run, i.e. `status === "parked"`; a live interview parks on the shared pending-question slot, whose answer path is `agentAnswerQuestion` — deviation recorded in decisions.md). Step 3: consent summary (phases + interview statuses, stall policy, budgets, draft-PR consent) + required checkbox. Item 2: Start button calls the same `queueRun` IPC `RunQueuePanel`'s Start uses, with `useStreamingState` begin/clear + toasts; payload-shape confirmation — `queue_run` takes only the project path and re-reads `run-plan.yaml` (shape fixed by `createRunPlan`), and button gating mirrors `queue_run`'s pending-interview guard; on resolve the wizard closes and auto-switches to the Agent tab (clarification: "close wizard, auto-switch"), which the `useRunStatus` poll swaps for the night variant. Split honored per clarification: loop 1 committed with a disabled stub final action (`650c1c3`), loop 2 replaced it with the wiring (`da093c9`). Tests: +1 `dependencyLabel` case in `tests/frontend/nightRun.test.mjs` (first-phase no-deps, predecessor chain, reorder re-chains, raw-ID fallback). Gates green: `npx tsc --noEmit`, `npm run test:frontend` 20/20, `cargo test` 596 passed, `clippy` clean. Verifier PASS (2/2 criteria, no non-goals scope creep).
-
-- ⛔ **`prd-night-run-surfaces` Phase 2 item 2 — wire the wizard's final action to queue-run: BLOCKED, zero code** (2026-08-26) — Dependency-order mismatch: the run plan queues this loop before `build-the-3-step-wizard`, reversed from the PRD's Phase 2 listing, so at execution time no wizard exists — only item 3's entry-point stub (`PlanTonightButton`, local open/close state, documented as the wizard's future mount point at `ProjectDrawer.tsx:491`). Pre-answered clarification for exactly this case: treat as blocked, record the mismatch as a parked question, produce no code against an undefined target. `loopdeck-prd-verifier` against the loop's criterion: **BLOCK** — FAIL (no wizard, no final action, no queue-run wiring in the changed set; the only `queueRun` call sites are `RunQueuePanel`'s pre-existing retry flow and `NightRunTab`'s Phase 1 requeue, neither wizard-related). Non-goals audit clean. No PR opened (BLOCK verdict gates `open-pr`); parked question in Next Steps for a human to reorder `run-plan.yaml`. Superseded 2026-08-28: run plan reordered, both loops re-queued and completed (entry above).
-- ⛔ **`prd-night-run-surfaces` Phase 2 item 2 — wire the wizard's final action to queue-run: BLOCKED, zero code** (2026-08-26) — Dependency-order mismatch: the run plan queues this loop before `build-the-3-step-wizard`, reversed from the PRD's Phase 2 listing, so at execution time no wizard exists — only item 3's entry-point stub (`PlanTonightButton`, local open/close state, documented as the wizard's future mount point at `ProjectDrawer.tsx:491`). Pre-answered clarification for exactly this case: treat as blocked, record the mismatch as a parked question, produce no code against an undefined target. `loopdeck-prd-verifier` against the loop's criterion: **BLOCK** — FAIL (no wizard, no final action, no queue-run wiring in the changed set; the only `queueRun` call sites are `RunQueuePanel`'s pre-existing retry flow and `NightRunTab`'s Phase 1 requeue, neither wizard-related). Non-goals audit clean. No PR opened (BLOCK verdict gates `open-pr`); parked question in Next Steps for a human to reorder `run-plan.yaml`.
-
-- ✅ **`prd-night-run-surfaces` Phase 2 item 3 — "Plan tonight" entry point in the drawer header** (2026-08-26) — `ProjectDrawer.tsx` gains a local `PlanTonightButton` in the `SheetHeader` (left of the status badge): fetches epics via `api.getEpics` on mount (runs only while the drawer is open — Radix `Sheet` mounts content conditionally), renders null when nothing is queueable or the fetch fails. Gate is new pure `hasQueueablePhases(epics)` (`lib/nightRun.ts`), mirroring `EpicsPanel.tsx`'s per-loop overnight-run picker gate verbatim (`loop.id && !loop.checked && !loop.done_in_history`, the `!done && !noId` condition at EpicsPanel.tsx:733-752) — shared single source rather than an inline copy, so the header button and the picker checkboxes can't drift. Per the run's pre-answered clarification (wizard items 1-2 queued separately), the button toggles local `open` state (`aria-expanded`, primary-highlighted when open) with no modal content yet — the wizard mounts into that open state later. Tests: +1 `hasQueueablePhases` case in `tests/frontend/nightRun.test.mjs` (open-ID'd loop queueable, id-less/checked/done-in-history not, any-qualifier-anywhere, empty tree). Verifier PASS (1/1 criterion, no non-goals scope creep).
-
-- [ ] Review & merge the memory-hygiene draft PR: https://github.com/suprie/loopdeck/pull/94
-
-- [ ] `prd-night-run-surfaces` Phase 4 manual smoke: real queued run planned via the wizard, through to the morning report
-- [ ] `prd-process-discipline` owns automated budget enforcement if ever wanted (resolved: document-only here)
-
-## History
-
-### 2026-08-30 — Memory hygiene: 3,000-token budget + compaction
-- **Status**: completed
-- **Completed**: 2026-08-30
-- **Summary**: Measured loops.md ~40K / decisions.md ~8.2K tokens, wrote the 3,000-token budget and entry-length convention into `loopdeck-memory`, compacted both active files to ~0.8K/~2.1K tokens, verified the archives. Detail: `memory-budget-report.md`; `loops-archive.md` 2026-08-30 appendix.
-
-### 2026-08-30 — prd-night-run-surfaces Phase 3 — morning report drawer
-- **Status**: completed
-- **Completed**: 2026-08-30
-- **Summary**: Morning report renders in the Agent-tab slot with a stay-on-report latch; parked inbox single-sourced. Shipped as PR #92 (merged). Detail: `loops-archive.md`.
-
-### 2026-08-28 — Plan-tonight wizard: 3-step phase picker with dependency labels
-- **Status**: completed
-- **Completed**: 2026-08-28
-- **Summary**: Wizard's 3-step picker renders phase dependency labels and unblocks stall recovery. Detail: `loops-archive.md` 2026-08-30 appendix.
-
-### 2026-08-26 — prd-night-run-surfaces Phase 1 items 1-3
-- **Status**: completed
-- **Completed**: 2026-08-26
-- **Summary**: Night drawer variant, inline parked-question card, rail-door indicator delivered. Detail: `loops-archive.md` 2026-08-30 appendix.
-
-### 2026-08-23 — prd-detail-drawer Phase 1 (spike) + Phase 2 (overlay drawer)
-- **Status**: completed
-- **Completed**: 2026-08-23
-- **Summary**: Drawer is pure UI state; Epics/Graph nest under Loops/Decisions. Detail: `loops-archive.md` 2026-08-30 appendix.
-
-### 2026-08-12 — prd-rail-corridor-shell Phase 1 — project rail
-- **Status**: completed
-- **Completed**: 2026-08-12
-- **Summary**: Project rail with all 4 loop-domain doors. Detail: `loops-archive.md` 2026-08-30 appendix.
-
-### 2026-10-08 — Codex interactive questions
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Enabled Codex's `default_mode_request_user_input` app-server feature and added a regression test for the spawned argument contract; the existing LoopDeck question bridge remains responsible for rendering and answering prompts.
-- **Follow-up**: Added a startup fallback for Codex installations without the optional Code Mode sidecar.
-- **Follow-up**: Updated Code Mode host startup from WebSocket to the gRPC transport used by Codex 0.161 and added endpoint-safety tests.
-- **Follow-up**: Accepted Codex 0.161's loopback HTTP endpoint output and expanded endpoint-safety coverage.
-
-### 2026-10-08 — Deduplicate repeated Default agent chips
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Multi-agent header chips are now deduplicated by profile ID across recent runs; historical sub-runs remain accessible in History.
-
-### 2026-10-08 — Route Codex blocking questions to the popup
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Added first-turn Codex interaction guidance and regression tests so questions requiring user input use LoopDeck's structured question bridge instead of prose-only messages.
-
-### 2026-10-08 — Repair PR CI after Code Mode transport update
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Fixed the stale WebSocket endpoint in the charter-injection fixture and removed a strict-Clippy needless borrow. Serialized Rust tests: 668 passed, 9 ignored.
-
-### 2026-10-08 — Fix Rust deprecation CI failure
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Replaced deprecated `Atomic::fetch_update` with `try_update`; strict Clippy passes on PR #105.
-
-### 2026-10-08 — Repair Codex charter-injection fixture
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Updated the fake Codex handshake for collaboration-mode and model discovery; the targeted charter test passes.
-
-### 2026-10-08 — Fix strict Clippy harness variant sizing
-- **Status**: completed
-- **Completed**: 2026-10-08
-- **Summary**: Boxed both concrete provider sessions in `HarnessSession` and updated delegation to satisfy `large_enum_variant`; CI-style Clippy and the Rust library suite pass.

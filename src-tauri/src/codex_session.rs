@@ -74,8 +74,8 @@ pub struct CodexSession {
     /// App-server-provided Plan preset, used only for interactive interviews.
     plan_collaboration_mode: Option<Value>,
     policy: PermissionPolicy,
-    /// Rendered role charter, pending injection. Codex's app-server protocol
-    /// has no system-prompt override, so the charter is prepended to the
+    /// Shared writing guidance and optional role charter, pending injection.
+    /// Codex's app-server protocol has no system-prompt override, so this is prepended to the
     /// *first* task prompt sent on this session (role identity first, task
     /// second) and consumed — later turns already share the thread's context.
     charter_prompt: Option<String>,
@@ -194,11 +194,7 @@ impl CodexSession {
             initialized: false,
             plan_collaboration_mode: None,
             policy,
-            charter_prompt: config
-                .charter
-                .as_ref()
-                .filter(|charter| !charter.is_empty())
-                .map(crate::config::RoleCharter::render),
+            charter_prompt: Some(crate::harness::session_prompt(config)),
             run_event_channel: None,
             run_events: None,
         })
@@ -322,7 +318,27 @@ impl CodexSession {
         };
         self.write_message(json!({"method": method, "id": thread_id, "params": params}))
             .await?;
-        let result = self.wait_for_response(thread_id).await?;
+        let result = match self.wait_for_response(thread_id).await {
+            Ok(result) => result,
+            Err(error) if method == "thread/resume" && missing_resume_thread(&error) => {
+                // No task has been sent yet. A missing provider-local thread
+                // can safely fall back to a new thread with the recovery prompt.
+                tracing::warn!(
+                    "saved Codex thread is unavailable; starting recovery thread: {error}"
+                );
+                let fresh_id = self.next_id();
+                let mut fresh_params = params;
+                if let Some(object) = fresh_params.as_object_mut() {
+                    object.remove("threadId");
+                }
+                self.write_message(
+                    json!({"method": "thread/start", "id": fresh_id, "params": fresh_params}),
+                )
+                .await?;
+                self.wait_for_response(fresh_id).await?
+            }
+            Err(error) => return Err(error),
+        };
         let id = result
             .pointer("/thread/id")
             .and_then(Value::as_str)
@@ -655,6 +671,28 @@ impl CodexSession {
                             item_type = item.get("type").and_then(|value| value.as_str()).unwrap_or("unknown"),
                             "Codex item completed"
                         );
+                        // A collab result can include newly assigned child IDs and
+                        // statuses that were unavailable when the call started.
+                        if let Some((name, input)) = collab_tool_completion(item) {
+                            let key = format!(
+                                "completed:{}",
+                                item.get("id").and_then(Value::as_str).unwrap_or_default()
+                            );
+                            if seen_tools.insert(key) {
+                                let input = input.to_string();
+                                tool_calls.push(ToolCallRecord {
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                });
+                                blocks.push(ContentBlockRecord::ToolUse {
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                });
+                                if let Some(channel) = channel {
+                                    let _ = channel.send(ClaudeEvent::ToolUse { name, input });
+                                }
+                            }
+                        }
                         if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                             if let Some(final_text) = item.get("text").and_then(Value::as_str) {
                                 if item.get("phase").and_then(Value::as_str) == Some("final_answer")
@@ -1468,6 +1506,15 @@ fn first_turn_prompt(charter: Option<String>, task: &str) -> String {
     }
 }
 
+/// Completion of a collaboration *call*, not completion of the child task.
+pub(crate) fn collab_tool_completion(item: &Value) -> Option<(String, Value)> {
+    if item.get("type").and_then(Value::as_str) != Some("collabAgentToolCall") {
+        return None;
+    }
+    let (name, input) = tool_from_item(item)?;
+    Some((format!("{name} result"), input))
+}
+
 pub(crate) fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     match item.get("type")?.as_str()? {
         "commandExecution" => Some((
@@ -1489,6 +1536,20 @@ pub(crate) fn tool_from_item(item: &Value) -> Option<(String, Value)> {
                 item.get("arguments").cloned().unwrap_or_else(|| json!({})),
             ))
         }
+        "collabAgentToolCall" => Some((
+            format!(
+                "Sub-agent {}",
+                item.get("tool").and_then(Value::as_str).unwrap_or("call")
+            ),
+            json!({
+                "tool": item.get("tool"),
+                "status": item.get("status"),
+                "model": item.get("model"),
+                "prompt": item.get("prompt"),
+                "receiverThreadIds": item.get("receiverThreadIds"),
+                "agentsStates": item.get("agentsStates"),
+            }),
+        )),
         "dynamicToolCall" => Some((
             item.get("tool")
                 .and_then(Value::as_str)
@@ -1756,9 +1817,75 @@ fn nonnegative_u64(value: Option<&Value>) -> u64 {
         .unwrap_or_default()
 }
 
+fn missing_resume_thread(error: &AppError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    (message.contains("thread") || message.contains("rollout"))
+        && (message.contains("not found")
+            || message.contains("does not exist")
+            || message.contains("no rollout found"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_saved_thread_falls_back_before_task_dispatch() {
+        let script = r#"
+while IFS= read -r request; do
+  case "$request" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+    *'"method":"initialized"'*) ;;
+    *'"method":"collaborationMode/list"'*) printf '%s\n' '{"id":2,"result":{"data":[]}}' ;;
+    *'"method":"model/list"'*) printf '%s\n' '{"id":3,"result":{"data":[]}}' ;;
+    *'"method":"thread/resume"'*) printf '%s\n' '{"id":4,"error":{"code":-32602,"message":"thread not found"}}' ;;
+    *'"method":"thread/start"'*) printf '%s\n' '{"id":5,"result":{"thread":{"id":"recovery-thread"}}}' ;;
+    *) exit 19 ;;
+  esac
+done
+"#;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut session = CodexSession {
+            child: Some(child),
+            code_mode_host: None,
+            stdin,
+            stdout,
+            stderr_drain: None,
+            cwd: std::env::temp_dir(),
+            model: None,
+            effort: None,
+            resume_thread_id: Some("expired-thread".into()),
+            thread_id: None,
+            next_request_id: 1,
+            initialized: false,
+            plan_collaboration_mode: None,
+            policy: PermissionPolicy::confirm_changes(),
+            charter_prompt: None,
+            run_event_channel: None,
+            run_events: None,
+        };
+        tokio::time::timeout(Duration::from_secs(3), session.ensure_initialized())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.thread_id.as_deref(), Some("recovery-thread"));
+        assert_eq!(session.next_request_id, 6);
+        assert!(!missing_resume_thread(&AppError::Agent(
+            "connection timed out".into()
+        )));
+        assert!(!missing_resume_thread(&AppError::Agent(
+            "authentication failed".into()
+        )));
+    }
 
     #[test]
     fn streamed_deltas_coalesce_without_crossing_content_boundaries() {
