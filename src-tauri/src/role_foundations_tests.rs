@@ -137,10 +137,12 @@ fn legacy_run_plan_without_assignment_fields_keeps_the_default_agent() {
         assert!(phase.assigned_agent_name.is_none());
         assert!(phase.handoff_topic.is_none());
     }
+    // Legacy plans have no authored edges, so both phases are ready at once;
+    // the executor still gives each phase its own turn.
     assert_eq!(
-        crate::commands::run_queue::next_queued_batch(&plan),
-        Some(vec![0, 1]),
-        "all-unassigned phases still share one combined turn"
+        crate::scheduler::select_ready(&plan, &Default::default(), 4),
+        vec![0, 1],
+        "legacy plans remain schedulable under per-phase turns"
     );
 
     std::fs::remove_dir_all(dir).ok();
@@ -183,10 +185,11 @@ fn assignment_and_handoff_topic_round_trip_through_the_plan_file() {
         loaded.phases[1].handoff_topic.as_deref(),
         Some("demo-qa-verify")
     );
-    // dev builds, QA verifies: the staffing change splits the combined turn.
+    // dev builds, QA verifies: the authored chain makes only the dev phase
+    // ready first. Each phase then runs in its own turn.
     assert_eq!(
-        crate::commands::run_queue::next_queued_batch(&loaded),
-        Some(vec![0])
+        crate::scheduler::select_ready(&loaded, &Default::default(), 4),
+        vec![0]
     );
 
     std::fs::remove_dir_all(dir).ok();

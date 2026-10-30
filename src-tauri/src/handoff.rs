@@ -278,6 +278,44 @@ pub fn copy_agent_artifact(
     Ok(artifact)
 }
 
+/// Copy the persistent artifact store into a phase worktree's
+/// `.loopdeck/handoffs/` before that phase's turn starts.
+///
+/// Every phase worktree is cut from the default branch, so a dependent phase
+/// cannot otherwise see an upstream artifact the executor copied into the
+/// main checkout minutes earlier. Seeding makes the dependency explicit:
+/// downstream sessions read only committed handoff contracts, never an
+/// upstream branch's unmerged code (the approved branch-scoping answer).
+///
+/// Existing files in the worktree are never overwritten. Returns how many
+/// artifacts were copied; a missing store is a no-op.
+pub fn seed_worktree_store(repo_path: &Path, worktree: &Path) -> Result<usize, AppError> {
+    let store = store_dir(repo_path);
+    if !store.is_dir() {
+        return Ok(0);
+    }
+    let destination = worktree.join(".loopdeck").join(HANDOFFS_DIR);
+    let mut copied = 0;
+    for entry in std::fs::read_dir(&store)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        std::fs::create_dir_all(&destination)?;
+        let target = destination.join(name);
+        if target.exists() {
+            continue;
+        }
+        std::fs::copy(&path, &target)?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
 fn parse_artifact(contents: &str, topic: &str, path: PathBuf) -> Result<Artifact, AppError> {
     let Some(rest) = contents.strip_prefix("---\n") else {
         return Err(AppError::RunPlan(format!(

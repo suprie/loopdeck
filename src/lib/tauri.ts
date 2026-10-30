@@ -282,7 +282,9 @@ export async function exportExecutionSummary(path: string): Promise<string> {
  * `handoffTopics` (prd-agent-handoff Phase 1) opts phases into a contract
  * artifact; unlisted phases emit nothing. Each topic is a unique kebab-case
  * slug fixed at queue time.
- * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments, handoff_topics) -> Result<RunPlan, AppError>
+ * `maxConcurrency` (prd-parallel-scheduling Phase 2) bounds concurrent phase
+ * turns; omit to keep the backend's four-phase default.
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments, handoff_topics, max_concurrency) -> Result<RunPlan, AppError>
  */
 export async function createRunPlan(
   path: string,
@@ -292,6 +294,7 @@ export async function createRunPlan(
   budgets: RunBudgets,
   assignments: PhaseAgentAssignment[] = [],
   handoffTopics: PhaseHandoffTopic[] = [],
+  maxConcurrency?: number,
 ): Promise<RunPlan> {
   return invoke<RunPlan>("create_run_plan", {
     path,
@@ -301,6 +304,7 @@ export async function createRunPlan(
     budgets,
     assignments,
     handoffTopics,
+    maxConcurrency,
   });
 }
 

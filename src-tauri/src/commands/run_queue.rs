@@ -9,11 +9,14 @@
 //! `commands::agent` already owns that orchestration for the same reason
 //! (see `run_executor.rs`'s module docs).
 
-use super::agent::{mark_turn_terminal, start_fresh_and_record_streaming_in_root_with_config};
+use super::agent::{
+    mark_turn_terminal, start_fresh_and_record_streaming_in_root_with_config,
+    start_fresh_and_record_streaming_in_root_with_config_resume,
+};
 use super::state::{
     fire_interrupt, resolve_agent_config, resolve_agent_config_by_id, resolve_root, AppState,
 };
-use crate::agents::{AskUserQuestionSpec, ClaudeEvent, TokenBudget};
+use crate::agents::{AgentResponse, AskUserQuestionSpec, ClaudeEvent, TokenBudget};
 use crate::config::AgentHarness;
 use crate::delivery;
 use crate::delivery_retry;
@@ -32,9 +35,10 @@ use crate::run_executor::{
     extract_verdict, ResolvedBudgets, RunHandle, RunVerdict,
 };
 use crate::runplan::{self, InterviewStatus, RunBudgets, RunPhaseStatus, RunPlan, StallPolicy};
+use crate::scheduler;
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 #[cfg(target_os = "macos")]
@@ -178,92 +182,58 @@ where
     }
 }
 
-fn run_worktree_path(root: &Path, branch: &str) -> PathBuf {
-    root.join(".loopdeck").join("runs").join(branch)
-}
-
-/// Branch name for a run's worktree: derived from the first queued phase's
-/// execution ID (already `<prd-slug>/<loop-slug>`, e.g.
-/// `wake-up/notify-after-completed`) so `git branch`/GitHub show what the run
-/// is actually doing, not just an opaque `run-<uuid>`. A `-plusN` suffix
-/// notes when the run covers more than one phase. The plan id's trailing
-/// UUID segment is kept as a short suffix so two runs touching the same
-/// phase (e.g. a retry) never collide on branch name.
-fn run_branch_name(plan: &RunPlan) -> String {
-    let slug = plan
-        .phases
-        .first()
-        .map(|p| p.execution_id.as_str())
-        .unwrap_or(plan.id.as_str());
-    let extra = plan.phases.len().saturating_sub(1);
-    let suffix = plan.id.rsplit('-').next().unwrap_or(plan.id.as_str());
-    let name = if extra > 0 {
-        format!("{slug}-plus{extra}-{suffix}")
-    } else {
-        format!("{slug}-{suffix}")
-    };
-    format!(
-        "run/{}",
-        name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
-    )
-}
-
-/// Create the one isolated worktree used by every phase in a run. The path and
-/// branch are persisted before a turn begins, so a failed/terminated run stays
-/// inspectable and a restart does not create a second branch.
+/// Ensure a phase's own isolated worktree exists (`parallel-scheduling`).
+///
+/// Every phase gets one worktree and one branch, cut from the repository's
+/// default branch — no stacking. Dependents receive upstream output only via
+/// handoff artifacts, never via an upstream branch's unmerged code (the
+/// approved branch-scoping answer). One worktree per in-flight phase also
+/// keeps the session cache honest: `AppState.claude_sessions` is keyed by
+/// worktree path, so concurrent turns can never share a provider process.
 ///
 /// Resume behavior (`prd-verified-delivery-reconciliation` Phase 2): when the
 /// persisted worktree is gone from Git's inventory but its **branch still
-/// exists** (user deleted the tree, or `git worktree prune` ran), the
-/// worktree is recreated at the same path from the surviving branch instead
-/// of hard-stopping — no second branch, no lost work. Only a missing branch
-/// (nothing left to resume from) preserves the run for inspection.
-fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError> {
-    if let Some(path) = &plan.environment.worktree_path {
-        if git::worktree_list(root)
-            .map_err(AppError::RunPlan)?
-            .iter()
-            .any(|known| known == path)
-        {
-            return Ok(path.clone());
-        }
-        let branch = plan.environment.worktree_branch.as_deref().ok_or_else(|| {
-            AppError::RunPlan(format!(
-                "run worktree {} is missing and no branch was recorded; \
-                 preserving the run for inspection",
-                path.display()
-            ))
-        })?;
-        if git::branch_exists(root, branch) {
-            let worktree =
-                git::worktree_add_existing(root, path, branch).map_err(AppError::RunPlan)?;
-            info!(
-                "recreated run worktree {} from surviving branch {branch}",
-                worktree.path.display()
-            );
-            return Ok(worktree.path);
-        }
-        return Err(AppError::RunPlan(format!(
-            "run worktree {} and branch {branch} are both missing; \
-             preserving the run for inspection",
-            path.display()
-        )));
+/// exists**, the worktree is recreated at the same path from the surviving
+/// branch instead of hard-stopping. Only a missing branch preserves the run
+/// for inspection.
+///
+/// Returns `(path, branch, created)`; the caller persists both fields on the
+/// phase before spawning the turn.
+fn ensure_phase_worktree(
+    root: &Path,
+    plan: &RunPlan,
+    index: usize,
+) -> Result<(PathBuf, String, bool), AppError> {
+    let phase = &plan.phases[index];
+    let branch = phase
+        .worktree_branch
+        .clone()
+        .unwrap_or_else(|| scheduler::phase_branch_name(&plan.id, &phase.execution_id, index));
+    let path = phase
+        .worktree_path
+        .clone()
+        .unwrap_or_else(|| scheduler::phase_worktree_path(root, &branch));
+
+    let known = git::worktree_list(root).map_err(AppError::RunPlan)?;
+    if known.iter().any(|candidate| candidate == &path) {
+        return Ok((path, branch, false));
     }
-    let branch = run_branch_name(plan);
-    let path = run_worktree_path(root, &branch);
+    if git::branch_exists(root, &branch) {
+        let worktree =
+            git::worktree_add_existing(root, &path, &branch).map_err(AppError::RunPlan)?;
+        info!(
+            "recreated phase worktree {} from surviving branch {branch}",
+            worktree.path.display()
+        );
+        return Ok((worktree.path, worktree.branch, true));
+    }
+
     ignore_managed_runs_dir(root);
     std::fs::create_dir_all(path.parent().expect("worktree path has a parent"))?;
-    // Clean handoff (`prd-verified-delivery-reconciliation` Phase 4): every
-    // new run branch is cut from the repo's default branch — fresh, never
-    // stacked on a delivered/stray checkout the main worktree happens to be
-    // on. A fix landing on a *different* branch must not silently ride into
-    // the next run's base.
     let base = git::default_branch(root).unwrap_or_else(|| "HEAD".to_string());
     let worktree =
         git::worktree_add_from(root, &path, &branch, &base).map_err(AppError::RunPlan)?;
-    plan.environment.worktree_path = Some(worktree.path.clone());
-    plan.environment.worktree_branch = Some(worktree.branch);
-    Ok(worktree.path)
+    Ok((worktree.path, worktree.branch, true))
 }
 
 /// Persist the clean-handoff record at delivery (Phase 4, `clean-handoff`).
@@ -271,9 +241,9 @@ fn ensure_worktree(root: &Path, plan: &mut RunPlan) -> Result<PathBuf, AppError>
 /// starts from* — the `.loopdeck/runs/<next-branch>/` worktree is only created
 /// when the next loop actually starts. Best-effort: a failed write parks a
 /// note on the last phase, it never fails the delivery itself.
-fn record_handoff(root: &Path, plan: &RunPlan, worktree: &Path, pr_url: &str) {
+fn record_handoff(root: &Path, branch: &str, worktree: &Path, pr_url: &str) {
     let record = handoff::HandoffRecord {
-        delivered_branch: plan.environment.worktree_branch.clone().unwrap_or_default(),
+        delivered_branch: branch.to_string(),
         pr_url: pr_url.to_string(),
         worktree: worktree.to_path_buf(),
         next_base: git::default_branch(root).unwrap_or_else(|| "main".to_string()),
@@ -284,37 +254,23 @@ fn record_handoff(root: &Path, plan: &RunPlan, worktree: &Path, pr_url: &str) {
     }
 }
 
-/// Promote the agent-authored phase artifacts from the isolated worktree into
-/// the project's persistent handoff store. Validation and duplicate detection
-/// live in `handoff`; this helper only applies the batch boundary and returns
-/// the first error so the executor can park the phase without losing the
-/// original artifact.
-fn emit_phase_artifacts(
+/// Promote one phase's agent-authored artifact from its worktree into the
+/// project's persistent handoff store. Validation and duplicate detection
+/// live in `handoff`; a missing or mismatched artifact errors so the executor
+/// can park the phase without losing the original.
+fn emit_phase_artifact(
     root: &Path,
     worktree: &Path,
-    plan: &RunPlan,
-    locs: &[(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)],
+    execution_id: &str,
+    topic: Option<&str>,
 ) -> Result<(), AppError> {
-    for (execution_id, _, _) in locs {
-        let phase = plan
-            .phases
-            .iter()
-            .find(|phase| phase.execution_id == *execution_id)
-            .ok_or_else(|| {
-                AppError::RunPlan(format!(
-                    "phase \"{execution_id}\" is missing from its run plan"
-                ))
-            })?;
-        // Handoffs are opt-in per phase (`prd-agent-handoff` Phase 1): a phase
-        // without a configured topic has no artifact contract, so legacy plans
-        // keep executing unchanged (ADR-3). Once a topic is configured the
-        // slug is authoritative — the executor never derives one from the
-        // execution id, and a missing/mismatched artifact parks the phase.
-        let Some(topic) = phase.handoff_topic.as_deref() else {
-            continue;
-        };
-        handoff::copy_agent_artifact(root, worktree, execution_id, topic)?;
-    }
+    // Handoffs are opt-in per phase (`prd-agent-handoff` Phase 1): a phase
+    // without a configured topic has no artifact contract, so legacy plans
+    // keep executing unchanged (ADR-3).
+    let Some(topic) = topic else {
+        return Ok(());
+    };
+    handoff::copy_agent_artifact(root, worktree, execution_id, topic)?;
     Ok(())
 }
 
@@ -562,14 +518,30 @@ pub async fn create_run_plan(
     // and sparse — phases without an entry stay on the default agent.
     assignments: Option<Vec<runplan::PhaseAgentAssignment>>,
     handoff_topics: Option<Vec<runplan::PhaseHandoffTopic>>,
+    // Maximum phases that may execute at once (`prd-parallel-scheduling`
+    // Phase 2). `None` keeps the four-phase default; the picker may set any
+    // value in 1..=MAX_RUN_MAX_CONCURRENCY.
+    max_concurrency: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
     validate_budgets(&budgets)?;
+    let max_concurrency = max_concurrency.unwrap_or(limits::DEFAULT_RUN_MAX_CONCURRENCY);
+    if max_concurrency == 0 || max_concurrency > limits::MAX_RUN_MAX_CONCURRENCY {
+        return Err(AppError::RunPlan(format!(
+            "max concurrency must be between 1 and {} phases",
+            limits::MAX_RUN_MAX_CONCURRENCY
+        )));
+    }
 
     if execution_ids.is_empty() {
         return Err(AppError::RunPlan(
             "select at least one phase to queue".into(),
+        ));
+    }
+    if execution_ids.iter().collect::<HashSet<_>>().len() != execution_ids.len() {
+        return Err(AppError::RunPlan(
+            "a phase can only appear once in a run plan".into(),
         ));
     }
 
@@ -658,12 +630,17 @@ pub async fn create_run_plan(
         handoff_topics.unwrap_or_default(),
     )?;
     plan.budgets = budgets;
+    plan.max_concurrency = max_concurrency;
+    // Reject a cycle before it is persisted: a plan with one would hold every
+    // member Waiting forever when the run starts.
+    scheduler::validate_dependency_graph(&plan.phases)?;
 
     runplan::save(&root, &plan)?;
     info!(
-        "run plan queued for {} with {} phase(s)",
+        "run plan queued for {} with {} phase(s), max concurrency {}",
         root.display(),
-        plan.phases.len()
+        plan.phases.len(),
+        plan.max_concurrency
     );
     Ok(plan)
 }
@@ -704,7 +681,7 @@ pub async fn queue_run(
     if !plan
         .phases
         .iter()
-        .any(|p| p.status == RunPhaseStatus::Queued)
+        .any(|p| matches!(p.status, RunPhaseStatus::Queued | RunPhaseStatus::Waiting))
     {
         return Err(AppError::RunPlan(
             "the run plan has no queued phases".into(),
@@ -712,7 +689,8 @@ pub async fn queue_run(
     }
 
     if let Some(phase) = plan.phases.iter().find(|p| {
-        p.status == RunPhaseStatus::Queued && p.interview_status == InterviewStatus::Pending
+        matches!(p.status, RunPhaseStatus::Queued | RunPhaseStatus::Waiting)
+            && p.interview_status == InterviewStatus::Pending
     }) {
         return Err(AppError::RunPlan(format!(
             "phase \"{}\" has not been interviewed — answer or skip its pre-flight interview before queuing the run",
@@ -791,12 +769,22 @@ pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), 
         ));
     }
 
-    // Phase sessions run in the isolated worktree, while legacy/manual
-    // sessions are keyed by the registered root. Signal both safely so Stop
-    // remains immediate during the migration to worktree-backed runs.
+    // Phase sessions run in their own isolated worktrees, while legacy/manual
+    // sessions are keyed by the registered root. Signal every active phase
+    // worktree and the legacy plan-level worktree so Stop reaches all
+    // concurrent turns immediately.
     let _ = fire_interrupt(&state, &root)?;
-    if let Some(worktree) = runplan::load(&root)?.and_then(|plan| plan.environment.worktree_path) {
-        let _ = fire_interrupt(&state, &worktree)?;
+    if let Some(plan) = runplan::load(&root)? {
+        if let Some(worktree) = plan.environment.worktree_path.as_ref() {
+            let _ = fire_interrupt(&state, worktree)?;
+        }
+        for phase in plan.phases.iter().filter(|phase| {
+            scheduler::is_active(phase.status) || phase.status == RunPhaseStatus::Running
+        }) {
+            if let Some(worktree) = phase.worktree_path.as_ref() {
+                let _ = fire_interrupt(&state, worktree)?;
+            }
+        }
     }
     info!("cancel_run fired for {}", root.display());
     Ok(())
@@ -1027,7 +1015,22 @@ fn reconcile_inactive_execution_state(
             now,
             false,
         )?,
-        RunPhaseStatus::Queued | RunPhaseStatus::Running => return Ok(None),
+        // A `Queued` phase that restart reconciliation auto-resumed is
+        // restart residue: release the stale focus pointer so the next queue
+        // attempt is not blocked by a loop nothing is driving. A plain queued
+        // phase that merely matches a manually promoted current loop keeps
+        // it — the user is still working that loop.
+        RunPhaseStatus::Queued if phase.resume_session_id.is_some() => state.abandon_current(
+            format!(
+                "reconciled auto-resumed run phase \"{}\" left queued after restart",
+                phase.execution_id
+            ),
+            now,
+            false,
+        )?,
+        RunPhaseStatus::Queued | RunPhaseStatus::Waiting | RunPhaseStatus::Running => {
+            return Ok(None)
+        }
     };
     Ok(Some(next))
 }
@@ -1262,12 +1265,16 @@ pub(crate) fn requeue_terminal_phase(
     loop {
         let mut changed = false;
         for phase in &mut plan.phases {
-            let blocked_by_requeued_phase = phase.status == RunPhaseStatus::Parked
-                && phase
-                    .park_payload
-                    .as_deref()
-                    .is_some_and(|payload| payload.starts_with("blocked: depends on parked phase"))
-                && phase.depends_on.iter().any(|id| requeued.contains(id));
+            // Dependents fail (not park) under the parallel scheduler; accept
+            // both markers so a retry of the upstream clears the cascade.
+            let blocked_by_requeued_phase =
+                matches!(
+                    phase.status,
+                    RunPhaseStatus::Parked | RunPhaseStatus::Failed
+                ) && phase.park_payload.as_deref().is_some_and(|payload| {
+                    payload.starts_with("blocked: depends on parked phase")
+                        || payload.starts_with("failed: upstream phase")
+                }) && phase.depends_on.iter().any(|id| requeued.contains(id));
             if blocked_by_requeued_phase {
                 phase.status = RunPhaseStatus::Queued;
                 phase.park_payload = None;
@@ -1303,95 +1310,6 @@ fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
     }
     requeued
 }
-/// Indices of every phase currently `Queued`, in plan order — the unit of
-/// work `execute_run` hands to one combined LLM turn. `None` once nothing is
-/// left to run.
-///
-/// Per-phase staffing (`prd-role-foundations` Phase 4): one combined turn can
-/// only run under one agent, so the batch is the maximal *prefix* of queued
-/// phases sharing the same `assigned_agent_id`. A staffing change splits the
-/// turn — dev builds, then QA verifies, as separate turns. All-unassigned
-/// plans (the pre-assignment shape) still batch into one turn exactly as
-/// before.
-pub(crate) fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
-    let indices: Vec<usize> = plan
-        .phases
-        .iter()
-        .enumerate()
-        .filter(|(_, phase)| phase.status == RunPhaseStatus::Queued)
-        .map(|(i, _)| i)
-        .collect();
-    if indices.is_empty() {
-        return None;
-    }
-    let staffing = plan.phases[indices[0]].assigned_agent_id.clone();
-    let split = indices
-        .iter()
-        .position(|&idx| plan.phases[idx].assigned_agent_id != staffing)
-        .unwrap_or(indices.len());
-    Some(indices[..split].to_vec())
-}
-
-/// Split a combined turn's total token usage evenly across every phase in
-/// the batch that produced it — there is no per-loop usage signal to divide
-/// on more precisely.
-fn set_batch_token_usage(plan: &mut RunPlan, batch: &[usize], total: u64, batch_len: u64) {
-    let per_phase = total / batch_len.max(1);
-    for &idx in batch {
-        plan.phases[idx].token_usage = per_phase;
-    }
-}
-
-fn kill_batch(plan: &mut RunPlan, batch: &[usize], reason: &str) {
-    for &idx in batch {
-        plan.phases[idx].status = RunPhaseStatus::Killed;
-        plan.phases[idx].park_payload = Some(reason.to_string());
-    }
-}
-
-fn park_batch(plan: &mut RunPlan, batch: &[usize], reason: &str) {
-    for &idx in batch {
-        plan.phases[idx].status = RunPhaseStatus::Parked;
-        plan.phases[idx].park_payload = Some(reason.to_string());
-    }
-}
-
-fn park_blocked_dependents(plan: &mut RunPlan, execution_id: &str) {
-    for blocked_id in run_executor::phases_blocked_by_park(plan, execution_id, plan.stall_policy) {
-        if let Some(phase) = plan
-            .phases
-            .iter_mut()
-            .find(|phase| phase.execution_id == blocked_id)
-        {
-            phase.status = RunPhaseStatus::Parked;
-            phase.park_payload = Some(format!(
-                "blocked: depends on parked phase \"{execution_id}\""
-            ));
-        }
-    }
-}
-
-/// Park a batch whose assigned agent no longer resolves in the roster
-/// (`prd-role-foundations` Phase 4): the payload names the missing agent for
-/// the morning report, and the plan's `stall_policy` decides — via the same
-/// dependent-parking every other park site uses — whether the rest of the
-/// plan stays eligible. Split out of `execute_run` so the policy behavior is
-/// testable without a live turn.
-fn park_missing_agent(plan: &mut RunPlan, batch: &[usize], agent_id: &str) {
-    park_batch(
-        plan,
-        batch,
-        &format!("assigned agent \"{agent_id}\" no longer exists in the agent roster"),
-    );
-    let batch_ids: Vec<String> = batch
-        .iter()
-        .map(|&idx| plan.phases[idx].execution_id.clone())
-        .collect();
-    for execution_id in &batch_ids {
-        park_blocked_dependents(plan, execution_id);
-    }
-}
-
 /// Run one queued phase's pre-flight interview turn (Phase 3) — a bounded
 /// session driven through the *streaming* pipeline
 /// (`start_fresh_and_record_streaming`, no-op sink `Channel`, same trick
@@ -1733,6 +1651,570 @@ pub async fn skip_phase_interview(
 ///
 /// A non-green verify verdict or any other turn-level error is unchanged
 /// from Phase 2: the phase is `Failed` and the run stops.
+/// One phase's turn, prepared by the scheduler and moved into its own
+/// Tokio task. Everything is owned so the future is `'static`; the plan
+/// itself is never moved into a task — only the main scheduler loop mutates
+/// and persists it, which is what keeps concurrent phase bookkeeping safe.
+struct PhaseTask {
+    index: usize,
+    execution_id: String,
+    worktree: PathBuf,
+    branch: String,
+    loc: epic::LoopLocation,
+    prompt: String,
+    agent_config: crate::config::AgentConfig,
+    title: String,
+    channel: Channel<ClaudeEvent>,
+    run_events: Option<RunEventChannel>,
+    token_cap: u64,
+    phase_timeout: Duration,
+    run_timeout: Duration,
+    resume_session_id: Option<String>,
+}
+
+struct PhaseTurnOutcome {
+    index: usize,
+    execution_id: String,
+    worktree: PathBuf,
+    branch: String,
+    loc: epic::LoopLocation,
+    elapsed: Duration,
+    tokens: u64,
+    exceeded: bool,
+    exceeded_message: String,
+    result: Result<AgentResponse, AppError>,
+}
+
+/// Run one phase turn in its own task: bootstrap the phase worktree, spawn
+/// the provider turn under this phase's own token and wall-clock budget, and
+/// return everything the scheduler needs to record the outcome. Never
+/// touches `RunPlan`.
+async fn run_phase_turn(
+    state: &AppState,
+    root: &Path,
+    cancel: &AtomicBool,
+    task: PhaseTask,
+) -> PhaseTurnOutcome {
+    let started = Instant::now();
+    let run_remaining = task.run_timeout;
+    let (bootstrap_timeout, bootstrap_reason) =
+        scheduler::phase_watchdog(task.phase_timeout, run_remaining);
+    let bootstrapped = bootstrap_worktree(&task.worktree, bootstrap_timeout, cancel).await;
+    let outcome = match bootstrapped {
+        Ok(BootstrapStop::Completed) => {
+            let token_budget = TokenBudget::new(task.token_cap);
+            let run_events = task.run_events.clone();
+            let turn = start_fresh_and_record_streaming_in_root_with_config_resume(
+                state,
+                &task.worktree,
+                root,
+                &task.prompt,
+                Some(task.title.clone()),
+                &task.channel,
+                Some(&token_budget),
+                run_events,
+                Some(&task.agent_config),
+                // Per-phase control key: sibling phases must never collide on
+                // pending-question, permission, plan, or interrupt slots.
+                Some(&task.worktree),
+                true,
+                false,
+                task.resume_session_id.as_deref(),
+            );
+            let (watchdog_timeout, watchdog_reason) = scheduler::phase_watchdog(
+                task.phase_timeout,
+                run_remaining.saturating_sub(started.elapsed()),
+            );
+            info!(
+                target: "loopdeck::run_queue",
+                execution_id = %task.execution_id,
+                worktree = %task.worktree.display(),
+                watchdog_secs = watchdog_timeout.as_secs(),
+                watchdog_reason,
+                "run queue starting phase turn"
+            );
+            let result = match race_with_watchdog(watchdog_timeout, turn).await {
+                WatchdogOutcome::Completed(result) => result,
+                WatchdogOutcome::TimedOut => {
+                    let _ = terminate_session(state, &task.worktree);
+                    let error = AppError::RunPlan(format!(
+                        "{watchdog_reason} after {} seconds",
+                        watchdog_timeout.as_secs()
+                    ));
+                    mark_turn_terminal(root, &error);
+                    Err(error)
+                }
+            };
+            (result, token_budget)
+        }
+        Ok(BootstrapStop::Cancelled) => (
+            Err(AppError::RunPlan(
+                "run cancelled during worktree bootstrap".into(),
+            )),
+            TokenBudget::new(task.token_cap),
+        ),
+        Ok(BootstrapStop::TimedOut) => (
+            Err(AppError::RunPlan(format!(
+                "{bootstrap_reason} during worktree bootstrap after {} seconds",
+                bootstrap_timeout.as_secs()
+            ))),
+            TokenBudget::new(task.token_cap),
+        ),
+        Err(error) => (Err(error), TokenBudget::new(task.token_cap)),
+    };
+    let (result, token_budget) = outcome;
+    let mut tokens = token_budget.used();
+    let mut exceeded = false;
+    if let Ok(response) = &result {
+        let observed = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.input_tokens.saturating_add(usage.output_tokens))
+            .unwrap_or_default();
+        tokens = tokens.max(observed);
+        exceeded = token_budget.observe_total(observed);
+    }
+    PhaseTurnOutcome {
+        index: task.index,
+        execution_id: task.execution_id,
+        worktree: task.worktree,
+        branch: task.branch,
+        loc: task.loc,
+        elapsed: started.elapsed(),
+        tokens,
+        exceeded,
+        exceeded_message: token_budget.exceeded_message(),
+        result,
+    }
+}
+
+/// Build the single-phase prompt: the existing loop prompt for exactly one
+/// loop, plus this phase's handoff contract and the upstream artifacts the
+/// dependency gate guarantees exist.
+fn build_phase_prompt(
+    plan: &RunPlan,
+    index: usize,
+    loc: &epic::LoopLocation,
+    branch: &str,
+) -> String {
+    let phase = &plan.phases[index];
+    let phase_timeout = resolved_phase_timeout(plan);
+    let run_timeout = resolved_run_timeout(plan);
+    let mut prompt = build_combined_phase_prompt(
+        &[(
+            phase.execution_id.clone(),
+            loc.clone(),
+            phase.interview.clone(),
+        )],
+        plan.consent.draft_pr_authorized,
+        ResolvedBudgets {
+            phase_token_cap: resolved_phase_token_cap(plan),
+            phase_wall_clock_secs: phase_timeout.as_secs(),
+            run_wall_clock_secs: run_timeout.as_secs(),
+        },
+    );
+    prompt.push_str(&format!(
+        "\n\nThis phase runs in its own worktree on branch `{branch}`, cut from the repository's default branch. Do not merge or rebase onto another phase's branch."
+    ));
+    if let Some(topic) = phase.handoff_topic.as_deref() {
+        // Only phases opted into a handoff carry an artifact contract; the
+        // topic is fixed by the plan so a downstream consumer's reference
+        // never changes.
+        prompt.push_str(&format!(
+            "\n\nThis phase must write its required contract artifact to `.loopdeck/handoff-artifacts/{topic}.md`. If the general instructions above name a different artifact topic, this configured topic wins. Use YAML frontmatter with `artifact: {topic}`, `author_role` set to the assigned role name or `planner`, `phase: {}`, `type: report`, `created` as today's date, and a one-line `summary`; then include `## Summary` and concise sections matching `docs/epics/role-based-orchestration/handoff-artifact-contract.md`. Do not choose or derive a different topic.",
+            phase.execution_id
+        ));
+    }
+    let upstream: Vec<(&str, &str)> = phase
+        .depends_on
+        .iter()
+        .filter_map(|dependency| {
+            plan.phases
+                .iter()
+                .find(|candidate| &candidate.execution_id == dependency)
+                .and_then(|upstream| upstream.handoff_topic.as_deref())
+                .map(|topic| (dependency.as_str(), topic))
+        })
+        .collect();
+    if !upstream.is_empty() {
+        prompt.push_str(
+            "\n\nUpstream handoff artifacts (already published by completed phases; read them from this worktree):\n",
+        );
+        for (dependency, topic) in upstream {
+            prompt.push_str(&format!(
+                "- phase `{dependency}` → `.loopdeck/handoffs/{topic}.md`\n"
+            ));
+        }
+        prompt.push_str(
+            "Depend only on these artifacts — never on another phase's branch code. In your own artifact, cite every section and item you used in a `## Handoff citations` block per the contract.",
+        );
+    }
+    prompt
+}
+
+/// Promote a phase into `execution.yaml`'s `current` pointer, but only when
+/// no sibling owns it. `run-plan.yaml` is the authoritative per-phase record;
+/// `current` is a UI-focus pointer and must never make two parallel turns
+/// fight over one slot.
+fn begin_phase_execution(
+    root: &Path,
+    execution_id: &str,
+    loc: &epic::LoopLocation,
+) -> Result<(), AppError> {
+    let loaded = execution::load(root)?;
+    if let Some(current) = loaded.state.current.as_ref() {
+        if current.id != execution_id {
+            return Ok(());
+        }
+        // Resume of the phase that already owns the pointer: nothing to do.
+        return Ok(());
+    }
+    let promoted = loaded.state.promote_loop_into_current(
+        execution_id,
+        &loc.title,
+        LoopOrigin {
+            epic: loc.epic.clone(),
+            prd: loc.prd.clone(),
+            phase: loc.phase.clone(),
+        },
+        Utc::now(),
+    )?;
+    execution::save(root, &promoted, loaded.state.revision)?;
+    Ok(())
+}
+
+/// Terminal bookkeeping for a non-green phase. Only touches `current` when
+/// this phase owns it; a parallel sibling's focus pointer is left alone.
+fn end_phase_execution(root: &Path, execution_id: &str, reason: String) -> Result<(), AppError> {
+    let loaded = execution::load(root)?;
+    let owns_current = loaded
+        .state
+        .current
+        .as_ref()
+        .map(|current| current.id == execution_id)
+        .unwrap_or(false);
+    if !owns_current {
+        return Ok(());
+    }
+    let abandoned = loaded.state.abandon_current(reason, Utc::now(), false)?;
+    execution::save(root, &abandoned, loaded.state.revision)?;
+    Ok(())
+}
+
+/// Green-phase bookkeeping: relink or complete the current loop and attach
+/// the delivery evidence, but only when this phase owns `current`.
+#[allow(clippy::too_many_arguments)]
+fn complete_phase_execution(
+    root: &Path,
+    execution_id: &str,
+    final_id: &str,
+    replacement: Option<&epic::LoopLocation>,
+    branch: &str,
+    worktree: &Path,
+    url: &str,
+    rubric: Option<delivery::RubricResult>,
+) -> Result<(), AppError> {
+    let loaded = execution::load(root)?;
+    let owns_current = loaded
+        .state
+        .current
+        .as_ref()
+        .map(|current| current.id == execution_id)
+        .unwrap_or(false);
+    if !owns_current {
+        return Ok(());
+    }
+    let revision = loaded.state.revision;
+    let mut state = loaded.state;
+    if let Some(current) = state.current.as_mut() {
+        current.id = final_id.to_string();
+        if let Some(location) = replacement {
+            current.title = location.title.clone();
+            current.origin = LoopOrigin {
+                epic: location.epic.clone(),
+                prd: location.prd.clone(),
+                phase: location.phase.clone(),
+            };
+        }
+        current.delivery = Some(delivery::DeliveryLinks {
+            branch: Some(branch.to_string()),
+            commit: git::head_commit(worktree),
+            pr_url: Some(url.to_string()),
+            pr_provider: url.contains("github.com").then(|| "github".to_string()),
+            rubric,
+        });
+    }
+    let completed = state.complete_current(Utc::now(), None, false)?;
+    execution::save(root, &completed, revision)?;
+    Ok(())
+}
+
+/// Park one phase with a reason, fail its not-yet-started dependents, and
+/// persist. Independent in-flight phases keep running (approved gated-start
+/// answer).
+fn park_phase(
+    root: &Path,
+    plan: &mut RunPlan,
+    index: usize,
+    reason: String,
+) -> Result<(), AppError> {
+    let execution_id = plan.phases[index].execution_id.clone();
+    plan.phases[index].status = RunPhaseStatus::Parked;
+    plan.phases[index].park_payload = Some(reason.clone());
+    plan.environment.worktree_kept = true;
+    scheduler::fail_dependents(plan, &execution_id, &reason);
+    runplan::save(root, plan)?;
+    end_phase_execution(root, &execution_id, reason)?;
+    Ok(())
+}
+
+/// Apply one finished phase turn to the plan. Runs **only** in the scheduler
+/// loop, which serializes every durable write; phase tasks themselves never
+/// touch the plan.
+fn apply_phase_outcome(
+    app: &AppHandle,
+    state: &AppState,
+    root: &Path,
+    plan: &mut RunPlan,
+    run_started: Instant,
+    outcome: PhaseTurnOutcome,
+) -> Result<(), AppError> {
+    let index = outcome.index;
+    let execution_id = outcome.execution_id.clone();
+    plan.phases[index].wall_clock_secs = outcome.elapsed.as_secs();
+    plan.phases[index].token_usage = outcome.tokens;
+    plan.wall_clock_secs = run_started.elapsed().as_secs();
+
+    if outcome.exceeded {
+        // Per-phase budget kill: end only this phase, never the run.
+        let reason = outcome.exceeded_message.clone();
+        plan.phases[index].status = RunPhaseStatus::Killed;
+        plan.phases[index].park_payload = Some(reason.clone());
+        plan.environment.worktree_kept = true;
+        scheduler::fail_dependents(plan, &execution_id, &reason);
+        runplan::save(root, plan)?;
+        let _ = terminate_session(state, &outcome.worktree);
+        end_phase_execution(root, &execution_id, reason)?;
+        notify_run_terminal(
+            app,
+            root,
+            "Selasar phase killed",
+            "A phase exceeded its token budget — independent phases continue",
+        );
+        return Ok(());
+    }
+
+    match outcome.result {
+        Ok(response) => {
+            if !response.session_id.is_empty() {
+                plan.phases[index].session_id = Some(response.session_id.clone());
+            }
+            let verdict = extract_verdict(&response.result);
+            if verdict == Some(RunVerdict::Pass) {
+                let topic = plan.phases[index].handoff_topic.clone();
+                if let Err(error) =
+                    emit_phase_artifact(root, &outcome.worktree, &execution_id, topic.as_deref())
+                {
+                    return park_phase(
+                        root,
+                        plan,
+                        index,
+                        format!("handoff artifact emission failed: {error}"),
+                    );
+                }
+            }
+            if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
+                // Retained before any delivery decision so a recoverable
+                // record can carry the rubric evidence (retry-recovery).
+                let rubric = delivery::extract_rubric_result(&response.result, chrono::Utc::now());
+                // The PR link: the turn's own report first; then — the
+                // crash-retry path — an already-open PR for this phase branch.
+                let url = extract_draft_pr_url(&response.result)
+                    .or_else(|| git::open_pr_for_branch(&outcome.worktree, &outcome.branch));
+                let Some(url) = url else {
+                    let reason =
+                        "green verification passed, but no unattended draft PR URL was recorded";
+                    // Recoverable delivery record (Phase 4, `retry-recovery`):
+                    // how far delivery got in Git and why it stopped, so one
+                    // idempotent retry command can resume from that stage. No
+                    // automatic retry.
+                    if let Err(error) = delivery_retry::save(
+                        root,
+                        &delivery_retry::DeliveryRetryRecord {
+                            execution_ids: vec![execution_id.clone()],
+                            branch: outcome.branch.clone(),
+                            worktree: outcome.worktree.clone(),
+                            stage: delivery_retry::detect_stage(&outcome.worktree),
+                            reason: reason.to_string(),
+                            rubric: rubric.clone(),
+                            pr_title: outcome.loc.title.clone(),
+                            recorded_at: chrono::Utc::now(),
+                        },
+                    ) {
+                        warn!("could not persist the recoverable delivery record: {error}");
+                    }
+                    return park_phase(root, plan, index, reason.to_string());
+                };
+
+                // Delivery gates, evaluated fresh from this turn's own
+                // verifier report — never a stale persisted verdict.
+                // Idempotent finish is exempt: when the checklist item is
+                // already checked and an open PR claims the branch, this is a
+                // retry completing bookkeeping, not a new delivery.
+                let already_delivered = epic::loop_checked(root, &execution_id) == Some(true);
+                if !already_delivered {
+                    let branch_matches = git::current_branch(&outcome.worktree)
+                        .map(|live| live == outcome.branch)
+                        .unwrap_or(false);
+                    let checked = epic::loop_checked(root, &execution_id);
+                    let blocks = delivery::evaluate_delivery_gates(
+                        checked.map(|checked| !checked),
+                        branch_matches,
+                        checked.is_some(),
+                        rubric.as_ref(),
+                    );
+                    if !blocks.is_empty() {
+                        let reason = format!(
+                            "delivery gate blocked: {}",
+                            blocks
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        );
+                        return park_phase(root, plan, index, reason);
+                    }
+                }
+
+                let replacement_id = if epic::find_loop_by_id(root, &execution_id).is_some() {
+                    None
+                } else {
+                    epic::find_replacement_loop_id(root, &outcome.loc)
+                };
+                let final_id = replacement_id
+                    .clone()
+                    .unwrap_or_else(|| execution_id.clone());
+                let replacement_loc = replacement_id
+                    .as_deref()
+                    .and_then(|id| epic::find_loop_by_id(root, id));
+                let final_status = if epic::find_loop_by_id(root, &final_id).is_some() {
+                    RunPhaseStatus::Completed
+                } else {
+                    RunPhaseStatus::Delivered
+                };
+                plan.phases[index].execution_id = final_id.clone();
+                plan.phases[index].status = final_status;
+                plan.phases[index].park_payload = Some(
+                    if final_status == RunPhaseStatus::Completed {
+                        format!("draft PR: {url}")
+                    } else {
+                        format!(
+                        "draft PR: {url}\ndelivered — PRD link needs repair before this can appear in progress"
+                    )
+                    },
+                );
+                if replacement_id.is_some() {
+                    // Keep downstream edges pointing at the surviving id.
+                    for phase in &mut plan.phases {
+                        for dependency in &mut phase.depends_on {
+                            if dependency == &execution_id {
+                                *dependency = final_id.clone();
+                            }
+                        }
+                    }
+                }
+                // The PR URL is the delivery boundary: only now may the
+                // checklist declare the loop done. Idempotent.
+                epic::complete_prd_loop(
+                    root,
+                    &outcome.loc.epic,
+                    &outcome.loc.prd,
+                    &outcome.loc.title,
+                )?;
+                runplan::save(root, plan)?;
+                complete_phase_execution(
+                    root,
+                    &execution_id,
+                    &final_id,
+                    replacement_loc.as_ref(),
+                    &outcome.branch,
+                    &outcome.worktree,
+                    &url,
+                    rubric,
+                )?;
+                // Clean handoff: this branch, PR, and worktree stay for
+                // review; the next phase/run starts from the default branch.
+                record_handoff(root, &outcome.branch, &outcome.worktree, &url);
+                return Ok(());
+            }
+
+            let reason = match verdict {
+                Some(RunVerdict::Pass) => "green verification passed, but queue-time consent for an unattended draft PR is required".to_string(),
+                Some(RunVerdict::Warn) => "verify verdict: WARN".to_string(),
+                Some(RunVerdict::Block) => "verify verdict: BLOCK".to_string(),
+                _ => "no verify verdict found in the turn's final response".to_string(),
+            };
+            park_phase(root, plan, index, reason)
+        }
+        Err(AppError::TurnParked {
+            detail,
+            parked_questions_json,
+        }) => {
+            // Store the structured question payload when available, so the
+            // morning report can reconstruct AskUserQuestionCard components.
+            let payload = match parked_questions_json {
+                Some(ref json) => format!("__QUESTIONS__{json}__END__ {detail}"),
+                None => detail,
+            };
+            park_phase(root, plan, index, payload)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let killed_by_budget = message.contains("wall-clock budget exceeded")
+                || message.contains("token budget exceeded");
+            let status = if killed_by_budget {
+                RunPhaseStatus::Killed
+            } else {
+                RunPhaseStatus::Failed
+            };
+            plan.phases[index].status = status;
+            plan.phases[index].park_payload = Some(message.clone());
+            plan.environment.worktree_kept = true;
+            // A non-green phase fails its dependents; independent in-flight
+            // phases continue (approved gated-start answer).
+            scheduler::fail_dependents(plan, &execution_id, &message);
+            runplan::save(root, plan)?;
+            if message.contains("token budget exceeded") {
+                let _ = terminate_session(state, &outcome.worktree);
+            }
+            end_phase_execution(root, &execution_id, message.clone())?;
+            if killed_by_budget {
+                notify_run_terminal(
+                    app,
+                    root,
+                    "Selasar phase killed",
+                    "A phase hit its budget — independent phases continue",
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Mark every unfinished phase terminal with one reason. Used by the run-level
+/// cancel and total-wall-clock paths, which stop the whole run by design.
+fn stop_unfinished_phases(plan: &mut RunPlan, reason: &str) {
+    for phase in &mut plan.phases {
+        if scheduler::is_active(phase.status) {
+            phase.status = RunPhaseStatus::Killed;
+            phase.park_payload = Some(reason.to_string());
+        }
+    }
+}
+
+/// The run executor. One turn per run-plan phase, with phases whose
+/// `depends_on` edges are satisfied running concurrently in separate
+/// worktrees up to `RunPlan::max_concurrency`.
 async fn execute_run(
     app: &AppHandle,
     state: &AppState,
@@ -1744,51 +2226,53 @@ async fn execute_run(
     };
     let _keep_awake = KeepAwake::acquire();
     let run_started = Instant::now();
-    let worktree = ensure_worktree(root, &mut plan)?;
+    ignore_managed_runs_dir(root);
+    // A cycle would leave every member Waiting forever; reject before any
+    // worktree or provider process exists.
+    scheduler::validate_dependency_graph(&plan.phases)?;
+    // Legacy plans start all-Queued; compute the initial gate now. Then
+    // release any phase whose upstream already completed in a prior attempt.
+    scheduler::mark_waiting(&mut plan);
+    scheduler::reconcile_gates(&mut plan);
     runplan::save(root, &plan)?;
-    let bootstrap_timeout = resolved_run_timeout(&plan).saturating_sub(run_started.elapsed());
-    match bootstrap_worktree(&worktree, bootstrap_timeout, cancel).await {
-        Ok(BootstrapStop::Completed) => {}
-        Ok(BootstrapStop::Cancelled) | Ok(BootstrapStop::TimedOut) => {
-            let reason = if cancel.load(Ordering::SeqCst) {
-                "run cancelled during worktree bootstrap"
-            } else {
-                "total run wall-clock budget exceeded during worktree bootstrap"
-            };
-            if let Some(phase) = plan
-                .phases
-                .iter_mut()
-                .find(|phase| phase.status == RunPhaseStatus::Queued)
-            {
-                phase.status = RunPhaseStatus::Killed;
-                phase.park_payload = Some(reason.into());
+
+    let mut tasks: tokio::task::JoinSet<PhaseTurnOutcome> = tokio::task::JoinSet::new();
+    let mut running: HashMap<usize, PathBuf> = HashMap::new();
+
+    loop {
+        plan.wall_clock_secs = run_started.elapsed().as_secs();
+
+        if cancel.load(Ordering::SeqCst) {
+            for worktree in running.values() {
+                let _ = terminate_session(state, worktree);
+                let _ = fire_interrupt(state, worktree);
             }
-            plan.wall_clock_secs = run_started.elapsed().as_secs();
+            stop_unfinished_phases(&mut plan, "run cancelled");
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            // Aborting a task after it inserted its session leaves the child
+            // in the cache map; evict again so no orphan process survives.
+            for worktree in running.values() {
+                let _ = terminate_session(state, worktree);
+            }
+            notify_run_terminal(app, root, "Selasar run killed", "Run was cancelled");
             return Ok(());
         }
-        Err(error) => {
-            if let Some(phase) = plan
-                .phases
-                .iter_mut()
-                .find(|phase| phase.status == RunPhaseStatus::Queued)
-            {
-                phase.status = RunPhaseStatus::Failed;
-                phase.park_payload = Some(error.to_string());
-            }
-            plan.environment.worktree_kept = true;
-            runplan::save(root, &plan)?;
-            return Err(error);
-        }
-    }
 
-    while let Some(batch) = next_queued_batch(&plan) {
-        plan.wall_clock_secs = run_started.elapsed().as_secs();
         if run_started.elapsed() >= resolved_run_timeout(&plan) {
-            kill_batch(&mut plan, &batch, "total run wall-clock budget exceeded");
+            for worktree in running.values() {
+                let _ = terminate_session(state, worktree);
+            }
+            stop_unfinished_phases(&mut plan, "total run wall-clock budget exceeded");
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            for worktree in running.values() {
+                let _ = terminate_session(state, worktree);
+            }
             notify_run_terminal(
                 app,
                 root,
@@ -1797,560 +2281,126 @@ async fn execute_run(
             );
             return Ok(());
         }
-        if cancel.load(Ordering::SeqCst) {
-            kill_batch(&mut plan, &batch, "run cancelled");
-            plan.environment.worktree_kept = true;
+
+        // Open the gate for any phase whose upstreams all landed green, and
+        // fail dependents of upstreams that did not.
+        let (released, failed) = scheduler::reconcile_gates(&mut plan);
+        if released + failed > 0 {
             runplan::save(root, &plan)?;
-            notify_run_terminal(app, root, "Selasar run killed", "Run was cancelled");
-            return Ok(());
         }
 
-        let mut locs: Vec<(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)> =
-            Vec::with_capacity(batch.len());
-        for &idx in &batch {
-            let execution_id = plan.phases[idx].execution_id.clone();
-            match epic::find_loop_by_id(root, &execution_id) {
-                Some(loc) => locs.push((execution_id, loc, plan.phases[idx].interview.clone())),
-                None => {
-                    plan.phases[idx].status = RunPhaseStatus::Failed;
-                    plan.environment.worktree_kept = true;
-                    runplan::save(root, &plan)?;
-                    return Err(AppError::RunPlan(format!(
-                        "queued phase \"{execution_id}\" no longer exists in docs/epics/"
-                    )));
-                }
-            }
-        }
-
-        // Per-phase staffing (`prd-role-foundations` Phase 4): resolve the
-        // batch's shared roster entry — `next_queued_batch` guarantees every
-        // phase in the batch carries the same `assigned_agent_id`. A missing
-        // roster entry is a config error the user can repair, so the batch
-        // parks (recoverable via requeue) rather than failing the run;
-        // dependents park per the stall policy, independent phases continue.
-        let assigned_agent_id = plan.phases[batch[0]].assigned_agent_id.clone();
-        let agent_config = match assigned_agent_id.as_deref() {
-            Some(agent_id) => match resolve_agent_config_by_id(state, agent_id) {
-                Ok(config) => config,
-                Err(error) => {
-                    let reason =
-                        format!("assigned agent \"{agent_id}\" is not on the roster: {error}");
-                    park_missing_agent(&mut plan, &batch, agent_id);
-                    plan.environment.worktree_kept = true;
-                    runplan::save(root, &plan)?;
-                    notify_run_terminal(
-                        app,
-                        root,
-                        "Selasar run parked",
-                        &format!("Phase parked: {reason}"),
-                    );
-                    continue;
-                }
-            },
-            None => resolve_agent_config(state)?,
-        };
-
-        // Mark running in both the plan and execution.yaml before spawning
-        // the turn, so a crash mid-turn leaves truthful on-disk state
-        // (reconciled to Interrupted/back-to-current by the next read) rather
-        // than a phase that silently never started.
-        for &idx in &batch {
-            plan.phases[idx].status = RunPhaseStatus::Running;
-        }
-        runplan::save(root, &plan)?;
-
-        // `execution.yaml` only tracks a single `current` loop — the first
-        // phase in the batch stands in as that UI-focus pointer while the
-        // combined turn covers all of them; `run-plan.yaml`'s per-phase
-        // `status` (below) remains the accurate per-loop record.
-        let (lead_execution_id, lead_loc, _) = &locs[0];
-        let loaded = execution::load(root)?;
-        let promoted = loaded.state.promote_loop_into_current(
-            lead_execution_id,
-            &lead_loc.title,
-            LoopOrigin {
-                epic: lead_loc.epic.clone(),
-                prd: lead_loc.prd.clone(),
-                phase: lead_loc.phase.clone(),
-            },
-            chrono::Utc::now(),
-        )?;
-        execution::save(root, &promoted, loaded.state.revision)?;
-
-        let batch_len = batch.len() as u64;
-        let phase_token_cap = resolved_phase_token_cap(&plan).saturating_mul(batch_len);
-        let phase_timeout = resolved_phase_timeout(&plan) * batch.len() as u32;
-        let run_timeout = resolved_run_timeout(&plan);
-        let mut prompt = build_combined_phase_prompt(
-            &locs,
-            plan.consent.draft_pr_authorized,
-            ResolvedBudgets {
-                phase_token_cap,
-                phase_wall_clock_secs: phase_timeout.as_secs(),
-                run_wall_clock_secs: run_timeout.as_secs(),
-            },
-        );
-        for (execution_id, _, _) in &locs {
-            let topic = plan
-                .phases
-                .iter()
-                .find(|phase| phase.execution_id == *execution_id)
-                .and_then(|phase| phase.handoff_topic.as_deref());
-            // Only phases opted into a handoff carry an artifact contract; the
-            // topic is fixed by the plan so a downstream consumer's reference
-            // never changes.
-            if let Some(topic) = topic {
-                prompt.push_str(&format!(
-                    "\n\nFor phase `{execution_id}`, write its required contract artifact to `.loopdeck/handoff-artifacts/{topic}.md`. Use YAML frontmatter with `artifact: {topic}`, `author_role` set to the assigned role name or `planner`, `phase: {execution_id}`, `type: report`, `created` as today's date, and a one-line `summary`; then include `## Summary` and concise sections matching `docs/epics/role-based-orchestration/handoff-artifact-contract.md`. Do not choose or derive a different topic."
-                ));
-            }
-        }
-        let event_app = app.clone();
-        let event_project_path = root.to_string_lossy().into_owned();
-        let event_execution_id = locs
-            .iter()
-            .map(|(id, _, _)| id.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        let channel_execution_id = event_execution_id.clone();
-        let run_project_path = event_project_path.clone();
-        let run_execution_id = channel_execution_id.clone();
-        let channel: Channel<ClaudeEvent> = Channel::new(move |event| {
-            let event = match event.deserialize::<serde_json::Value>() {
-                Ok(event) => event,
-                Err(error) => {
-                    warn!("failed to decode unattended run activity: {error}");
-                    return Ok(());
-                }
-            };
-            if let Err(error) = event_app.emit(
-                RUN_QUEUE_EVENT,
-                RunQueueEvent {
-                    project_path: event_project_path.clone(),
-                    execution_id: channel_execution_id.clone(),
-                    event,
-                },
-            ) {
-                warn!("failed to emit unattended run activity: {error}");
-            }
-            Ok(())
-        });
-        let run_events = Some(RunEventChannel::new(
-            plan.id.clone(),
-            normalized_run_channel(app.clone(), run_project_path, run_execution_id),
-        ));
-        let token_budget = TokenBudget::new(phase_token_cap);
-        let phase_started = Instant::now();
-        let run_remaining = run_timeout.saturating_sub(run_started.elapsed());
-        let (watchdog_timeout, watchdog_reason) = if run_remaining <= phase_timeout {
-            (run_remaining, "total run wall-clock budget exceeded")
-        } else {
-            (phase_timeout, "phase wall-clock budget exceeded")
-        };
-        let turn_title = if locs.len() == 1 {
-            lead_loc.title.clone()
-        } else {
-            format!("{} queued loops", locs.len())
-        };
-        // Profile-pinned turn (`prd-role-foundations` Phase 4): when the
-        // batch has an assigned agent, its resolved config — charter included
-        // — replaces the default-config spawn, so each phase group runs under
-        // its own role. `None` falls back to the default-agent resolution
-        // inside the wrapper, unchanged from Phase 2.
-        let turn = start_fresh_and_record_streaming_in_root_with_config(
-            state,
-            &worktree,
-            root,
-            &prompt,
-            Some(turn_title),
-            &channel,
-            Some(&token_budget),
-            run_events,
-            // The batch's staffing resolved above — the assigned roster
-            // entry's connection settings *and* charter, or the default
-            // agent config when the phase is unassigned.
-            Some(&agent_config),
-            None,
-            true,
-            false,
-        );
-        info!(
-            target: "loopdeck::run_queue",
-            run_id = %plan.id,
-            execution_ids = %event_execution_id,
-            worktree = %worktree.display(),
-            watchdog_secs = watchdog_timeout.as_secs(),
-            watchdog_reason,
-            "run queue starting Codex turn"
-        );
-        let outcome = match race_with_watchdog(watchdog_timeout, turn).await {
-            WatchdogOutcome::Completed(result) => result,
-            WatchdogOutcome::TimedOut => {
-                // `timeout` (inside `race_with_watchdog`) drops the turn future
-                // first, releasing its session lock. Removing the last cached
-                // Arc then invokes the harness Drop path: graceful EOF, bounded
-                // wait, and SIGKILL fallback.
-                warn!(
-                    target: "loopdeck::run_queue",
-                    run_id = %plan.id,
-                    execution_ids = %event_execution_id,
-                    elapsed_secs = phase_started.elapsed().as_secs(),
-                    watchdog_secs = watchdog_timeout.as_secs(),
-                    watchdog_reason,
-                    "run queue watchdog timed out Codex turn"
-                );
-                terminate_session(state, &worktree)?;
-                let error = AppError::RunPlan(format!(
-                    "{watchdog_reason} after {} seconds",
-                    watchdog_timeout.as_secs()
-                ));
-                mark_turn_terminal(root, &error);
-                Err(error)
-            }
-        };
-        let per_phase_secs = phase_started.elapsed().as_secs() / batch_len.max(1);
-        for &idx in &batch {
-            plan.phases[idx].wall_clock_secs = per_phase_secs;
-        }
-        plan.wall_clock_secs = run_started.elapsed().as_secs();
-        set_batch_token_usage(&mut plan, &batch, token_budget.used(), batch_len);
-
-        match outcome {
-            Ok(response) => {
-                let tokens = response
-                    .usage
-                    .as_ref()
-                    .map(|usage| usage.input_tokens.saturating_add(usage.output_tokens))
-                    .unwrap_or_default();
-                let exceeded = token_budget.observe_total(tokens);
-                set_batch_token_usage(&mut plan, &batch, token_budget.used(), batch_len);
-                if exceeded {
-                    kill_batch(&mut plan, &batch, &token_budget.exceeded_message());
-                    plan.environment.worktree_kept = true;
-                    runplan::save(root, &plan)?;
-                    let loaded = execution::load(root)?;
-                    let abandoned = loaded.state.abandon_current(
-                        "phase token budget exceeded",
-                        chrono::Utc::now(),
-                        false,
-                    )?;
-                    execution::save(root, &abandoned, loaded.state.revision)?;
-                    notify_run_terminal(
-                        app,
-                        root,
-                        "Selasar run killed",
-                        "Phase token budget exceeded",
-                    );
-                    return Ok(());
-                }
-                let verdict = extract_verdict(&response.result);
-                if verdict == Some(RunVerdict::Pass) {
-                    if let Err(error) = emit_phase_artifacts(root, &worktree, &plan, &locs) {
-                        let reason = format!("handoff artifact emission failed: {error}");
-                        park_batch(&mut plan, &batch, &reason);
-                        plan.environment.worktree_kept = true;
-                        for (execution_id, _, _) in &locs {
-                            park_blocked_dependents(&mut plan, execution_id);
-                        }
+        // Fill spare concurrency slots with ready phases.
+        let max = plan.max_concurrency.max(1) as usize;
+        let slots = max.saturating_sub(running.len());
+        if slots > 0 {
+            let in_flight: HashSet<String> = running
+                .keys()
+                .map(|&index| plan.phases[index].execution_id.clone())
+                .collect();
+            for index in scheduler::select_ready(&plan, &in_flight, slots) {
+                match prepare_phase(app, state, root, &mut plan, index, run_started) {
+                    Ok(task) => {
+                        let task_index = task.index;
+                        let worktree = task.worktree.clone();
+                        let app_handle = app.clone();
+                        let run_root = root.to_path_buf();
+                        let cancel_flag = Arc::clone(cancel);
+                        plan.phases[index].status = RunPhaseStatus::Running;
+                        plan.phases[index].park_payload = None;
                         runplan::save(root, &plan)?;
-                        let loaded = execution::load(root)?;
-                        let abandoned =
-                            loaded
-                                .state
-                                .abandon_current(reason, chrono::Utc::now(), false)?;
-                        execution::save(root, &abandoned, loaded.state.revision)?;
-                        continue;
-                    }
-                }
-                if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
-                    // Retained before any delivery decision so a recoverable
-                    // record can carry the rubric evidence (retry-recovery).
-                    let rubric =
-                        delivery::extract_rubric_result(&response.result, chrono::Utc::now());
-                    // The PR link: the turn's own report first; then — the
-                    // crash-retry path — an already-open PR for this run's
-                    // branch (PR creation succeeded on a previous attempt
-                    // before the bookkeeping ran).
-                    let url = extract_draft_pr_url(&response.result).or_else(|| {
-                        plan.environment
-                            .worktree_branch
-                            .as_deref()
-                            .and_then(|branch| git::open_pr_for_branch(&worktree, branch))
-                    });
-                    let Some(url) = url else {
-                        let reason = "green verification passed, but no unattended draft PR URL was recorded";
-                        // Recoverable delivery record (Phase 4,
-                        // `retry-recovery`): how far the delivery got in Git
-                        // and why it stopped, so one idempotent retry command
-                        // can resume from that stage. No automatic retry.
-                        if let Err(error) = delivery_retry::save(
-                            root,
-                            &delivery_retry::DeliveryRetryRecord {
-                                execution_ids: locs
-                                    .iter()
-                                    .map(|(execution_id, _, _)| execution_id.clone())
-                                    .collect(),
-                                branch: plan
-                                    .environment
-                                    .worktree_branch
-                                    .clone()
-                                    .unwrap_or_default(),
-                                worktree: worktree.clone(),
-                                stage: delivery_retry::detect_stage(&worktree),
-                                reason: reason.to_string(),
-                                rubric: rubric.clone(),
-                                pr_title: locs
-                                    .first()
-                                    .map(|(_, location, _)| location.title.clone())
-                                    .unwrap_or_default(),
-                                recorded_at: chrono::Utc::now(),
-                            },
-                        ) {
-                            warn!("could not persist the recoverable delivery record: {error}");
-                        }
-                        park_batch(&mut plan, &batch, reason);
-                        plan.environment.worktree_kept = true;
-                        for (execution_id, _, _) in &locs {
-                            park_blocked_dependents(&mut plan, execution_id);
-                        }
-                        runplan::save(root, &plan)?;
-                        let loaded = execution::load(root)?;
-                        let abandoned =
-                            loaded
-                                .state
-                                .abandon_current(reason, chrono::Utc::now(), false)?;
-                        execution::save(root, &abandoned, loaded.state.revision)?;
-                        continue;
-                    };
-
-                    // Delivery gates (Phase 3), evaluated fresh from this
-                    // turn's own verifier report — never a stale persisted
-                    // verdict. Idempotent finish is exempt: when every
-                    // checklist item is already checked and an open PR claims
-                    // the branch, this is a retry completing bookkeeping a
-                    // previous attempt already delivered, not a new delivery.
-                    let already_delivered = locs.iter().all(|(execution_id, _, _)| {
-                        epic::loop_checked(root, execution_id) == Some(true)
-                    });
-                    if !already_delivered {
-                        let recorded_branch =
-                            plan.environment.worktree_branch.clone().unwrap_or_default();
-                        let branch_matches = git::current_branch(&worktree)
-                            .map(|live| live == recorded_branch)
-                            .unwrap_or(false);
-                        let lead_checked = epic::loop_checked(root, &locs[0].0);
-                        let blocks = delivery::evaluate_delivery_gates(
-                            lead_checked.map(|checked| !checked),
-                            branch_matches,
-                            lead_checked.is_some(),
-                            rubric.as_ref(),
-                        );
-                        if !blocks.is_empty() {
-                            let reason = format!(
-                                "delivery gate blocked: {}",
-                                blocks
-                                    .iter()
-                                    .map(std::string::ToString::to_string)
-                                    .collect::<Vec<_>>()
-                                    .join("; ")
-                            );
-                            park_batch(&mut plan, &batch, &reason);
-                            plan.environment.worktree_kept = true;
-                            for (execution_id, _, _) in &locs {
-                                park_blocked_dependents(&mut plan, execution_id);
-                            }
-                            runplan::save(root, &plan)?;
-                            let loaded = execution::load(root)?;
-                            let abandoned =
-                                loaded
-                                    .state
-                                    .abandon_current(reason, chrono::Utc::now(), false)?;
-                            execution::save(root, &abandoned, loaded.state.revision)?;
-                            continue;
-                        }
-                    }
-                    let mut automatic_relinks = Vec::new();
-                    for (&idx, (execution_id, original, _)) in batch.iter().zip(&locs) {
-                        let replacement = if epic::find_loop_by_id(root, execution_id).is_some() {
-                            None
-                        } else {
-                            epic::find_replacement_loop_id(root, original)
-                        };
-                        if let Some(replacement_id) = replacement {
-                            automatic_relinks.push((
-                                execution_id.clone(),
-                                replacement_id.clone(),
-                                original.clone(),
-                            ));
-                            plan.phases[idx].execution_id = replacement_id;
-                        }
-                        plan.phases[idx].status = if epic::find_loop_by_id(
-                            root,
-                            &plan.phases[idx].execution_id,
-                        )
-                        .is_some()
-                        {
-                            RunPhaseStatus::Completed
-                        } else {
-                            RunPhaseStatus::Delivered
-                        };
-                        plan.phases[idx].park_payload = Some(
-                            if plan.phases[idx].status == RunPhaseStatus::Completed {
-                                format!("draft PR: {url}")
-                            } else {
-                                format!("draft PR: {url}\ndelivered — PRD link needs repair before this can appear in progress")
-                            },
-                        );
-                    }
-                    // The PR URL is the delivery boundary: only now may the
-                    // checklist declare the loop done. Unlike the manual
-                    // toggle, this operation is idempotent and can never
-                    // reopen an already-checked item on a retry.
-                    for (_, location, _) in &locs {
-                        epic::complete_prd_loop(
-                            root,
-                            &location.epic,
-                            &location.prd,
-                            &location.title,
-                        )?;
-                    }
-                    for (old_id, new_id, _) in &automatic_relinks {
-                        for phase in &mut plan.phases {
-                            for dependency in &mut phase.depends_on {
-                                if dependency == old_id {
-                                    *dependency = new_id.clone();
-                                }
-                            }
-                        }
-                    }
-                    runplan::save(root, &plan)?;
-
-                    let loaded = execution::load(root)?;
-                    let revision = loaded.state.revision;
-                    let mut execution_state = loaded.state;
-                    if let Some(current) = execution_state.current.as_mut() {
-                        if let Some((_, replacement_id, location)) = automatic_relinks
-                            .iter()
-                            .find(|(old_id, _, _)| *old_id == current.id)
-                        {
-                            current.id = replacement_id.clone();
-                            current.title = location.title.clone();
-                            current.origin = LoopOrigin {
-                                epic: location.epic.clone(),
-                                prd: location.prd.clone(),
-                                phase: location.phase.clone(),
-                            };
-                        }
-                        // The terminal delivery record (Phase 3, loop
-                        // `complete-after-pr`): branch, commit, PR, and the
-                        // rubric result that gated it — persisted only now
-                        // that PR creation has actually succeeded.
-                        // `complete_current` carries it into the history
-                        // entry; the checklist (already updated above)
-                        // remains the only completion authority.
-                        current.delivery = Some(delivery::DeliveryLinks {
-                            branch: plan.environment.worktree_branch.clone(),
-                            commit: git::head_commit(&worktree),
-                            pr_url: Some(url.clone()),
-                            pr_provider: url.contains("github.com").then(|| "github".to_string()),
-                            rubric: rubric.clone(),
+                        running.insert(task_index, worktree);
+                        tasks.spawn(async move {
+                            let state = app_handle.state::<AppState>();
+                            run_phase_turn(&state, &run_root, &cancel_flag, task).await
                         });
                     }
-                    let completed =
-                        execution_state.complete_current(chrono::Utc::now(), None, false)?;
-                    execution::save(root, &completed, revision)?;
-                    // Clean handoff (Phase 4): the record that the next run
-                    // starts fresh from the default branch while this branch,
-                    // PR, and worktree stay retained for review.
-                    record_handoff(root, &plan, &worktree, &url);
-                } else {
-                    let reason = match verdict {
-                        Some(RunVerdict::Pass) => "green verification passed, but queue-time consent for an unattended draft PR is required".to_string(),
-                        Some(RunVerdict::Warn) => "verify verdict: WARN".to_string(),
-                        Some(RunVerdict::Block) => "verify verdict: BLOCK".to_string(),
-                        _ => "no verify verdict found in the turn's final response".to_string(),
-                    };
-                    park_batch(&mut plan, &batch, &reason);
-                    plan.environment.worktree_kept = true;
-                    for (execution_id, _, _) in &locs {
-                        park_blocked_dependents(&mut plan, execution_id);
+                    Err(error) => {
+                        // Preparation failure is local to this phase. A missing
+                        // roster entry parks (recoverable via requeue); any
+                        // other preparation error fails the phase. Either way
+                        // its dependents fail and independent phases continue.
+                        let (status, reason) = match error {
+                            PhasePrepareError::Parked(reason) => (RunPhaseStatus::Parked, reason),
+                            PhasePrepareError::Failed(reason) => (
+                                RunPhaseStatus::Failed,
+                                format!("phase preparation failed: {reason}"),
+                            ),
+                        };
+                        let execution_id = plan.phases[index].execution_id.clone();
+                        plan.phases[index].status = status;
+                        plan.phases[index].park_payload = Some(reason.clone());
+                        plan.environment.worktree_kept = true;
+                        scheduler::fail_dependents(&mut plan, &execution_id, &reason);
+                        runplan::save(root, &plan)?;
                     }
-                    runplan::save(root, &plan)?;
-
-                    let loaded = execution::load(root)?;
-                    let abandoned =
-                        loaded
-                            .state
-                            .abandon_current(reason, chrono::Utc::now(), false)?;
-                    execution::save(root, &abandoned, loaded.state.revision)?;
-                    continue;
                 }
             }
-            Err(AppError::TurnParked {
-                detail,
-                parked_questions_json,
-            }) => {
-                // Store the structured question payload when available, so the
-                // morning report can reconstruct AskUserQuestionCard components.
-                let payload = match parked_questions_json {
-                    Some(ref json) => format!("__QUESTIONS__{json}__END__ {detail}"),
-                    None => detail.clone(),
-                };
-                park_batch(&mut plan, &batch, &payload);
-                plan.environment.worktree_kept = true;
-                for (execution_id, _, _) in &locs {
-                    park_blocked_dependents(&mut plan, execution_id);
-                }
-                runplan::save(root, &plan)?;
+        }
 
-                let loaded = execution::load(root)?;
-                let abandoned = loaded.state.abandon_current(
-                    format!("phase parked: {detail}"),
-                    chrono::Utc::now(),
-                    false,
-                )?;
-                execution::save(root, &abandoned, loaded.state.revision)?;
-                // No early return: under `ContinueIndependent` the loop
-                // naturally advances to try the next still-`Queued` phase;
-                // under `Halt`, `phases_blocked_by_park` already parked every
-                // remaining phase, so the top-of-iteration status check skips
-                // them and the run ends here regardless.
+        if running.is_empty() {
+            if !scheduler::has_active_phases(&plan) {
+                break;
             }
-            Err(e) => {
-                let killed_by_budget = e.to_string().contains("wall-clock budget exceeded")
-                    || e.to_string().contains("token budget exceeded");
-                let status = if killed_by_budget {
-                    RunPhaseStatus::Killed
-                } else {
-                    RunPhaseStatus::Failed
-                };
-                for &idx in &batch {
-                    plan.phases[idx].status = status;
-                    plan.phases[idx].park_payload = Some(e.to_string());
+            // Active phases but nothing runnable and nothing in flight: the
+            // gate can never open (for example every upstream was parked
+            // before the gate ran). Fail them instead of spinning.
+            let stalled: Vec<String> = plan
+                .phases
+                .iter()
+                .filter(|phase| scheduler::is_active(phase.status))
+                .map(|phase| phase.execution_id.clone())
+                .collect();
+            for phase in &mut plan.phases {
+                if scheduler::is_active(phase.status) {
+                    phase.status = RunPhaseStatus::Failed;
+                    phase.park_payload = Some(format!(
+                        "scheduler stalled: no runnable phase (dependency gate blocked: {})",
+                        stalled.join(", ")
+                    ));
                 }
-                plan.environment.worktree_kept = true;
-                runplan::save(root, &plan)?;
-
-                if e.to_string().contains("token budget exceeded") {
-                    terminate_session(state, &worktree)?;
-                }
-
-                let loaded = execution::load(root)?;
-                let abandoned =
-                    loaded
-                        .state
-                        .abandon_current(e.to_string(), chrono::Utc::now(), false)?;
-                execution::save(root, &abandoned, loaded.state.revision)?;
-                if killed_by_budget {
-                    notify_run_terminal(
-                        app,
-                        root,
-                        "Selasar run killed",
-                        "Phase wall-clock budget exceeded",
-                    );
-                }
-                return if killed_by_budget { Ok(()) } else { Err(e) };
             }
+            plan.environment.worktree_kept = true;
+            runplan::save(root, &plan)?;
+            break;
+        }
+
+        // Wait for one phase to finish, but wake periodically so cancel and
+        // the total-run cap stay responsive while long turns run.
+        tokio::select! {
+            joined = tasks.join_next() => {
+                match joined {
+                    Some(Ok(outcome)) => {
+                        running.remove(&outcome.index);
+                        if let Err(error) =
+                            apply_phase_outcome(app, state, root, &mut plan, run_started, outcome)
+                        {
+                            // Bookkeeping failure is fatal for the run, but
+                            // sibling turns must not be left orphaned.
+                            for worktree in running.values() {
+                                let _ = terminate_session(state, worktree);
+                            }
+                            tasks.abort_all();
+                            while tasks.join_next().await.is_some() {}
+                            return Err(error);
+                        }
+                    }
+                    Some(Err(join_error)) => {
+                        // A panicked turn task is unrecoverable for the phases
+                        // it owned; their statuses cannot be trusted.
+                        let reason = format!("phase task failed unexpectedly: {join_error}");
+                        for (index, _) in running.drain() {
+                            plan.phases[index].status = RunPhaseStatus::Failed;
+                            plan.phases[index].park_payload = Some(reason.clone());
+                            let execution_id = plan.phases[index].execution_id.clone();
+                            scheduler::fail_dependents(&mut plan, &execution_id, &reason);
+                        }
+                        plan.environment.worktree_kept = true;
+                        runplan::save(root, &plan)?;
+                    }
+                    None => {}
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
     }
 
@@ -2367,7 +2417,7 @@ async fn execute_run(
     let any_parked = plan
         .phases
         .iter()
-        .any(|p| p.status == RunPhaseStatus::Parked);
+        .any(|p| matches!(p.status, RunPhaseStatus::Parked | RunPhaseStatus::Waiting));
 
     if all_completed {
         notify_run_terminal(
@@ -2388,15 +2438,110 @@ async fn execute_run(
     Ok(())
 }
 
-/// Cleanup policy for the run's isolated worktree, applied once every phase
-/// has been attempted. `prd-unattended-ship.md` said "prune on success";
-/// `prd-verified-delivery-reconciliation` Phase 4 (`clean-handoff`)
-/// supersedes that for delivered runs: a fully-delivered worktree is
-/// **retained** under `.loopdeck/runs/` with its branch + unmerged PR for
-/// review, and the *next* run gets a fresh worktree cut from the default
-/// branch instead. Non-delivered endings (parked/failed/killed) keep + flag,
-/// exactly as before. Split out of `execute_run` so the decision is testable
-/// against a real worktree without needing a live `claude_session` turn.
+/// Why a phase could not be prepared. A missing roster entry is recoverable
+/// (park, user fixes the roster and retries); every other preparation error
+/// is a hard failure for that phase only.
+enum PhasePrepareError {
+    Failed(String),
+    Parked(String),
+}
+
+/// Prepare one ready phase: create or recover its worktree, resolve staffing,
+/// seed upstream artifacts, build the single-phase prompt, and promote it in
+/// `execution.yaml` when the focus pointer is free. Returns the task to spawn.
+/// Persists the phase's worktree identity before the turn starts, so a crash
+/// leaves truthful on-disk state.
+fn prepare_phase(
+    app: &AppHandle,
+    state: &AppState,
+    root: &Path,
+    plan: &mut RunPlan,
+    index: usize,
+    run_started: Instant,
+) -> Result<PhaseTask, PhasePrepareError> {
+    let execution_id = plan.phases[index].execution_id.clone();
+    let Some(loc) = epic::find_loop_by_id(root, &execution_id) else {
+        return Err(PhasePrepareError::Failed(format!(
+            "queued phase \"{execution_id}\" no longer exists in docs/epics/"
+        )));
+    };
+
+    let agent_config = match plan.phases[index].assigned_agent_id.as_deref() {
+        Some(agent_id) => resolve_agent_config_by_id(state, agent_id).map_err(|error| {
+            PhasePrepareError::Parked(format!(
+                "assigned agent \"{agent_id}\" is not on the roster: {error}"
+            ))
+        })?,
+        None => resolve_agent_config(state)
+            .map_err(|error| PhasePrepareError::Failed(error.to_string()))?,
+    };
+
+    let (worktree, branch, _created) = ensure_phase_worktree(root, plan, index)
+        .map_err(|error| PhasePrepareError::Failed(error.to_string()))?;
+    plan.phases[index].worktree_path = Some(worktree.clone());
+    plan.phases[index].worktree_branch = Some(branch.clone());
+    if let Err(error) = handoff::seed_worktree_store(root, &worktree) {
+        warn!(
+            "could not seed upstream handoff artifacts into {}: {error}",
+            worktree.display()
+        );
+    }
+    let prompt = build_phase_prompt(plan, index, &loc, &branch);
+    let resume_session_id = plan.phases[index].resume_session_id.clone();
+    plan.phases[index].resume_session_id = None;
+    begin_phase_execution(root, &execution_id, &loc)
+        .map_err(|error| PhasePrepareError::Failed(error.to_string()))?;
+
+    let event_app = app.clone();
+    let event_project_path = root.to_string_lossy().into_owned();
+    let channel_execution_id = execution_id.clone();
+    let channel: Channel<ClaudeEvent> = Channel::new(move |event| {
+        let event = match event.deserialize::<serde_json::Value>() {
+            Ok(event) => event,
+            Err(error) => {
+                warn!("failed to decode unattended run activity: {error}");
+                return Ok(());
+            }
+        };
+        if let Err(error) = event_app.emit(
+            RUN_QUEUE_EVENT,
+            RunQueueEvent {
+                project_path: event_project_path.clone(),
+                execution_id: channel_execution_id.clone(),
+                event,
+            },
+        ) {
+            warn!("failed to emit unattended run activity: {error}");
+        }
+        Ok(())
+    });
+    let run_events = Some(RunEventChannel::new(
+        plan.id.clone(),
+        normalized_run_channel(
+            app.clone(),
+            root.to_string_lossy().into_owned(),
+            execution_id.clone(),
+        ),
+    ));
+
+    Ok(PhaseTask {
+        index,
+        execution_id,
+        worktree,
+        branch,
+        title: loc.title.clone(),
+        loc,
+        prompt,
+        agent_config,
+        channel,
+        run_events,
+        token_cap: resolved_phase_token_cap(plan),
+        phase_timeout: resolved_phase_timeout(plan),
+        run_timeout: resolved_run_timeout(plan).saturating_sub(run_started.elapsed()),
+        resume_session_id,
+    })
+}
+
 fn finalize_worktree(plan: &mut RunPlan) {
     plan.environment.worktree_kept = true;
 }
@@ -2645,150 +2790,6 @@ mod unattended_tests {
         assert_eq!(requeue_all_terminal_phases(&mut plan), 0);
     }
 
-    #[test]
-    fn next_queued_batch_collects_every_queued_index_in_order() {
-        let mut plan = parked_chain();
-        plan.phases[1].status = RunPhaseStatus::Completed;
-
-        let batch = next_queued_batch(&plan).expect("two phases are still queued");
-
-        assert_eq!(batch, vec![0, 2]);
-    }
-
-    #[test]
-    fn next_queued_batch_is_none_once_nothing_is_queued() {
-        let mut plan = parked_chain();
-        for phase in &mut plan.phases {
-            phase.status = RunPhaseStatus::Completed;
-        }
-
-        assert_eq!(next_queued_batch(&plan), None);
-    }
-
-    /// Per-phase staffing (`prd-role-foundations` Phase 4): a staffing change
-    /// splits the combined turn — dev-builds / QA-verifies queue as two
-    /// batches — while consecutive same-staffing (or all-unassigned) phases
-    /// keep sharing one turn.
-    #[test]
-    fn next_queued_batch_splits_on_staffing_change() {
-        let mut plan = parked_chain();
-        plan.phases[0].assigned_agent_id = Some("dev-uuid".into());
-        plan.phases[1].assigned_agent_id = Some("dev-uuid".into());
-        plan.phases[2].assigned_agent_id = Some("qa-uuid".into());
-
-        assert_eq!(next_queued_batch(&plan), Some(vec![0, 1]));
-        plan.phases[0].status = RunPhaseStatus::Completed;
-        plan.phases[1].status = RunPhaseStatus::Completed;
-        assert_eq!(next_queued_batch(&plan), Some(vec![2]));
-        plan.phases[2].status = RunPhaseStatus::Completed;
-        assert_eq!(next_queued_batch(&plan), None);
-
-        // Unassigned phases share the default agent's group and still batch
-        // together — the pre-assignment behaviour.
-        let plan = parked_chain();
-        assert_eq!(next_queued_batch(&plan), Some(vec![0, 1, 2]));
-    }
-
-    // ── Per-phase agent assignment (`prd-role-foundations` Phase 4) ──────
-
-    #[test]
-    fn next_queued_batch_takes_the_whole_queue_when_no_agent_is_assigned() {
-        let plan = parked_chain();
-
-        let batch = next_queued_batch(&plan).expect("all phases queued");
-
-        // No assignments — every phase shares `None`, so the combined turn
-        // still covers the whole queue (pre-Phase-4 behavior preserved).
-        assert_eq!(batch, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn next_queued_batch_takes_only_consecutive_same_agent_phases() {
-        let mut plan = parked_chain();
-        // dev, dev, qa → first batch is the two dev phases; qa stays queued.
-        plan.phases[0].assigned_agent_id = Some("dev-id".into());
-        plan.phases[1].assigned_agent_id = Some("dev-id".into());
-        plan.phases[2].assigned_agent_id = Some("qa-id".into());
-
-        let batch = next_queued_batch(&plan).expect("phases are queued");
-
-        assert_eq!(batch, vec![0, 1]);
-
-        plan.phases[0].status = RunPhaseStatus::Completed;
-        plan.phases[1].status = RunPhaseStatus::Completed;
-        let next = next_queued_batch(&plan).expect("qa phase still queued");
-        assert_eq!(next, vec![2]);
-    }
-
-    #[test]
-    fn next_queued_batch_splits_when_assignment_differs_from_default() {
-        let mut plan = parked_chain();
-        // default, dev, default → three groups of one.
-        plan.phases[1].assigned_agent_id = Some("dev-id".into());
-
-        let first = next_queued_batch(&plan).expect("phases are queued");
-        assert_eq!(first, vec![0]);
-
-        plan.phases[0].status = RunPhaseStatus::Completed;
-        let second = next_queued_batch(&plan).expect("dev phase queued");
-        assert_eq!(second, vec![1]);
-
-        plan.phases[1].status = RunPhaseStatus::Completed;
-        let third = next_queued_batch(&plan).expect("default phase queued");
-        assert_eq!(third, vec![2]);
-    }
-
-    #[test]
-    fn next_queued_batch_regroups_across_a_non_queued_phase() {
-        let mut plan = parked_chain();
-        // Queued set is phases 0 and 2 (1 completed), both dev → one batch,
-        // because grouping is over the eligible list, not raw plan indices.
-        plan.phases[0].assigned_agent_id = Some("dev-id".into());
-        plan.phases[1].status = RunPhaseStatus::Completed;
-        plan.phases[1].assigned_agent_id = None;
-        plan.phases[2].assigned_agent_id = Some("dev-id".into());
-
-        let batch = next_queued_batch(&plan).expect("two phases queued");
-
-        assert_eq!(batch, vec![0, 2]);
-    }
-
-    #[test]
-    fn park_missing_agent_names_the_agent_and_parks_only_policy_dependents() {
-        let mut plan = parked_chain();
-        // phase-b and phase-c depend on phase-a (authored chain); park its
-        // batch for a missing agent under ContinueIndependent.
-        park_missing_agent(&mut plan, &[0], "gone-agent-id");
-
-        assert_eq!(plan.phases[0].status, RunPhaseStatus::Parked);
-        assert!(
-            plan.phases[0]
-                .park_payload
-                .as_deref()
-                .unwrap()
-                .contains("gone-agent-id"),
-            "payload must name the missing agent"
-        );
-        // Dependents park as blocked; that's the authored chain here.
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
-        assert_eq!(plan.phases[2].status, RunPhaseStatus::Parked);
-    }
-
-    #[test]
-    fn park_missing_agent_leaves_independent_phases_queued_under_continue() {
-        let mut plan = parked_chain();
-        // Break the chain: phase-c no longer depends on anything, so only the
-        // batch itself parks and the independent phase stays eligible.
-        plan.phases[2].depends_on.clear();
-
-        park_missing_agent(&mut plan, &[0], "gone-agent-id");
-
-        assert_eq!(plan.phases[0].status, RunPhaseStatus::Parked);
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
-        assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
-        assert!(plan.phases[2].park_payload.is_none());
-    }
-
     // ── Handoff topics (`prd-agent-handoff` Phase 1) ─────────────────────
 
     fn topic(execution_id: &str, topic: &str) -> runplan::PhaseHandoffTopic {
@@ -2848,39 +2849,6 @@ mod unattended_tests {
     }
 
     #[test]
-    fn kill_batch_and_park_batch_apply_to_every_index_in_the_batch() {
-        let mut plan = parked_chain();
-
-        kill_batch(&mut plan, &[0, 2], "total run wall-clock budget exceeded");
-        assert_eq!(plan.phases[0].status, RunPhaseStatus::Killed);
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Queued);
-        assert_eq!(plan.phases[2].status, RunPhaseStatus::Killed);
-        assert_eq!(
-            plan.phases[0].park_payload.as_deref(),
-            Some("total run wall-clock budget exceeded")
-        );
-
-        park_batch(&mut plan, &[0, 1, 2], "verify verdict: WARN");
-        assert!(plan
-            .phases
-            .iter()
-            .all(|phase| phase.status == RunPhaseStatus::Parked));
-        assert!(plan
-            .phases
-            .iter()
-            .all(|phase| phase.park_payload.as_deref() == Some("verify verdict: WARN")));
-    }
-
-    #[test]
-    fn set_batch_token_usage_splits_the_total_evenly_across_the_batch() {
-        let mut plan = parked_chain();
-
-        set_batch_token_usage(&mut plan, &[0, 1, 2], 900, 3);
-
-        assert!(plan.phases.iter().all(|phase| phase.token_usage == 300));
-    }
-
-    #[test]
     fn budget_defaults_are_hard_and_named() {
         let plan = plan();
         assert_eq!(
@@ -2908,51 +2876,6 @@ mod unattended_tests {
         assert_eq!(resolved_phase_token_cap(&plan), 123);
         assert_eq!(resolved_phase_timeout(&plan), Duration::from_secs(45));
         assert_eq!(resolved_run_timeout(&plan), Duration::from_secs(67));
-    }
-
-    fn plan_with_id_and_phases(id: &str, execution_ids: &[String]) -> RunPlan {
-        run_executor::build_run_plan(
-            id.into(),
-            PathBuf::from("/repo"),
-            Utc::now(),
-            execution_ids,
-            StallPolicy::ContinueIndependent,
-            false,
-            &[],
-        )
-    }
-
-    #[test]
-    fn run_branch_name_uses_first_phase_slug() {
-        let plan = plan_with_id_and_phases(
-            "run-a3a5f38c-9369-464e-acb4-922a0bfc6c7e",
-            &["wake-up/notify-after-completed".into()],
-        );
-        assert_eq!(
-            run_branch_name(&plan),
-            "run/wake-up-notify-after-completed-922a0bfc6c7e"
-        );
-    }
-
-    #[test]
-    fn run_branch_name_notes_multi_phase_runs() {
-        let plan = plan_with_id_and_phases(
-            "run-a3a5f38c-9369-464e-acb4-922a0bfc6c7e",
-            &[
-                "wake-up/notify-after-completed".into(),
-                "wake-up/report-per-phase-verdict".into(),
-            ],
-        );
-        assert_eq!(
-            run_branch_name(&plan),
-            "run/wake-up-notify-after-completed-plus1-922a0bfc6c7e"
-        );
-    }
-
-    #[test]
-    fn run_branch_name_sanitizes_unsafe_characters() {
-        let plan = plan_with_id_and_phases("run a/b", &[]);
-        assert_eq!(run_branch_name(&plan), "run/run-a-b-run-a-b");
     }
 
     #[tokio::test]
@@ -3101,20 +3024,19 @@ mod unattended_tests {
         }
     }
 
-    /// Create: `ensure_worktree` on a plan with no recorded environment
-    /// creates a real linked worktree and persists its path/branch.
+    /// Create: `ensure_phase_worktree` on a fresh plan creates a real linked
+    /// worktree, cuts it from the default branch, and returns the identity the
+    /// caller persists on the phase.
     #[test]
-    fn ensure_worktree_creates_and_persists_environment() {
+    fn ensure_phase_worktree_creates_a_phase_scoped_worktree() {
         let dir = temp_git_repo("create");
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
 
-        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let (worktree, branch, created) =
+            ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
 
-        assert_eq!(
-            plan.environment.worktree_path.as_deref(),
-            Some(worktree.as_path())
-        );
-        assert!(plan.environment.worktree_branch.is_some());
+        assert!(created);
+        assert!(branch.starts_with("run/phase-1-p1-"), "{branch}");
         assert!(git::worktree_list(&dir).unwrap().contains(&worktree));
 
         git::worktree_remove(&dir, &worktree).ok();
@@ -3122,11 +3044,11 @@ mod unattended_tests {
     }
 
     /// Clean handoff (`prd-verified-delivery-reconciliation` Phase 4): a new
-    /// run branch is cut from the default branch, not from whatever the main
+    /// phase branch is cut from the default branch, not from whatever the main
     /// worktree has checked out. A fix committed to a stray branch must not
-    /// ride into the next run's base.
+    /// ride into the next phase's base.
     #[test]
-    fn ensure_worktree_bases_new_branch_on_default_branch_not_head() {
+    fn ensure_phase_worktree_bases_new_branch_on_default_branch_not_head() {
         let dir = temp_git_repo("base");
         let run_git = |args: &[&str]| {
             std::process::Command::new("git")
@@ -3145,8 +3067,8 @@ mod unattended_tests {
         run_git(&["commit", "-m", "stray fix"]);
         let stray_tip = String::from_utf8(run_git(&["rev-parse", "HEAD"]).stdout).unwrap();
 
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let (worktree, _, _) = ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
 
         let tip = String::from_utf8(
             std::process::Command::new("git")
@@ -3159,7 +3081,11 @@ mod unattended_tests {
                 .stdout,
         )
         .unwrap();
-        assert_eq!(tip.trim(), main_tip.trim(), "run branch must start at main");
+        assert_eq!(
+            tip.trim(),
+            main_tip.trim(),
+            "phase branch must start at main"
+        );
         assert_ne!(tip.trim(), stray_tip.trim());
         assert!(!worktree.join("stray.txt").exists());
 
@@ -3172,11 +3098,10 @@ mod unattended_tests {
     #[test]
     fn record_handoff_persists_a_loadable_handoff_record() {
         let dir = temp_git_repo("handoff");
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
-        let branch = plan.environment.worktree_branch.clone().unwrap();
+        let plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let (worktree, branch, _) = ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
 
-        record_handoff(&dir, &plan, &worktree, "https://github.com/o/r/pull/42");
+        record_handoff(&dir, &branch, &worktree, "https://github.com/o/r/pull/42");
 
         let record = handoff::load(&dir)
             .unwrap()
@@ -3196,17 +3121,24 @@ mod unattended_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Resume: calling `ensure_worktree` again on a plan whose recorded
-    /// worktree still exists is idempotent — no second worktree/branch.
+    /// Resume: calling `ensure_phase_worktree` again for a phase whose
+    /// recorded worktree still exists is idempotent — no second worktree or
+    /// branch.
     #[test]
-    fn ensure_worktree_resumes_an_existing_worktree_without_duplicating_it() {
+    fn ensure_phase_worktree_resumes_without_duplicating() {
         let dir = temp_git_repo("resume");
         let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        let first = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let (first, first_branch, _) =
+            ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
+        plan.phases[0].worktree_path = Some(first.clone());
+        plan.phases[0].worktree_branch = Some(first_branch.clone());
 
-        let second = ensure_worktree(&dir, &mut plan).expect("resume worktree");
+        let (second, second_branch, created) =
+            ensure_phase_worktree(&dir, &plan, 0).expect("resume worktree");
 
         assert_eq!(first, second);
+        assert_eq!(first_branch, second_branch);
+        assert!(!created);
         assert_eq!(
             git::worktree_list(&dir)
                 .unwrap()
@@ -3221,69 +3153,48 @@ mod unattended_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A restart whose recorded worktree was deleted out-of-band (e.g. by
-    /// hand, or a prior crash mid-remove) fails loudly rather than silently
-    /// creating a second branch for the same run.
-    #[test]
-    fn ensure_worktree_errors_when_recorded_worktree_is_missing() {
-        let dir = temp_git_repo("missing");
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        plan.environment.worktree_path = Some(dir.join("nonexistent-linked-worktree"));
-
-        let err = ensure_worktree(&dir, &mut plan).unwrap_err();
-        assert!(err.to_string().contains("missing"));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     /// Resume-from-branch (`prd-verified-delivery-reconciliation` Phase 2):
     /// a recorded worktree removed from Git's inventory while its branch
     /// survived is recreated at the same path from that branch — no second
     /// branch, no hard stop.
     #[test]
-    fn ensure_worktree_recreates_from_surviving_branch() {
+    fn ensure_phase_worktree_recreates_from_surviving_branch() {
         let dir = temp_git_repo("recreate");
         let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        let first = ensure_worktree(&dir, &mut plan).expect("create worktree");
-        let branch = plan.environment.worktree_branch.clone().unwrap();
+        let (first, branch, _) = ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
+        plan.phases[0].worktree_path = Some(first.clone());
+        plan.phases[0].worktree_branch = Some(branch.clone());
 
         git::worktree_remove(&dir, &first).expect("remove worktree, keep branch");
         assert!(!first.exists());
         assert!(git::branch_exists(&dir, &branch));
 
-        let second = ensure_worktree(&dir, &mut plan).expect("recreate from branch");
+        let (second, second_branch, created) =
+            ensure_phase_worktree(&dir, &plan, 0).expect("recreate from branch");
 
         assert_eq!(first, second, "recreated at the same recorded path");
+        assert_eq!(branch, second_branch);
+        assert!(created);
         assert!(second.exists());
-        assert_eq!(
-            git::worktree_list(&dir)
-                .unwrap()
-                .iter()
-                .filter(|p| **p == second)
-                .count(),
-            1
-        );
 
         git::worktree_remove(&dir, &second).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// New managed worktrees land under `.loopdeck/runs/` and the ignore rule
-    /// keeping them out of the main worktree's untracked view is appended
-    /// exactly once.
+    /// Every phase worktree lives under `.loopdeck/runs/`, and the ignore
+    /// rule keeping managed worktrees out of the main checkout's untracked
+    /// view is appended exactly once.
     #[test]
-    fn ensure_worktree_ignores_managed_runs_dir_once() {
+    fn ensure_phase_worktree_ignores_managed_runs_dir_once() {
         let dir = temp_git_repo("ignore");
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
 
-        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
-        let second = ensure_worktree(&dir, &mut plan).expect("resume");
+        let (worktree, _, _) = ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
 
         // Git canonicalizes the worktree path (`/var` → `/private/var` on
         // macOS); compare against the canonical repo dir.
         let canonical_dir = std::fs::canonicalize(&dir).unwrap();
         assert!(worktree.starts_with(canonical_dir.join(".loopdeck").join("runs")));
-        assert_eq!(worktree, second);
         let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert_eq!(
             gitignore
@@ -3298,51 +3209,75 @@ mod unattended_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Retain-on-delivery (`clean-handoff`, superseding the old prune-on-
-    /// success): every phase delivered → the worktree stays on disk under
-    /// `.loopdeck/runs/`, flagged kept, with its recorded path/branch intact
-    /// so the branch + PR stay reviewable.
+    /// Parallel scheduling: two phases get two disjoint worktrees on two
+    /// branches cut from the same default tip. This is the cleanup-race
+    /// guard: removing one phase's worktree must never touch its sibling.
     #[test]
-    fn finalize_worktree_retains_a_delivered_worktree_for_review() {
-        let dir = temp_git_repo("retain");
-        let mut plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
-        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+    fn phase_worktrees_are_disjoint_and_cleanup_is_isolated() {
+        let dir = temp_git_repo("parallel");
+        let plan = plan_with_phases(
+            &dir,
+            vec![completed_phase("phase-a"), completed_phase("phase-b")],
+        );
 
+        let (first, first_branch, _) = ensure_phase_worktree(&dir, &plan, 0).expect("a");
+        let (second, second_branch, _) = ensure_phase_worktree(&dir, &plan, 1).expect("b");
+
+        assert_ne!(first, second);
+        assert_ne!(first_branch, second_branch);
+        // Git canonicalizes the worktree path (`/var` → `/private/var` on
+        // macOS), so compare against the canonical repo root.
+        let canonical_dir = std::fs::canonicalize(&dir).unwrap();
+        assert!(first.starts_with(canonical_dir.join(".loopdeck")));
+        assert!(second.starts_with(canonical_dir.join(".loopdeck")));
+
+        git::worktree_remove(&dir, &first).expect("remove a");
+        assert!(!first.exists());
+        assert!(second.exists(), "sibling worktree must survive cleanup");
+
+        git::worktree_remove(&dir, &second).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Retain-on-delivery (`clean-handoff`, superseding the old prune-on-
+    /// success): every phase delivered → each phase worktree stays on disk
+    /// under `.loopdeck/runs/`, flagged kept, with its recorded path/branch
+    /// intact so the branch + PR stay reviewable.
+    #[test]
+    fn finalize_worktree_retains_every_delivered_phase_worktree() {
+        let dir = temp_git_repo("retain");
+        let plan = plan_with_phases(&dir, vec![completed_phase("phase-1")]);
+        let (worktree, branch, _) = ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
+
+        let mut plan = plan;
         finalize_worktree(&mut plan);
 
         assert!(plan.environment.worktree_kept);
-        assert_eq!(
-            plan.environment.worktree_path.as_deref(),
-            Some(worktree.as_path())
-        );
-        assert!(plan.environment.worktree_branch.is_some());
         assert!(
             worktree.exists(),
             "the delivered worktree must remain on disk"
         );
+        assert!(git::branch_exists(&dir, &branch));
 
         git::worktree_remove(&dir, &worktree).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Keep-on-failure: any phase not delivered → same retention, so a failed
-    /// run stays inspectable.
+    /// Keep-on-failure: any phase not delivered → the same retention, so a
+    /// failed run stays inspectable.
     #[test]
     fn finalize_worktree_keeps_on_any_non_completed_phase() {
         let dir = temp_git_repo("keep-failed");
-        let mut plan = plan_with_phases(
+        let plan = plan_with_phases(
             &dir,
             vec![completed_phase("phase-1"), failed_phase("phase-2")],
         );
-        let worktree = ensure_worktree(&dir, &mut plan).expect("create worktree");
+        let (worktree, _, _) = ensure_phase_worktree(&dir, &plan, 0).expect("create worktree");
 
+        let mut plan = plan;
         finalize_worktree(&mut plan);
 
         assert!(plan.environment.worktree_kept);
-        assert_eq!(
-            plan.environment.worktree_path.as_deref(),
-            Some(worktree.as_path())
-        );
         assert!(worktree.exists(), "a kept worktree must remain on disk");
 
         git::worktree_remove(&dir, &worktree).ok();

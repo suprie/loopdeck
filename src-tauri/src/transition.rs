@@ -50,7 +50,11 @@ pub fn transition_run(from: RunStatus, to: RunStatus) -> Result<RunStatus, AppEr
         RunStatus::Queued => matches!(to, RunStatus::Running | RunStatus::Cancelled),
         RunStatus::Running => matches!(
             to,
-            RunStatus::Parked
+            // Restart reconciliation auto-resumes a recoverable in-flight
+            // phase by re-queuing it (`parallel-scheduling/restart-reconcile`);
+            // a phase that is not recoverable parks instead.
+            RunStatus::Queued
+                | RunStatus::Parked
                 | RunStatus::Cancelled
                 | RunStatus::Killed
                 | RunStatus::Interrupted
@@ -86,6 +90,19 @@ pub fn transition_phase(
     from: RunPhaseStatus,
     to: RunPhaseStatus,
 ) -> Result<RunPhaseStatus, AppError> {
+    // Dependency-gate edges are a phase-level concept with no run-level
+    // counterpart: a phase enters `Waiting` behind its `depends_on` gate and
+    // is released to `Queued` (or started directly) when the gate opens.
+    if matches!(
+        (from, to),
+        (RunPhaseStatus::Queued, RunPhaseStatus::Waiting)
+            | (
+                RunPhaseStatus::Waiting,
+                RunPhaseStatus::Queued | RunPhaseStatus::Running
+            )
+    ) {
+        return Ok(to);
+    }
     let from_run = run_status_for_phase(from);
     let to_run = run_status_for_phase(to);
     transition_run(from_run, to_run).map(|_| to)
@@ -138,6 +155,9 @@ pub fn transition_delivery(
 fn run_status_for_phase(status: RunPhaseStatus) -> RunStatus {
     match status {
         RunPhaseStatus::Queued => RunStatus::Queued,
+        // Waiting is not-yet-started work held by the dependency gate; at the
+        // run level it shares the queued lifecycle.
+        RunPhaseStatus::Waiting => RunStatus::Queued,
         RunPhaseStatus::Running => RunStatus::Running,
         RunPhaseStatus::Parked => RunStatus::Parked,
         RunPhaseStatus::Delivered => RunStatus::Delivered,
@@ -173,6 +193,9 @@ mod tests {
             (
                 RunStatus::Running,
                 &[
+                    // Restart reconciliation re-queues a recoverable
+                    // in-flight phase instead of interrupting it.
+                    RunStatus::Queued,
                     RunStatus::Parked,
                     RunStatus::Cancelled,
                     RunStatus::Killed,
@@ -277,6 +300,30 @@ mod tests {
         assert_eq!(
             transition_phase(RunPhaseStatus::Running, RunPhaseStatus::Interrupted).unwrap(),
             RunPhaseStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn phase_restart_reconciliation_can_auto_resume_running_to_queued() {
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Running, RunPhaseStatus::Queued).unwrap(),
+            RunPhaseStatus::Queued
+        );
+    }
+
+    #[test]
+    fn dependency_gate_edges_hold_and_release_a_phase() {
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Queued, RunPhaseStatus::Waiting).unwrap(),
+            RunPhaseStatus::Waiting
+        );
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Queued).unwrap(),
+            RunPhaseStatus::Queued
+        );
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Running).unwrap(),
+            RunPhaseStatus::Running
         );
     }
 
