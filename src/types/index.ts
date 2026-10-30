@@ -554,6 +554,9 @@ export type StallPolicy = "continue_independent" | "halt";
 export type RunPhaseStatus =
   | "queued"
   | "running"
+  /** Blocked on an unmet upstream handoff dependency, not on a human
+   * (`prd-agent-handoff` Phase 2). Transient. */
+  | "waiting"
   | "parked"
   | "delivered"
   | "completed"
@@ -680,7 +683,9 @@ export type PhaseVerdict =
   | "killed"
   | "failed"
   | "parked"
-  | "running";
+  | "running"
+  /** Blocked on an unmet upstream handoff dependency. */
+  | "waiting";
 
 /** One row in the morning per-phase verdict table. Mirrors Rust `PhaseReportEntry`. */
 export interface PhaseReportEntry {
@@ -707,11 +712,26 @@ export interface AuditSlice {
   floor_denials: string[];
 }
 
+/** Coverage-only citation outcome. Mirrors Rust `CitationResult`. */
+export type CitationResult = "pass" | "partial" | "missing";
+
+/** One auditable handoff in the run report. Mirrors Rust
+ * `HandoffLedgerEntry` (`prd-agent-handoff` Phase 3). */
+export interface HandoffLedgerEntry {
+  run_id?: string;
+  from_role: string;
+  to_role: string;
+  artifact_path: string;
+  citation: CitationResult;
+}
+
 /** Morning report read model. Mirrors Rust `RunReport`. */
 export interface RunReport {
   plan: RunPlan;
   phases: PhaseReportEntry[];
   audit: AuditSlice;
+  /** Handoffs attributed to this run (filtered from the project ledger). */
+  handoffs: HandoffLedgerEntry[];
 }
 
 /**

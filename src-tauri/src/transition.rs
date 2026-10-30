@@ -15,6 +15,8 @@ use crate::runplan::RunPhaseStatus;
 pub enum RunStatus {
     Queued,
     Running,
+    /// Blocked on an upstream handoff dependency, not on a human.
+    Waiting,
     Parked,
     Cancelled,
     Killed,
@@ -47,7 +49,10 @@ pub enum DeliveryStatus {
 /// Validate and return a run transition.
 pub fn transition_run(from: RunStatus, to: RunStatus) -> Result<RunStatus, AppError> {
     let allowed = match from {
-        RunStatus::Queued => matches!(to, RunStatus::Running | RunStatus::Cancelled),
+        RunStatus::Queued => matches!(
+            to,
+            RunStatus::Running | RunStatus::Cancelled | RunStatus::Waiting
+        ),
         RunStatus::Running => matches!(
             to,
             RunStatus::Parked
@@ -57,6 +62,17 @@ pub fn transition_run(from: RunStatus, to: RunStatus) -> Result<RunStatus, AppEr
                 | RunStatus::Delivered
                 | RunStatus::Completed
                 | RunStatus::Failed
+        ),
+        // `Waiting` is a scheduler hold, not a terminal or human-parked
+        // state: a satisfied dependency re-queues it, a terminal-bad upstream
+        // or the run's end parks it, and cancellation/budgets kill it.
+        RunStatus::Waiting => matches!(
+            to,
+            RunStatus::Queued
+                | RunStatus::Running
+                | RunStatus::Parked
+                | RunStatus::Cancelled
+                | RunStatus::Killed
         ),
         RunStatus::Parked => matches!(
             to,
@@ -139,6 +155,7 @@ fn run_status_for_phase(status: RunPhaseStatus) -> RunStatus {
     match status {
         RunPhaseStatus::Queued => RunStatus::Queued,
         RunPhaseStatus::Running => RunStatus::Running,
+        RunPhaseStatus::Waiting => RunStatus::Waiting,
         RunPhaseStatus::Parked => RunStatus::Parked,
         RunPhaseStatus::Delivered => RunStatus::Delivered,
         RunPhaseStatus::Completed => RunStatus::Completed,
@@ -157,6 +174,7 @@ mod tests {
         let all = [
             RunStatus::Queued,
             RunStatus::Running,
+            RunStatus::Waiting,
             RunStatus::Parked,
             RunStatus::Cancelled,
             RunStatus::Killed,
@@ -168,7 +186,17 @@ mod tests {
         let allowed = [
             (
                 RunStatus::Queued,
-                &[RunStatus::Running, RunStatus::Cancelled][..],
+                &[RunStatus::Running, RunStatus::Cancelled, RunStatus::Waiting][..],
+            ),
+            (
+                RunStatus::Waiting,
+                &[
+                    RunStatus::Queued,
+                    RunStatus::Running,
+                    RunStatus::Parked,
+                    RunStatus::Cancelled,
+                    RunStatus::Killed,
+                ][..],
             ),
             (
                 RunStatus::Running,
@@ -270,6 +298,46 @@ mod tests {
                 assert_invalid(transition_delivery(from, to), "delivery", from, to);
             }
         }
+    }
+
+    #[test]
+    fn waiting_is_a_scheduler_hold_not_a_terminal_state() {
+        // Queued -> Waiting -> Queued when the dependency is satisfied.
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Queued, RunPhaseStatus::Waiting).unwrap(),
+            RunPhaseStatus::Waiting
+        );
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Queued).unwrap(),
+            RunPhaseStatus::Queued
+        );
+        // A terminal-bad upstream or the run's end parks it.
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Parked).unwrap(),
+            RunPhaseStatus::Parked
+        );
+        // Cancellation and budgets kill it; a direct dispatch is allowed.
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Killed).unwrap(),
+            RunPhaseStatus::Killed
+        );
+        assert_eq!(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Running).unwrap(),
+            RunPhaseStatus::Running
+        );
+        // Waiting never masquerades as success or as an ordinary failure.
+        assert_invalid(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Completed),
+            "run",
+            RunStatus::Waiting,
+            RunStatus::Completed,
+        );
+        assert_invalid(
+            transition_phase(RunPhaseStatus::Waiting, RunPhaseStatus::Failed),
+            "run",
+            RunStatus::Waiting,
+            RunStatus::Failed,
+        );
     }
 
     #[test]

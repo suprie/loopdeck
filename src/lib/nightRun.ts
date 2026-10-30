@@ -9,6 +9,7 @@ import type { AskUserQuestionSpec, Epic, PhaseVerdict, RunPhase, RunPhaseStatus,
 export const STATUS_LABEL: Record<RunPhaseStatus, string> = {
   queued: "queued",
   running: "running",
+  waiting: "waiting on upstream handoff",
   parked: "parked",
   delivered: "needs linking",
   completed: "completed",
@@ -20,6 +21,7 @@ export const STATUS_LABEL: Record<RunPhaseStatus, string> = {
 export const STATUS_COLOR: Record<RunPhaseStatus, string> = {
   queued: "var(--muted-foreground)",
   running: "var(--primary)",
+  waiting: "var(--muted-foreground)",
   parked: "var(--warning)",
   delivered: "var(--warning)",
   completed: "var(--success)",
@@ -213,6 +215,7 @@ export const VERDICT_LABEL: Record<PhaseVerdict, string> = {
   failed: "FAILED",
   parked: "PARKED",
   running: "RUNNING",
+  waiting: "WAITING",
 };
 
 export const VERDICT_COLOR: Record<PhaseVerdict, string> = {
@@ -223,4 +226,5 @@ export const VERDICT_COLOR: Record<PhaseVerdict, string> = {
   failed: "var(--destructive)",
   parked: "var(--warning)",
   running: "var(--primary)",
+  waiting: "var(--muted-foreground)",
 };
