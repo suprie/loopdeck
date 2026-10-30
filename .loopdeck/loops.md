@@ -30,6 +30,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## History
 
+### 2026-10-30 — Prepare orchestration recovery PR
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Packaged shared SQLite operational state, interrupted-loop continuation, editable budgets, sub-agent activity, and shared writing guidance. Integrated the merged handoff implementation before final verification. Runtime execution and delivery snapshots remain local.
+
 ### 2026-10-30 — Adjust stopped-run budgets
 - **Status**: completed
 - **Completed**: 2026-10-30
