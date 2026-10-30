@@ -21,6 +21,11 @@ const MAX_FRONTMATTER_BYTES: usize = 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024;
 const LEDGER_FILE: &str = "ledger.json";
 
+/// Downstream injection cap per artifact (`prd-agent-handoff` Phase 2). The
+/// store's body hard cap is the same number: an oversized artifact is a
+/// producer bug, so injection never truncates it silently.
+pub const MAX_INJECTION_BYTES: usize = MAX_BODY_BYTES;
+
 /// Graph-native handoff audit data. Artifacts remain Markdown; the ledger is
 /// deliberately plain JSON so nodes and edges can be queried independently.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -29,6 +34,11 @@ pub struct HandoffLedger {
     pub nodes: Vec<HandoffLedgerNode>,
     #[serde(default)]
     pub links: Vec<HandoffLedgerLink>,
+    /// One record per artifact handed from an upstream phase to a downstream
+    /// phase. `run_id` scopes the entry to one run plan so the morning report
+    /// can filter the project-wide ledger.
+    #[serde(default)]
+    pub handoffs: Vec<HandoffLedgerEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,6 +55,56 @@ pub struct HandoffLedgerLink {
     pub from_topic: String,
     pub to_topic: String,
     pub relation: String,
+}
+
+/// One auditable handoff in the run report: which role produced the artifact,
+/// which role consumed it, where it lives, and whether the consumer's
+/// `## Handoff citations` block covered every heading and numbered item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoffLedgerEntry {
+    /// Run-plan id this handoff belongs to. Older ledgers without a run id
+    /// stay readable (`None`) and never match a report filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub from_role: String,
+    pub to_role: String,
+    pub artifact_path: String,
+    pub citation: CitationResult,
+}
+
+/// Coverage-only citation outcome (`prd-agent-handoff` Phase 3). The executor
+/// checks that every section and item is mentioned or explicitly `not-used`;
+/// it never judges fidelity or completeness of the consumer's wording.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CitationResult {
+    /// Every heading and numbered item is covered.
+    Pass,
+    /// Some elements are covered, others are missing.
+    Partial,
+    /// No citation block, or no element is covered.
+    Missing,
+}
+
+/// Per-element coverage parsed from a consumer's `## Handoff citations`
+/// block. Kept for diagnostics; the ledger stores only the roll-up.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CitationCoverage {
+    pub cited: Vec<String>,
+    pub not_used: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+impl CitationCoverage {
+    pub fn result(&self) -> CitationResult {
+        if self.missing.is_empty() {
+            CitationResult::Pass
+        } else if self.cited.is_empty() {
+            CitationResult::Missing
+        } else {
+            CitationResult::Partial
+        }
+    }
 }
 
 /// The kinds of contract artifacts that can cross a phase boundary.
@@ -184,7 +244,6 @@ pub fn agent_artifact_path(worktree: &Path, topic: &str) -> Result<PathBuf, AppE
         .join(format!("{topic}.md")))
 }
 
-#[allow(dead_code)]
 pub fn load_artifact(repo_path: &Path, topic: &str) -> Result<Option<Artifact>, AppError> {
     let path = artifact_path(repo_path, topic)?;
     if !path.exists() {
@@ -196,6 +255,197 @@ pub fn load_artifact(repo_path: &Path, topic: &str) -> Result<Option<Artifact>, 
         &topic_for_phase(topic),
         path,
     )?))
+}
+
+/// Store-relative path a consumer cites and the run report records. Always
+/// forward slashes so the citation form is stable across platforms.
+pub fn store_relative_path(topic: &str) -> String {
+    format!(".loopdeck/{HANDOFFS_DIR}/{}.md", topic_for_phase(topic))
+}
+
+/// Load one artifact for downstream injection. The body is bounded at the
+/// contract's hard cap; an oversized artifact is an error, never truncated.
+pub fn load_for_injection(repo_path: &Path, topic: &str) -> Result<Artifact, AppError> {
+    let artifact = load_artifact(repo_path, topic)?.ok_or_else(|| {
+        AppError::RunPlan(format!(
+            "handoff artifact \"{}\" is missing from the store at {}",
+            topic_for_phase(topic),
+            store_relative_path(topic)
+        ))
+    })?;
+    if artifact.body.len() > MAX_INJECTION_BYTES {
+        return Err(AppError::RunPlan(format!(
+            "handoff artifact \"{}\" exceeds the {MAX_INJECTION_BYTES}-byte injection cap",
+            artifact.record.artifact
+        )));
+    }
+    Ok(artifact)
+}
+
+/// One upstream artifact injected into a consumer phase's prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedArtifact {
+    pub topic: String,
+    pub artifact: Artifact,
+}
+
+/// Render the bounded, contract-cited upstream block appended to a consumer
+/// phase's prompt. Each artifact's body is already validated at
+/// [`MAX_INJECTION_BYTES`]; the store path is always named so the consumer
+/// can cite it.
+pub fn render_injection(consumer_id: &str, artifacts: &[InjectedArtifact]) -> String {
+    if artifacts.is_empty() {
+        return String::new();
+    }
+    let mut block = format!(
+        "\n\n## Upstream handoff artifacts for phase `{consumer_id}`\n\n\
+         This phase depends on upstream phases that published contract \
+         artifacts. Read each artifact below and cite it in your final message \
+         using the contract's `## Handoff citations` block:\n\n\
+         - For a section, write `<path>#<Heading>`.\n\
+         - For a numbered item, write `<path>#<Rn>` (or `#<Cn>` / `#<Qn>`).\n\
+         - For anything you did not use, write `not-used: <id> — <one-line reason>`.\n\
+         Cite every heading and every numbered item. Do not silently drop or \
+         merge items.\n",
+    );
+    for injected in artifacts {
+        let record = &injected.artifact.record;
+        let path = store_relative_path(&injected.topic);
+        block.push_str(&format!(
+            "\n### {path}\n\n- Path: `{path}`\n- Author role: `{}`\n- Phase: `{}`\n- Type: `{}`\n\n{}\n",
+            record.author_role,
+            record.phase,
+            artifact_type_label(record.artifact_type),
+            injected.artifact.body.trim_end(),
+        ));
+    }
+    block
+}
+
+fn artifact_type_label(artifact_type: ArtifactType) -> &'static str {
+    match artifact_type {
+        ArtifactType::Plan => "plan",
+        ArtifactType::Analysis => "analysis",
+        ArtifactType::Decision => "decision",
+        ArtifactType::Report => "report",
+        ArtifactType::Content => "content",
+    }
+}
+
+/// Stable citable elements of an artifact: every top-level heading and every
+/// `R`/`C`/`Q`-numbered item ID. This is the coverage checklist from §5 of
+/// the contract, nothing more.
+pub fn citable_elements(artifact: &Artifact) -> Vec<String> {
+    let mut elements = Vec::new();
+    for line in artifact.body.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            elements.push(heading.trim().to_string());
+        }
+    }
+    static ITEM_ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let item_id = ITEM_ID
+        .get_or_init(|| regex::Regex::new(r"\b([RCQ][0-9]+)\b").expect("item-id pattern is valid"));
+    for capture in item_id.captures_iter(&artifact.body) {
+        let id = capture[1].to_string();
+        if !elements.contains(&id) {
+            elements.push(id);
+        }
+    }
+    elements
+}
+
+/// Extract the last `## Handoff citations` block from a consumer's final
+/// message. Last-one-wins matches the executor's other markers: reasoning may
+/// quote the format before the real block.
+fn citation_block(text: &str) -> Option<&str> {
+    const MARKER: &str = "## Handoff citations";
+    let start = text.rfind(MARKER)? + MARKER.len();
+    let rest = &text[start..];
+    let end = rest
+        .find("\n## ")
+        .map(|index| index + 1)
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// Coverage-only check of a consumer's citation block against an artifact.
+/// A token is `cited` when it appears in a citation line, `not_used` when its
+/// line carries the `not-used` marker, and `missing` otherwise.
+pub fn citation_coverage(artifact: &Artifact, response: &str) -> CitationCoverage {
+    let Some(block) = citation_block(response) else {
+        return CitationCoverage {
+            missing: citable_elements(artifact),
+            ..CitationCoverage::default()
+        };
+    };
+    let lines = block.lines().collect::<Vec<_>>();
+    let mut coverage = CitationCoverage::default();
+    for element in citable_elements(artifact) {
+        let matching: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|line| line_mentions(line, &element))
+            .collect();
+        if matching.is_empty() {
+            coverage.missing.push(element);
+        } else if matching.iter().all(|line| line.contains("not-used")) {
+            coverage.not_used.push(element);
+        } else {
+            coverage.cited.push(element);
+        }
+    }
+    coverage
+}
+
+/// Whether a citation line references `element`. Cited lines use the
+/// `<path>#<Heading>` / `<path>#<Rn>` form; `not-used:` lines may name the
+/// bare ID (contract §5's `not-used: <id> — <reason>`).
+fn line_mentions(line: &str, element: &str) -> bool {
+    if line.contains(&format!("#{element}")) {
+        return true;
+    }
+    if !line.contains("not-used") {
+        return false;
+    }
+    line.match_indices(element).any(|(index, _)| {
+        let before_ok = line[..index]
+            .chars()
+            .last()
+            .is_none_or(|character| !character.is_alphanumeric());
+        let after_ok = line[index + element.len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| !character.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
+/// Coverage roll-up for one handoff, recorded in the ledger.
+pub fn citation_result(artifact: &Artifact, response: &str) -> CitationResult {
+    citation_coverage(artifact, response).result()
+}
+
+/// Append handoff attribution records to the project ledger.
+pub fn record_handoffs(repo_path: &Path, entries: &[HandoffLedgerEntry]) -> Result<(), AppError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut ledger = load_ledger(repo_path)?;
+    ledger.handoffs.extend(entries.iter().cloned());
+    save_ledger(repo_path, &ledger)
+}
+
+/// Handoffs recorded for one run plan, in ledger order.
+pub fn handoffs_for_run(
+    repo_path: &Path,
+    run_id: &str,
+) -> Result<Vec<HandoffLedgerEntry>, AppError> {
+    let ledger = load_ledger(repo_path)?;
+    Ok(ledger
+        .handoffs
+        .into_iter()
+        .filter(|entry| entry.run_id.as_deref() == Some(run_id))
+        .collect())
 }
 
 /// Validate and persist a new artifact. Existing topics are deliberately not
@@ -643,6 +893,13 @@ mod tests {
                 to_topic: "downstream-analysis".into(),
                 relation: "cites".into(),
             }],
+            handoffs: vec![HandoffLedgerEntry {
+                run_id: Some("run-1".into()),
+                from_role: "planner".into(),
+                to_role: "qa".into(),
+                artifact_path: ".loopdeck/handoffs/upstream-plan.md".into(),
+                citation: CitationResult::Pass,
+            }],
         };
         save_ledger(&dir, &ledger).unwrap();
         assert_eq!(load_ledger(&dir).unwrap(), ledger);
@@ -791,6 +1048,150 @@ mod tests {
         assert_eq!(ledger.links[0].from_topic, "upstream");
         assert_eq!(ledger.links[0].to_topic, "downstream");
         assert_eq!(ledger.links[0].relation, "cites");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── Downstream injection (`prd-agent-handoff` Phase 2) ──────────────
+
+    #[test]
+    fn render_injection_names_the_store_path_role_and_citation_rule() {
+        let plan = artifact("upstream-plan", "epic/plan", ArtifactType::Plan);
+        let block = render_injection(
+            "epic/implement",
+            &[InjectedArtifact {
+                topic: "upstream-plan".into(),
+                artifact: plan,
+            }],
+        );
+
+        assert!(block.contains("## Upstream handoff artifacts for phase `epic/implement`"));
+        assert!(block.contains(".loopdeck/handoffs/upstream-plan.md"));
+        assert!(block.contains("Author role: `engineering-manager`"));
+        assert!(block.contains("## Handoff citations"));
+        assert!(block.contains("<path>#<Heading>"));
+        assert!(block.contains("not-used: <id> — <one-line reason>"));
+        assert!(block.contains("R1 is stable"));
+    }
+
+    #[test]
+    fn injection_load_is_bounded_at_the_contract_hard_cap() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-inject-{}", uuid::Uuid::new_v4()));
+        let store = store_dir(&dir);
+        std::fs::create_dir_all(&store).unwrap();
+
+        // Exactly 8 KiB is allowed; one byte more is an error, never truncated.
+        let at_cap = format!(
+            "---\nartifact: bounded\nauthor_role: planner\nphase: x\ntype: report\ncreated: 2026-10-28\nsummary: s\n---\n## Summary\n{}",
+            "a".repeat(MAX_INJECTION_BYTES - "## Summary\n".len())
+        );
+        assert_eq!(
+            at_cap.split("---\n").nth(2).unwrap().len(),
+            MAX_INJECTION_BYTES
+        );
+        std::fs::write(store.join("bounded.md"), &at_cap).unwrap();
+        let loaded = load_for_injection(&dir, "bounded").expect("8 KiB body is allowed");
+        assert_eq!(loaded.body.len(), MAX_INJECTION_BYTES);
+
+        std::fs::write(store.join("bounded.md"), format!("{at_cap}b")).unwrap();
+        let error = load_for_injection(&dir, "bounded").expect_err("over-cap artifact is an error");
+        assert!(error.to_string().contains("8 KiB"));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn injection_load_reports_a_missing_artifact() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-missing-{}", uuid::Uuid::new_v4()));
+        let error = load_for_injection(&dir, "never-written")
+            .expect_err("missing artifact must never be improvised");
+        assert!(error.to_string().contains("is missing from the store"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── Citation coverage (`prd-agent-handoff` Phase 3) ─────────────────
+
+    fn response_with_citations(block: &str) -> String {
+        format!("Implementation done.\n\n## Handoff citations\n{block}\n")
+    }
+
+    #[test]
+    fn citation_coverage_splits_cited_not_used_and_missing() {
+        let plan = artifact("upstream", "epic/plan", ArtifactType::Plan);
+        let response = response_with_citations(
+            "- .loopdeck/handoffs/upstream.md#Summary\n\
+             - .loopdeck/handoffs/upstream.md#Requirements\n\
+             - not-used: R1 — out of scope\n\
+             - .loopdeck/handoffs/upstream.md#Non-Goals",
+        );
+
+        let coverage = citation_coverage(&plan, &response);
+        assert_eq!(coverage.cited, vec!["Summary", "Requirements", "Non-Goals"]);
+        assert_eq!(coverage.not_used, vec!["R1"]);
+        assert!(coverage.missing.is_empty());
+        assert_eq!(coverage.result(), CitationResult::Pass);
+    }
+
+    #[test]
+    fn citation_coverage_is_partial_when_some_elements_are_absent() {
+        let plan = artifact("upstream", "epic/plan", ArtifactType::Plan);
+        let response = response_with_citations("- .loopdeck/handoffs/upstream.md#Summary");
+
+        let coverage = citation_coverage(&plan, &response);
+        assert_eq!(coverage.cited, vec!["Summary"]);
+        assert!(coverage.missing.contains(&"Requirements".to_string()));
+        assert!(coverage.missing.contains(&"R1".to_string()));
+        assert_eq!(coverage.result(), CitationResult::Partial);
+    }
+
+    #[test]
+    fn citation_coverage_is_missing_without_a_block() {
+        let plan = artifact("upstream", "epic/plan", ArtifactType::Plan);
+        let coverage = citation_coverage(&plan, "No citation block here.");
+        assert!(coverage.cited.is_empty());
+        assert_eq!(coverage.missing.len(), 4);
+        assert_eq!(coverage.result(), CitationResult::Missing);
+    }
+
+    #[test]
+    fn citation_block_stops_at_the_next_top_level_heading() {
+        let plan = artifact("upstream", "epic/plan", ArtifactType::Plan);
+        let response = "\n## Handoff citations\n- .loopdeck/handoffs/upstream.md#Summary\n\
+                        \n## Other section\n- .loopdeck/handoffs/upstream.md#R1\n";
+        let coverage = citation_coverage(&plan, response);
+        assert_eq!(coverage.cited, vec!["Summary"]);
+        assert!(coverage.missing.contains(&"R1".to_string()));
+    }
+
+    #[test]
+    fn handoffs_for_run_filters_the_project_ledger_by_run_id() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-attrib-{}", uuid::Uuid::new_v4()));
+        let entry = |run_id: &str| HandoffLedgerEntry {
+            run_id: Some(run_id.into()),
+            from_role: "planner".into(),
+            to_role: "qa".into(),
+            artifact_path: ".loopdeck/handoffs/upstream.md".into(),
+            citation: CitationResult::Pass,
+        };
+        record_handoffs(&dir, &[entry("run-1")]).unwrap();
+        record_handoffs(&dir, &[entry("run-2"), entry("run-1")]).unwrap();
+
+        let run_one = handoffs_for_run(&dir, "run-1").unwrap();
+        assert_eq!(run_one.len(), 2);
+        let run_two = handoffs_for_run(&dir, "run-2").unwrap();
+        assert_eq!(run_two.len(), 1);
+        assert!(handoffs_for_run(&dir, "run-3").unwrap().is_empty());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ledger_without_handoff_entries_still_loads() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(store_dir(&dir)).unwrap();
+        std::fs::write(ledger_path(&dir), "{\"nodes\":[],\"links\":[]}").unwrap();
+
+        let ledger = load_ledger(&dir).unwrap();
+        assert!(ledger.handoffs.is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 }
