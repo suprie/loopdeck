@@ -107,6 +107,17 @@ pub const DEFAULT_RUN_PHASE_WALL_CLOCK_SECS: u64 = 90 * 60;
 /// Default maximum duration of a whole overnight run.
 pub const DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS: u64 = 8 * 60 * 60;
 
+/// Default number of run-plan phases that may execute at the same time.
+///
+/// Four keeps the load and cost predictable: at most four worktrees, four
+/// provider sessions, and four token streams per run.
+pub const DEFAULT_RUN_MAX_CONCURRENCY: u32 = 4;
+
+/// Upper bound for a plan's `max_concurrency`. A plan that asks for more is
+/// rejected at creation rather than silently clamped, so the picker cannot
+/// promise a concurrency the executor will not honor.
+pub const MAX_RUN_MAX_CONCURRENCY: u32 = 16;
+
 /// Max bytes of a spec / PRD / epic Markdown file read wholesale.
 ///
 /// These live under `docs/epics/` (human-authored) and `.loopdeck/` (agent-

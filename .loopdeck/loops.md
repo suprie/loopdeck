@@ -4,10 +4,14 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## Current
 
-- **Status**: in_progress — `provider-contract` Phases 2–3 are implemented in worktree `run/provider-contract-normalize-claude-plus3-1aa529a93261`: both adapters dual-emit normalized `RunEvent`s, ts-rs bindings are CI-drift-checked, the run-queue consumer migrated, fixture/frontend contract tests pass, and the verify gate is PASS. Draft PR #110 is open.
-- **Next**: review and merge draft PR #110; then start the next queued `execution-foundations` PRD.
+- **Status**: in_progress — all six `prd-parallel-scheduling` loops are implemented in worktree `run/parallel-scheduling-one-turn-per-phase-plus5-d13a619fe69b`: per-phase turns, dependency-aware fan-out with per-phase worktrees, the `Waiting` gate, multi-phase restart reconciliation, per-phase budgets, and scheduler property/worktree tests. Verify gate is PASS; draft PR #113 is open.
+- **Next**: review and merge the parallel-scheduling draft PR; then run a real overnight plan with two disjoint phases to confirm concurrent draft PRs on the user's machine.
 
 ## Next Steps
+- [x] Resolve PR #113 against agent-handoff support on main; preserve bounded injection, citation attribution, and waiting-phase restart recovery.
+- [ ] Split `commands/run_queue.rs` and `run_executor.rs` (both exceed 1,500 lines).
+- [ ] Review & merge: https://github.com/suprie/loopdeck/pull/113
+- [x] `role-based-orchestration` / `prd-parallel-scheduling` — all six loops (one-turn-per-phase, parallel-batches, gated-start, restart-reconcile, budget-split, tests).
 - [x] Fix the Claude control_response schema and commit it.
 - [x] Create a fresh run worktree and plan from `feat/provider-event-fixtures`.
 - [x] `execution-foundations` / `prd-provider-contract` Phase 2 — normalize Claude and Codex provider output into the versioned `RunEvent` envelope.
@@ -27,6 +31,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] Human smoke of `DeliveryReportTab` (RetryCard/HandoffBanner) in the running app (Tauri webview not drivable headless)
 
 ## History
+
+### 2026-10-30 — role-based-orchestration / prd-parallel-scheduling (all six loops)
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: The run executor now fires one turn per run-plan phase instead of one combined queued-batch turn. A new `scheduler.rs` validates the dependency graph (cycles, self-edges, and dangling edges are rejected at plan creation and again at run start), holds dependents in a persisted `Waiting` state, and releases them only when every upstream is Completed or Delivered. Ready phases fan out concurrently under `RunPlan.max_concurrency` (default 4, configurable in the plan-tonight picker), each in its own worktree and branch cut from the default branch, each with its own provider session, token budget, and wall-clock watchdog. A non-green upstream fails its Waiting dependents while independent in-flight phases continue. Restart reconciliation now classifies every `Running` phase, auto-resuming only when worktree and saved session both survive and parking the rest with a reason. Scheduler property tests cover generated DAGs, cycle rejection, and restart decisions; worktree tests prove disjoint paths and isolated cleanup. `cargo test` (747 passed), `cargo clippy --all-targets` (0 errors), `npx tsc --noEmit`, `npm run build`, and `npm run test:frontend` (34 passed) are green.
 
 ### 2026-10-28 — execution-foundations / prd-provider-contract Phases 2–3
 - **Status**: completed
@@ -98,6 +107,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - [ ] `prd-process-discipline` owns automated budget enforcement if ever wanted (resolved: document-only here)
 
 ## History
+
+### 2026-10-30 — role-based-orchestration / prd-parallel-scheduling (all six loops)
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: The run executor now fires one turn per run-plan phase instead of one combined queued-batch turn. A new `scheduler.rs` validates the dependency graph (cycles, self-edges, and dangling edges are rejected at plan creation and again at run start), holds dependents in a persisted `Waiting` state, and releases them only when every upstream is Completed or Delivered. Ready phases fan out concurrently under `RunPlan.max_concurrency` (default 4, configurable in the plan-tonight picker), each in its own worktree and branch cut from the default branch, each with its own provider session, token budget, and wall-clock watchdog. A non-green upstream fails its Waiting dependents while independent in-flight phases continue. Restart reconciliation now classifies every `Running` phase, auto-resuming only when worktree and saved session both survive and parking the rest with a reason. Scheduler property tests cover generated DAGs, cycle rejection, and restart decisions; worktree tests prove disjoint paths and isolated cleanup. `cargo test` (747 passed), `cargo clippy --all-targets` (0 errors), `npx tsc --noEmit`, `npm run build`, and `npm run test:frontend` (34 passed) are green.
 
 ### 2026-08-30 — Memory hygiene: 3,000-token budget + compaction
 - **Status**: completed

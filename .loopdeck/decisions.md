@@ -297,3 +297,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Unattended Codex turns used read-only sandboxing with on-request approval, so Cargo could wait for a host popup that the worker UI could not show.
 - **Consequences**: Autonomous turns use `workspaceWrite` with `approvalPolicy: on-request`; interactive turns retain read-only approval cards, while all requests remain subject to LoopDeck's destructive-command floor.
+
+## 2026-10-30 — Execute run-plan phases one turn each with a ready-set scheduler
+- **Status**: accepted
+- **Context**: The run queue merged every queued phase into one LLM turn, so roles could not be attributed, budgeted per phase, or run concurrently. `prd-parallel-scheduling` makes the phase the unit of execution.
+- **Consequences**: `scheduler.rs` validates the dependency graph (cycles rejected at plan creation and run start) and selects a ready set. Each phase runs in its own worktree and branch cut from the default branch, with its own provider session, token budget, and watchdog. `RunPlan.max_concurrency` defaults to four and is configurable in the plan-tonight picker. Dependents enter `Waiting` and are released only when every upstream is Completed or Delivered; a non-green upstream fails its dependents while independent in-flight phases continue. Restart reconciliation auto-resumes a phase only when its worktree and saved session both survive, and parks the rest with a reason. Dependents receive upstream output only as seeded handoff artifacts, never as unmerged branch code.

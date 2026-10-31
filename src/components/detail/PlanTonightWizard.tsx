@@ -116,6 +116,8 @@ export function PlanTonightWizard({
   const [phaseTokenCap, setPhaseTokenCap] = useState("500000");
   const [phaseMinutes, setPhaseMinutes] = useState("90");
   const [runHours, setRunHours] = useState("8");
+  /** Concurrent phase turns (`prd-parallel-scheduling` Phase 2). */
+  const [maxConcurrency, setMaxConcurrency] = useState("4");
   const [creating, setCreating] = useState(false);
   const [starting, setStarting] = useState(false);
   const [plan, setPlan] = useState<RunPlan | null>(null);
@@ -155,6 +157,7 @@ export function PlanTonightWizard({
     setPendingQuestion(null);
     setConsentConfirmed(false);
     setAgentByPhase({});
+    setMaxConcurrency("4");
   }, [open]);
 
   const setPhaseAgent = (executionId: string, agentId: string) => {
@@ -220,6 +223,10 @@ export function PlanTonightWizard({
   const handleNextFromPhases = async () => {
     setCreating(true);
     try {
+      const concurrency = Number(maxConcurrency);
+      if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) {
+        throw new Error("Concurrent phases must be a whole number from 1 to 16");
+      }
       const created = await api.createRunPlan(
         projectPath,
         selected,
@@ -227,6 +234,8 @@ export function PlanTonightWizard({
         draftPrAuthorized,
         budgetsFromInputs(),
         assignmentsFromSelection(),
+        [],
+        Number(maxConcurrency),
       );
       setPlan(created);
       setStep(2);
@@ -388,6 +397,8 @@ export function PlanTonightWizard({
               setPhaseMinutes={setPhaseMinutes}
               runHours={runHours}
               setRunHours={setRunHours}
+              maxConcurrency={maxConcurrency}
+              setMaxConcurrency={setMaxConcurrency}
               onToggle={toggleSelected}
             />
           )}
@@ -494,6 +505,8 @@ function StepPhases({
   setPhaseMinutes,
   runHours,
   setRunHours,
+  maxConcurrency,
+  setMaxConcurrency,
   onToggle,
 }: {
   entries: PickerEntry[];
@@ -512,6 +525,8 @@ function StepPhases({
   setPhaseMinutes: (v: string) => void;
   runHours: string;
   setRunHours: (v: string) => void;
+  maxConcurrency: string;
+  setMaxConcurrency: (v: string) => void;
   onToggle: (id: string) => void;
 }) {
   let lastGroup = "";
@@ -634,6 +649,20 @@ function StepPhases({
               min="1"
               value={runHours}
               onChange={(e) => setRunHours(e.target.value)}
+              className="h-7 w-12 rounded border border-border bg-background px-1.5 text-xs text-foreground"
+            />
+          </label>
+          <label
+            className="flex items-center gap-1"
+            title="Phases with satisfied dependencies run at the same time, each in its own worktree. 1 = sequential."
+          >
+            Concurrent phases
+            <input
+              type="number"
+              min="1"
+              max="16"
+              value={maxConcurrency}
+              onChange={(e) => setMaxConcurrency(e.target.value)}
               className="h-7 w-12 rounded border border-border bg-background px-1.5 text-xs text-foreground"
             />
           </label>
@@ -855,6 +884,7 @@ function StepConsent({
           {Math.floor((plan.budgets.total_run_wall_clock_secs ?? 0) / 3600)} h
         </SummaryRow>
         <SummaryRow label="Phases">{plan.phases.length}</SummaryRow>
+        <SummaryRow label="Concurrent phases">{plan.max_concurrency}</SummaryRow>
       </div>
 
       {hasPendingInterview && (

@@ -142,12 +142,10 @@ fn phase_goal_block(execution_id: &str, loc: &LoopLocation, interview: &[PinnedA
     block
 }
 
-/// Build the prompt for one orchestrated turn covering *every* phase in
-/// `phases` at once — the run queue always merges its currently-queued
-/// phases into a single LLM call rather than firing one turn per phase (an
-/// overnight run of N loops is one combined session, not N sequential ones).
-/// A single-element slice produces the same shape of prompt as running just
-/// that one phase always did.
+/// Build the prompt for an orchestrated turn covering the phases in
+/// `phases`. Production (`prd-parallel-scheduling`) always passes a
+/// single-element slice: one phase, one turn. The multi-element shape is
+/// retained for the legacy combined-turn contract and its tests.
 pub(crate) fn build_combined_phase_prompt(
     phases: &[(String, LoopLocation, Vec<PinnedAnswer>)],
     draft_pr_authorized: bool,
@@ -448,6 +446,12 @@ pub(crate) fn extract_batch_interview_answers(text: &str) -> HashMap<String, Vec
 ///
 /// Pure and side-effect-free: returns the blocked execution IDs; the caller
 /// applies the `Parked` status/payload writes and persists the plan.
+///
+/// `prd-parallel-scheduling` supersedes this for live execution:
+/// [`crate::scheduler::fail_dependents`] fails dependents instead of parking
+/// them. Retained as the canonical stall-policy computation for tests and for
+/// future manual-park paths.
+#[allow(dead_code)]
 pub(crate) fn phases_blocked_by_park(
     plan: &RunPlan,
     parked_id: &str,
@@ -504,99 +508,6 @@ pub(crate) fn publishing_ancestors<'a>(plan: &'a RunPlan, phase: &RunPhase) -> V
         })
         .filter(|ancestor| ancestor.handoff_topic.is_some())
         .collect()
-}
-
-/// Whether this phase must consume an upstream handoff artifact.
-pub(crate) fn consumes_handoff(plan: &RunPlan, phase: &RunPhase) -> bool {
-    !publishing_ancestors(plan, phase).is_empty()
-}
-
-fn is_terminal_good(status: RunPhaseStatus) -> bool {
-    matches!(
-        status,
-        RunPhaseStatus::Completed | RunPhaseStatus::Delivered
-    )
-}
-
-fn is_terminal_bad(status: RunPhaseStatus) -> bool {
-    matches!(
-        status,
-        RunPhaseStatus::Parked
-            | RunPhaseStatus::Failed
-            | RunPhaseStatus::Interrupted
-            | RunPhaseStatus::Killed
-    )
-}
-
-/// Re-evaluate every handoff consumer's eligibility after a turn
-/// (`prd-agent-handoff` Phase 2). A `Queued` consumer whose publishing
-/// ancestor is not yet `Completed`/`Delivered` moves to `Waiting`; a
-/// `Waiting` consumer returns to `Queued` once its ancestors are good, and
-/// parks when any ancestor is terminal-bad. Runs to a fixed point so a chain
-/// settles in one call. Returns `true` when anything changed.
-pub(crate) fn recheck_waiting_phases(plan: &mut RunPlan) -> Result<bool, AppError> {
-    let mut changed = false;
-    loop {
-        let mut pass_changed = false;
-        for index in 0..plan.phases.len() {
-            let status = plan.phases[index].status;
-            if !matches!(status, RunPhaseStatus::Queued | RunPhaseStatus::Waiting) {
-                continue;
-            }
-            let ancestors: Vec<(String, RunPhaseStatus)> = plan.phases[index]
-                .depends_on
-                .iter()
-                .filter_map(|id| {
-                    plan.phases
-                        .iter()
-                        .find(|candidate| &candidate.execution_id == id)
-                })
-                .filter(|ancestor| ancestor.handoff_topic.is_some())
-                .map(|ancestor| (ancestor.execution_id.clone(), ancestor.status))
-                .collect();
-            if ancestors.is_empty() {
-                continue;
-            }
-
-            match status {
-                RunPhaseStatus::Queued => {
-                    if ancestors
-                        .iter()
-                        .any(|(_, ancestor_status)| !is_terminal_good(*ancestor_status))
-                    {
-                        plan.phases[index].status =
-                            crate::transition::transition_phase(status, RunPhaseStatus::Waiting)?;
-                        pass_changed = true;
-                    }
-                }
-                RunPhaseStatus::Waiting => {
-                    if let Some((upstream, _)) = ancestors
-                        .iter()
-                        .find(|(_, ancestor_status)| is_terminal_bad(*ancestor_status))
-                    {
-                        plan.phases[index].status =
-                            crate::transition::transition_phase(status, RunPhaseStatus::Parked)?;
-                        plan.phases[index].park_payload = Some(format!(
-                            "blocked: upstream handoff phase \"{upstream}\" did not complete"
-                        ));
-                        pass_changed = true;
-                    } else if ancestors
-                        .iter()
-                        .all(|(_, ancestor_status)| is_terminal_good(*ancestor_status))
-                    {
-                        plan.phases[index].status =
-                            crate::transition::transition_phase(status, RunPhaseStatus::Queued)?;
-                        pass_changed = true;
-                    }
-                }
-                _ => unreachable!("filtered to Queued and Waiting above"),
-            }
-        }
-        if !pass_changed {
-            return Ok(changed);
-        }
-        changed = true;
-    }
 }
 
 /// Park every still-`Waiting` phase when the run can make no further
@@ -659,6 +570,10 @@ pub(crate) fn build_run_plan(
                 assigned_agent_id: assignment.map(|a| a.agent_id.clone()),
                 assigned_agent_name: assignment.and_then(|a| a.agent_name.clone()),
                 handoff_topic: None,
+                worktree_path: None,
+                worktree_branch: None,
+                session_id: None,
+                resume_session_id: None,
             }
         })
         .collect();
@@ -674,32 +589,45 @@ pub(crate) fn build_run_plan(
         environment: RunEnvironment::default(),
         wall_clock_secs: 0,
         stall_policy,
+        // `create_run_plan` overwrites this with the picker's value; the
+        // builder itself stays deterministic for tests and callers that do
+        // not expose the knob.
+        max_concurrency: crate::limits::DEFAULT_RUN_MAX_CONCURRENCY,
         phases,
     }
 }
 
-/// Startup reconciliation, mirroring `conversation::reconcile_interrupted`:
-/// a `Running` phase left on disk from a killed/crashed process is not
-/// actually running on a fresh process — nothing has resumed it yet — so
-/// downgrade it to `Interrupted` (P1: "resumable across app restarts"). A
-/// `Waiting` phase is re-queued for the same reason: no turn is live to
-/// re-check its handoff dependency after a restart.
-/// `queue_run` also calls this before deciding whether a run is already
-/// active, so a stale `Running` phase from a prior crash can't block a new
-/// queue attempt forever.
+/// Startup reconciliation for **multiple** in-flight phases
+/// (`parallel-scheduling/restart-reconcile`, superseding the single-phase
+/// `Interrupted` downgrade).
+///
+/// A `Running` phase left on disk from a killed/crashed process is not
+/// actually running on a fresh process. Per the approved restart answer, the
+/// next queue attempt **auto-resumes** each phase whose worktree and saved
+/// provider session both survive — re-queuing it so the executor starts a
+/// fresh turn in the surviving tree. Anything less parks the phase with a
+/// reason for the morning report instead of guessing.
+///
+/// `queue_run` and `get_run_status` call this before deciding whether a run is
+/// active, so a stale `Running` phase can't block a new attempt forever.
 ///
 /// Returns `true` if the plan was rewritten. A missing plan is a no-op.
 pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
     let Some(mut plan) = runplan::load(repo_path)? else {
         return Ok(false);
     };
+    if !plan.phases.iter().any(|phase| {
+        matches!(
+            phase.status,
+            RunPhaseStatus::Running | RunPhaseStatus::Waiting
+        )
+    }) {
+        return Ok(false);
+    }
+
+    let worktrees = crate::git::worktree_list(repo_path).unwrap_or_default();
     let mut changed = false;
     for phase in &mut plan.phases {
-        if phase.status == RunPhaseStatus::Running {
-            phase.status =
-                crate::transition::transition_phase(phase.status, RunPhaseStatus::Interrupted)?;
-            changed = true;
-        }
         // A `Waiting` phase from a crashed run has no live turn to re-check
         // it. Re-queue it so the next executor pass re-derives the hold and
         // parks it if its upstream is terminal-bad, rather than waiting
@@ -708,6 +636,43 @@ pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
             phase.status =
                 crate::transition::transition_phase(phase.status, RunPhaseStatus::Queued)?;
             changed = true;
+        }
+        if phase.status != RunPhaseStatus::Running {
+            continue;
+        }
+        let worktree = phase
+            .worktree_path
+            .clone()
+            .or_else(|| plan.environment.worktree_path.clone());
+        let worktree_survives = worktree
+            .as_ref()
+            .is_some_and(|path| path.is_dir() || worktrees.iter().any(|known| known == path));
+        let session_survives =
+            phase.session_id.is_some() || crate::conversation::last_session_id(repo_path).is_some();
+        match crate::scheduler::classify_interrupted_phase(worktree_survives, session_survives) {
+            crate::scheduler::ResumeDecision::AutoResume => {
+                phase.status =
+                    crate::transition::transition_phase(phase.status, RunPhaseStatus::Queued)?;
+                phase.resume_session_id = phase.session_id.clone();
+                phase.park_payload = Some(
+                    "resumed after app restart: worktree and provider session both survived".into(),
+                );
+                changed = true;
+            }
+            crate::scheduler::ResumeDecision::Park => {
+                let missing = match (worktree_survives, session_survives) {
+                    (false, false) => "worktree and provider session",
+                    (false, true) => "worktree",
+                    (true, false) => "saved provider session",
+                    (true, true) => unreachable!(),
+                };
+                phase.status =
+                    crate::transition::transition_phase(phase.status, RunPhaseStatus::Parked)?;
+                phase.park_payload = Some(format!(
+                    "interrupted by app restart: {missing} did not survive; requeue to retry"
+                ));
+                changed = true;
+            }
         }
     }
     if changed {
@@ -1081,13 +1046,15 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_running_phases_downgrades_running_to_interrupted() {
+    fn reconcile_running_phases_auto_resumes_when_worktree_and_session_survive() {
         use crate::runplan::{RunPhase, RunPlan};
         use chrono::{TimeZone, Utc};
         use std::path::PathBuf;
 
         let dir = std::env::temp_dir().join(format!("loopdeck-runexec-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        let survived_worktree = dir.join("phase-one-worktree");
+        std::fs::create_dir_all(&survived_worktree).unwrap();
 
         let plan = RunPlan {
             id: "run-1".to_string(),
@@ -1098,10 +1065,13 @@ mod tests {
             environment: Default::default(),
             wall_clock_secs: 0,
             stall_policy: Default::default(),
+            max_concurrency: 4,
             phases: vec![
                 RunPhase {
                     execution_id: "p/1".into(),
                     status: RunPhaseStatus::Running,
+                    worktree_path: Some(survived_worktree),
+                    session_id: Some("sess-survived".into()),
                     interview: vec![],
                     interview_status: Default::default(),
                     depends_on: vec![],
@@ -1131,7 +1101,18 @@ mod tests {
         assert!(changed);
 
         let reloaded = runplan::load(&dir).unwrap().unwrap();
-        assert_eq!(reloaded.phases[0].status, RunPhaseStatus::Interrupted);
+        // Per the approved restart answer, both survivors mean auto-resume:
+        // the phase returns to Queued with its saved session pinned.
+        assert_eq!(reloaded.phases[0].status, RunPhaseStatus::Queued);
+        assert_eq!(
+            reloaded.phases[0].resume_session_id.as_deref(),
+            Some("sess-survived")
+        );
+        assert!(reloaded.phases[0]
+            .park_payload
+            .as_deref()
+            .unwrap()
+            .contains("resumed after app restart"));
         assert_eq!(reloaded.phases[1].status, RunPhaseStatus::Queued);
 
         // Idempotent: a second pass is a no-op.
@@ -1197,6 +1178,7 @@ mod tests {
             environment: Default::default(),
             wall_clock_secs: 0,
             stall_policy: StallPolicy::ContinueIndependent,
+            max_concurrency: 4,
             phases,
         }
     }
@@ -1375,6 +1357,7 @@ mod tests {
             environment: RunEnvironment::default(),
             wall_clock_secs: 0,
             stall_policy: StallPolicy::ContinueIndependent,
+            max_concurrency: 4,
             phases,
         }
     }
@@ -1559,31 +1542,77 @@ mod tests {
 
     #[test]
     fn state_machine_resume_after_restart() {
-        // Test the reconcile_running_phases behavior: a Running phase left
-        // on disk from a crash should be downgraded to Interrupted when the
-        // app restarts.
+        // A Running phase left on disk from a crash is auto-resumed when its
+        // worktree and saved provider session both survive; the dependent
+        // stays Queued and the scheduler gates it at run start.
 
         let dir = std::env::temp_dir().join(format!("loopdeck-sm-resume-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        let survived_worktree = dir.join("phase-one-worktree");
+        std::fs::create_dir_all(&survived_worktree).unwrap();
 
-        let plan = make_plan_with_statuses(vec![
+        let mut plan = make_plan_with_statuses(vec![
             ("phase1", RunPhaseStatus::Running, vec![]), // crashed mid-run
             ("phase2", RunPhaseStatus::Queued, vec!["phase1"]),
         ]);
+        plan.phases[0].worktree_path = Some(survived_worktree);
+        plan.phases[0].session_id = Some("sess-1".into());
         runplan::save(&dir, &plan).unwrap();
 
-        // Simulate app restart: reconcile should downgrade Running → Interrupted
         let changed = reconcile_running_phases(&dir).unwrap();
         assert!(changed);
 
         let reconciled = runplan::load(&dir).unwrap().unwrap();
-        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Interrupted);
+        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Queued);
+        assert_eq!(
+            reconciled.phases[0].resume_session_id.as_deref(),
+            Some("sess-1")
+        );
         assert_eq!(reconciled.phases[1].status, RunPhaseStatus::Queued);
 
-        // Second reconcile is a no-op
+        // Second reconcile is a no-op (nothing is Running any more).
         let changed_again = reconcile_running_phases(&dir).unwrap();
         assert!(!changed_again);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A crashed phase whose worktree did not survive parks with a reason
+    /// instead of being retried blindly.
+    #[test]
+    fn reconcile_parks_when_the_worktree_did_not_survive() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-sm-park-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![("phase1", RunPhaseStatus::Running, vec![])]);
+        plan.phases[0].worktree_path = Some(dir.join("gone-worktree"));
+        plan.phases[0].session_id = Some("sess-1".into());
+        runplan::save(&dir, &plan).unwrap();
+
+        assert!(reconcile_running_phases(&dir).unwrap());
+        let reconciled = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Parked);
+        let reason = reconciled.phases[0].park_payload.as_deref().unwrap();
+        assert!(reason.contains("worktree"), "{reason}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_requeues_waiting_phases_without_a_running_sibling() {
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-wait-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = make_plan_with_statuses(vec![
+            ("upstream", RunPhaseStatus::Completed, vec![]),
+            ("consumer", RunPhaseStatus::Waiting, vec!["upstream"]),
+        ]);
+        runplan::save(&dir, &plan).unwrap();
+        assert!(reconcile_running_phases(&dir).unwrap());
+        let reconciled = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Completed);
+        assert_eq!(reconciled.phases[1].status, RunPhaseStatus::Queued);
+        assert!(!reconcile_running_phases(&dir).unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1601,57 +1630,6 @@ mod tests {
             queued("consumer", &["upstream"]),
             queued("independent", &[]),
         ])
-    }
-
-    #[test]
-    fn recheck_marks_a_consumer_waiting_until_its_upstream_completes() {
-        let mut plan = handoff_chain();
-
-        assert!(recheck_waiting_phases(&mut plan).unwrap());
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Waiting);
-        assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
-        assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
-        // Idempotent once settled.
-        assert!(!recheck_waiting_phases(&mut plan).unwrap());
-
-        plan.phases[0].status = RunPhaseStatus::Completed;
-        assert!(recheck_waiting_phases(&mut plan).unwrap());
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Queued);
-    }
-
-    #[test]
-    fn recheck_parks_a_waiting_consumer_when_upstream_is_terminal_bad() {
-        let mut plan = handoff_chain();
-        plan.phases[0].status = RunPhaseStatus::Parked;
-        plan.phases[0].park_payload = Some("needs a human".into());
-
-        assert!(recheck_waiting_phases(&mut plan).unwrap());
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
-        assert!(plan.phases[1]
-            .park_payload
-            .as_deref()
-            .unwrap()
-            .contains("upstream handoff phase \"upstream\""));
-    }
-
-    #[test]
-    fn recheck_ignores_dependencies_without_a_handoff_topic() {
-        let mut plan = plan_with(vec![queued("a", &[]), queued("b", &["a"])]);
-        assert!(!recheck_waiting_phases(&mut plan).unwrap());
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Queued);
-    }
-
-    #[test]
-    fn recheck_settles_a_chained_handoff_in_one_call() {
-        let mut b = publishing("b", "b-plan");
-        b.depends_on = vec!["a".into()];
-        let mut plan = plan_with(vec![publishing("a", "a-plan"), b, queued("c", &["b"])]);
-        plan.phases[0].status = RunPhaseStatus::Completed;
-
-        recheck_waiting_phases(&mut plan).unwrap();
-        // b's publisher is done, so b is eligible; c waits on b.
-        assert_eq!(plan.phases[1].status, RunPhaseStatus::Queued);
-        assert_eq!(plan.phases[2].status, RunPhaseStatus::Waiting);
     }
 
     #[test]

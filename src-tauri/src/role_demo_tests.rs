@@ -27,7 +27,6 @@
 
 use crate::agents::{ClaudeEvent, TokenBudget};
 use crate::commands::agent::start_fresh_and_record_streaming_in_root_with_config;
-use crate::commands::run_queue::next_queued_batch;
 use crate::commands::state::resolve_agent_config_by_id;
 use crate::commands::state::AppState;
 use crate::config::{AgentConfig, GlobalConfig, NamedAgentConfig, RoleCharter};
@@ -193,9 +192,16 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
         .expect("plan present");
     let batch_count_before = plan.phases.len();
 
-    // ── Execute: the executor's own batching + resolution + spawn path. ──
-    while let Some(batch) = next_queued_batch(&plan) {
-        let assigned = plan.phases[batch[0]]
+    // ── Execute: one scheduler-selected phase turn at a time. ──
+    let mut executed = 0usize;
+    loop {
+        crate::scheduler::mark_waiting(&mut plan);
+        crate::scheduler::reconcile_gates(&mut plan);
+        let in_flight = HashSet::new();
+        let Some(&index) = crate::scheduler::select_ready(&plan, &in_flight, 1).first() else {
+            break;
+        };
+        let assigned = plan.phases[index]
             .assigned_agent
             .clone()
             .expect("demo phases are all assigned");
@@ -206,25 +212,23 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
             "charter must ride the config"
         );
 
-        let locs: Vec<(String, epic::LoopLocation)> = batch
-            .iter()
-            .map(|&idx| {
-                let execution_id = plan.phases[idx].execution_id.clone();
-                let loc =
-                    epic::find_loop_by_id(&repo, &execution_id).expect("fixture loop resolves");
-                (execution_id, loc)
-            })
-            .collect();
-        // One agent per batch — the Phase 4 split guarantee under test.
-        assert_eq!(batch.len(), 1, "each demo phase has its own agent");
+        let execution_id = plan.phases[index].execution_id.clone();
+        let loc: epic::LoopLocation =
+            epic::find_loop_by_id(&repo, &execution_id).expect("fixture loop resolves");
+        // One turn per phase — the scheduler never combines phases.
+        assert_eq!(
+            plan.phases
+                .iter()
+                .filter(|phase| phase.status == RunPhaseStatus::Running)
+                .count(),
+            0,
+            "each demo phase runs in its own turn"
+        );
 
-        for &idx in &batch {
-            plan.phases[idx].status = RunPhaseStatus::Running;
-        }
+        plan.phases[index].status = RunPhaseStatus::Running;
         runplan::save(&repo, &plan).expect("persist running state");
 
-        let (_, loc) = &locs[0];
-        let prompt = demo_prompt(&locs[0].0, &loc.title, &loc.phase);
+        let prompt = demo_prompt(&execution_id, &loc.title, &loc.phase);
         let channel: Channel<ClaudeEvent> = Channel::new(|_| Ok(()));
         let token_budget = TokenBudget::new(300_000);
         let started = Instant::now();
@@ -250,14 +254,13 @@ async fn role_demo_two_phase_plan_dev_builds_qa_verifies() {
             .as_ref()
             .map(|usage| usage.input_tokens.saturating_add(usage.output_tokens))
             .unwrap_or_default();
-        for &idx in &batch {
-            plan.phases[idx].status = RunPhaseStatus::Completed;
-            plan.phases[idx].token_usage = tokens;
-            plan.phases[idx].wall_clock_secs = started.elapsed().as_secs();
-        }
+        plan.phases[index].status = RunPhaseStatus::Completed;
+        plan.phases[index].token_usage = tokens;
+        plan.phases[index].wall_clock_secs = started.elapsed().as_secs();
+        executed += 1;
         runplan::save(&repo, &plan).expect("persist completed phase");
     }
-    assert_eq!(batch_count_before, 2);
+    assert_eq!(executed, batch_count_before, "both demo phases ran");
 
     // ── Assert the work really happened: dev built, QA verified. ──
     let math = std::fs::read_to_string(repo.join("math.js")).expect("dev turn wrote math.js");

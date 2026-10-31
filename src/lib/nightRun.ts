@@ -8,8 +8,8 @@ import type { AskUserQuestionSpec, Epic, PhaseVerdict, RunPhase, RunPhaseStatus,
 
 export const STATUS_LABEL: Record<RunPhaseStatus, string> = {
   queued: "queued",
+  waiting: "waiting",
   running: "running",
-  waiting: "waiting on upstream handoff",
   parked: "parked",
   delivered: "needs linking",
   completed: "completed",
@@ -20,8 +20,8 @@ export const STATUS_LABEL: Record<RunPhaseStatus, string> = {
 
 export const STATUS_COLOR: Record<RunPhaseStatus, string> = {
   queued: "var(--muted-foreground)",
-  running: "var(--primary)",
   waiting: "var(--muted-foreground)",
+  running: "var(--primary)",
   parked: "var(--warning)",
   delivered: "var(--warning)",
   completed: "var(--success)",
