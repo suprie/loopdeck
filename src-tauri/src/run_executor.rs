@@ -493,6 +493,39 @@ pub(crate) fn phases_blocked_by_park(
     }
 }
 
+/// Direct `depends_on` ancestors that publish a handoff artifact
+/// (`prd-agent-handoff` Phase 2). Only direct edges count: the handoff turn
+/// boundary is decided by the phase's own dependency list, not a transitive
+/// chain.
+pub(crate) fn publishing_ancestors<'a>(plan: &'a RunPlan, phase: &RunPhase) -> Vec<&'a RunPhase> {
+    phase
+        .depends_on
+        .iter()
+        .filter_map(|id| {
+            plan.phases
+                .iter()
+                .find(|candidate| &candidate.execution_id == id)
+        })
+        .filter(|ancestor| ancestor.handoff_topic.is_some())
+        .collect()
+}
+
+/// Park every still-`Waiting` phase when the run can make no further
+/// progress, so an unattended run never leaves one waiting forever. Returns
+/// `true` when anything changed.
+pub(crate) fn park_waiting_at_run_end(plan: &mut RunPlan, reason: &str) -> Result<bool, AppError> {
+    let mut changed = false;
+    for phase in &mut plan.phases {
+        if phase.status == RunPhaseStatus::Waiting {
+            phase.status =
+                crate::transition::transition_phase(phase.status, RunPhaseStatus::Parked)?;
+            phase.park_payload = Some(reason.to_string());
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 /// Build a fresh [`RunPlan`] from a picker selection (Phase 5): the phases
 /// the user checked, in the order they were selected, under one queue-time
 /// `stall_policy` and draft-PR consent. Every phase starts `Queued` /
@@ -583,17 +616,27 @@ pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
     let Some(mut plan) = runplan::load(repo_path)? else {
         return Ok(false);
     };
-    if !plan
-        .phases
-        .iter()
-        .any(|phase| phase.status == RunPhaseStatus::Running)
-    {
+    if !plan.phases.iter().any(|phase| {
+        matches!(
+            phase.status,
+            RunPhaseStatus::Running | RunPhaseStatus::Waiting
+        )
+    }) {
         return Ok(false);
     }
 
     let worktrees = crate::git::worktree_list(repo_path).unwrap_or_default();
     let mut changed = false;
     for phase in &mut plan.phases {
+        // A `Waiting` phase from a crashed run has no live turn to re-check
+        // it. Re-queue it so the next executor pass re-derives the hold and
+        // parks it if its upstream is terminal-bad, rather than waiting
+        // forever after a restart (`prd-agent-handoff` Phase 2).
+        if phase.status == RunPhaseStatus::Waiting {
+            phase.status =
+                crate::transition::transition_phase(phase.status, RunPhaseStatus::Queued)?;
+            changed = true;
+        }
         if phase.status != RunPhaseStatus::Running {
             continue;
         }
@@ -1079,6 +1122,26 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_requeues_waiting_phases_after_a_crash() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-runexec-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut plan = plan_with(vec![
+            queued("upstream", &[]),
+            queued("consumer", &["upstream"]),
+        ]);
+        plan.phases[0].handoff_topic = Some("upstream-plan".into());
+        plan.phases[1].status = RunPhaseStatus::Waiting;
+        runplan::save(&dir, &plan).unwrap();
+
+        assert!(reconcile_running_phases(&dir).unwrap());
+        let reloaded = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(reloaded.phases[1].status, RunPhaseStatus::Queued);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn reconcile_running_phases_noop_when_no_plan() {
         let dir = std::env::temp_dir().join(format!("loopdeck-runexec-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1533,6 +1596,52 @@ mod tests {
         assert!(reason.contains("worktree"), "{reason}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_requeues_waiting_phases_without_a_running_sibling() {
+        let dir =
+            std::env::temp_dir().join(format!("loopdeck-wait-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = make_plan_with_statuses(vec![
+            ("upstream", RunPhaseStatus::Completed, vec![]),
+            ("consumer", RunPhaseStatus::Waiting, vec!["upstream"]),
+        ]);
+        runplan::save(&dir, &plan).unwrap();
+        assert!(reconcile_running_phases(&dir).unwrap());
+        let reconciled = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Completed);
+        assert_eq!(reconciled.phases[1].status, RunPhaseStatus::Queued);
+        assert!(!reconcile_running_phases(&dir).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Waiting on handoff dependencies (`prd-agent-handoff` Phase 2) ───
+
+    fn publishing(id: &str, topic: &str) -> runplan::RunPhase {
+        let mut phase = queued(id, &[]);
+        phase.handoff_topic = Some(topic.into());
+        phase
+    }
+
+    fn handoff_chain() -> RunPlan {
+        plan_with(vec![
+            publishing("upstream", "upstream-plan"),
+            queued("consumer", &["upstream"]),
+            queued("independent", &[]),
+        ])
+    }
+
+    #[test]
+    fn park_waiting_at_run_end_parks_only_waiting_phases() {
+        let mut plan = handoff_chain();
+        plan.phases[1].status = RunPhaseStatus::Waiting;
+
+        assert!(park_waiting_at_run_end(&mut plan, "run ended").unwrap());
+        assert_eq!(plan.phases[1].status, RunPhaseStatus::Parked);
+        assert_eq!(plan.phases[1].park_payload.as_deref(), Some("run ended"));
+        assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
+        assert!(!park_waiting_at_run_end(&mut plan, "run ended").unwrap());
     }
 
     #[test]

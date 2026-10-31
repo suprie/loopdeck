@@ -15,6 +15,7 @@
 //! executor), not the mix of CLI + UI callers `execution.yaml` supports.
 
 use crate::error::AppError;
+use crate::handoff::HandoffLedgerEntry;
 use crate::limits;
 use crate::persist;
 use chrono::{DateTime, Utc};
@@ -349,6 +350,10 @@ pub struct RunReport {
     pub plan: RunPlan,
     pub phases: Vec<PhaseReportEntry>,
     pub audit: AuditSlice,
+    /// Handoffs attributed to this run (`prd-agent-handoff` Phase 3), filtered
+    /// from the project-wide ledger by `plan.id`.
+    #[serde(default)]
+    pub handoffs: Vec<HandoffLedgerEntry>,
 }
 
 impl RunReport {
@@ -377,7 +382,14 @@ impl RunReport {
             plan,
             phases,
             audit,
+            handoffs: Vec::new(),
         }
+    }
+
+    /// Attach the run-scoped handoff records loaded from the project ledger.
+    pub fn with_handoffs(mut self, handoffs: Vec<HandoffLedgerEntry>) -> Self {
+        self.handoffs = handoffs;
+        self
     }
 }
 
@@ -661,6 +673,23 @@ phases:
         assert_eq!(report.phases[0].wall_clock_secs, 600);
         assert_eq!(report.phases[3].token_usage, 500000);
         assert_eq!(report.phases[3].wall_clock_secs, 1800);
+    }
+
+    #[test]
+    fn waiting_status_roundtrips_and_derives_a_distinct_verdict() {
+        let phase = RunPhase {
+            execution_id: "x".into(),
+            status: RunPhaseStatus::Waiting,
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&phase).unwrap();
+        assert!(yaml.contains("status: waiting"));
+        let back: RunPhase = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.status, RunPhaseStatus::Waiting);
+
+        let (verdict, url) = derive_verdict(&phase);
+        assert_eq!(verdict, PhaseVerdict::Waiting);
+        assert!(url.is_none());
     }
 
     #[test]

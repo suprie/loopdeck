@@ -8,6 +8,8 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Next**: review and merge the parallel-scheduling draft PR; then run a real overnight plan with two disjoint phases to confirm concurrent draft PRs on the user's machine.
 
 ## Next Steps
+- [x] Resolve PR #113 against agent-handoff support on main; preserve bounded injection, citation attribution, and waiting-phase restart recovery.
+- [ ] Split `commands/run_queue.rs` and `run_executor.rs` (both exceed 1,500 lines).
 - [ ] Review & merge: https://github.com/suprie/loopdeck/pull/113
 - [x] `role-based-orchestration` / `prd-parallel-scheduling` — all six loops (one-turn-per-phase, parallel-batches, gated-start, restart-reconcile, budget-split, tests).
 - [x] Fix the Claude control_response schema and commit it.

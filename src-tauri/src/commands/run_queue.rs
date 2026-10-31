@@ -274,6 +274,80 @@ fn emit_phase_artifact(
     Ok(())
 }
 
+/// Load the upstream artifacts each consumer phase in `locs` must receive
+/// (`prd-agent-handoff` Phase 2). A missing or oversized artifact is an error
+/// so the executor parks the batch instead of improvising a replacement, per
+/// the contract's consumer obligations.
+fn handoff_injections(
+    root: &Path,
+    plan: &RunPlan,
+    locs: &[(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)],
+) -> Result<HashMap<String, Vec<handoff::InjectedArtifact>>, AppError> {
+    let mut injections = HashMap::new();
+    for (execution_id, _, _) in locs {
+        let phase = plan
+            .phases
+            .iter()
+            .find(|phase| phase.execution_id == *execution_id)
+            .ok_or_else(|| {
+                AppError::RunPlan(format!(
+                    "phase \"{execution_id}\" is missing from its run plan"
+                ))
+            })?;
+        let mut artifacts = Vec::new();
+        for ancestor in run_executor::publishing_ancestors(plan, phase) {
+            let Some(topic) = ancestor.handoff_topic.as_deref() else {
+                continue;
+            };
+            artifacts.push(handoff::InjectedArtifact {
+                topic: topic.to_string(),
+                artifact: handoff::load_for_injection(root, topic)?,
+            });
+        }
+        if !artifacts.is_empty() {
+            injections.insert(execution_id.clone(), artifacts);
+        }
+    }
+    Ok(injections)
+}
+
+/// Record one ledger entry per artifact injected into this batch's consumer
+/// phases (`prd-agent-handoff` Phase 3). Coverage-only: a missing or thin
+/// `## Handoff citations` block is recorded as `missing`/`partial`, never as a
+/// judgement of the consumer's prose.
+fn record_handoff_citations(
+    root: &Path,
+    plan: &RunPlan,
+    locs: &[(String, epic::LoopLocation, Vec<runplan::PinnedAnswer>)],
+    injections: &HashMap<String, Vec<handoff::InjectedArtifact>>,
+    response: &str,
+) {
+    let mut entries = Vec::new();
+    for (execution_id, _, _) in locs {
+        let Some(artifacts) = injections.get(execution_id) else {
+            continue;
+        };
+        let to_role = plan
+            .phases
+            .iter()
+            .find(|phase| phase.execution_id == *execution_id)
+            .and_then(|phase| phase.assigned_agent_name.clone())
+            .unwrap_or_else(|| "planner".to_string());
+        for injected in artifacts {
+            entries.push(handoff::HandoffLedgerEntry {
+                run_id: Some(plan.id.clone()),
+                from_role: injected.artifact.record.author_role.clone(),
+                to_role: to_role.clone(),
+                artifact_path: handoff::store_relative_path(&injected.topic),
+                citation: handoff::citation_result(&injected.artifact, response),
+            });
+        }
+    }
+    if let Err(error) = handoff::record_handoffs(root, &entries) {
+        warn!("could not record handoff attribution in the ledger: {error}");
+    }
+}
+
 /// Managed run worktrees live inside the repo (`.loopdeck/runs/`), so without
 /// an ignore rule every run shows up as untracked noise in the main worktree.
 /// Idempotently append the rule to `.gitignore` — the only file this touches.
@@ -829,7 +903,10 @@ pub async fn get_run_report(
     let plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
     let audit = build_audit_slice(&root, &plan).unwrap_or_default();
-    Ok(crate::runplan::RunReport::from_plan(plan, audit))
+    // Handoff attribution (`prd-agent-handoff` Phase 3): the ledger is
+    // project-wide, so scope it to this plan before handing it to the report.
+    let handoffs = handoff::handoffs_for_run(&root, &plan.id).unwrap_or_default();
+    Ok(crate::runplan::RunReport::from_plan(plan, audit).with_handoffs(handoffs))
 }
 
 /// Answer a parked phase's `AskUserQuestion`, pin the answers into its
@@ -1670,6 +1747,7 @@ struct PhaseTask {
     phase_timeout: Duration,
     run_timeout: Duration,
     resume_session_id: Option<String>,
+    injections: HashMap<String, Vec<handoff::InjectedArtifact>>,
 }
 
 struct PhaseTurnOutcome {
@@ -1683,6 +1761,7 @@ struct PhaseTurnOutcome {
     exceeded: bool,
     exceeded_message: String,
     result: Result<AgentResponse, AppError>,
+    injections: HashMap<String, Vec<handoff::InjectedArtifact>>,
 }
 
 /// Run one phase turn in its own task: bootstrap the phase worktree, spawn
@@ -1784,6 +1863,7 @@ async fn run_phase_turn(
         tokens,
         exceeded,
         exceeded_message: token_budget.exceeded_message(),
+        injections: task.injections,
         result,
     }
 }
@@ -2022,6 +2102,17 @@ fn apply_phase_outcome(
                         format!("handoff artifact emission failed: {error}"),
                     );
                 }
+                record_handoff_citations(
+                    root,
+                    plan,
+                    &[(
+                        execution_id.clone(),
+                        outcome.loc.clone(),
+                        plan.phases[index].interview.clone(),
+                    )],
+                    &outcome.injections,
+                    &response.result,
+                );
             }
             if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
                 // Retained before any delivery decision so a recoverable
@@ -2404,6 +2495,10 @@ async fn execute_run(
         }
     }
 
+    // A `Waiting` phase left after the loop has no run left to satisfy it:
+    // park it so it is visible in the morning report rather than waiting
+    // forever unattended (`prd-agent-handoff` Phase 2).
+    run_executor::park_waiting_at_run_end(&mut plan, "run ended with an unmet handoff dependency")?;
     plan.wall_clock_secs = run_started.elapsed().as_secs();
     finalize_worktree(&mut plan);
     runplan::save(root, &plan)?;
@@ -2486,7 +2581,22 @@ fn prepare_phase(
             worktree.display()
         );
     }
-    let prompt = build_phase_prompt(plan, index, &loc, &branch);
+    let injections = handoff_injections(
+        root,
+        plan,
+        &[(
+            execution_id.clone(),
+            loc.clone(),
+            plan.phases[index].interview.clone(),
+        )],
+    )
+    .map_err(|error| {
+        PhasePrepareError::Parked(format!("handoff artifact injection failed: {error}"))
+    })?;
+    let mut prompt = build_phase_prompt(plan, index, &loc, &branch);
+    if let Some(artifacts) = injections.get(&execution_id) {
+        prompt.push_str(&handoff::render_injection(&execution_id, artifacts));
+    }
     let resume_session_id = plan.phases[index].resume_session_id.clone();
     plan.phases[index].resume_session_id = None;
     begin_phase_execution(root, &execution_id, &loc)
@@ -2539,6 +2649,7 @@ fn prepare_phase(
         phase_timeout: resolved_phase_timeout(plan),
         run_timeout: resolved_run_timeout(plan).saturating_sub(run_started.elapsed()),
         resume_session_id,
+        injections,
     })
 }
 
@@ -2788,6 +2899,63 @@ mod unattended_tests {
         }
 
         assert_eq!(requeue_all_terminal_phases(&mut plan), 0);
+    }
+
+    #[test]
+    fn handoff_injections_preserve_the_publishers_snapshot_for_attribution() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-inject-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".loopdeck/handoffs")).unwrap();
+        let mut plan = parked_chain();
+        plan.phases[0].handoff_topic = Some("phase-a-plan".into());
+        let upstream = handoff::Artifact {
+            record: handoff::ArtifactRecord {
+                artifact: "phase-a-plan".into(),
+                author_role: "planner".into(),
+                phase: "phase-a".into(),
+                artifact_type: handoff::ArtifactType::Plan,
+                created: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+                summary: "Upstream plan.".into(),
+                cites: vec![],
+                path: PathBuf::new(),
+            },
+            body: "## Summary\nUpstream plan.\n\n## Requirements\n1. R1 do the thing.\n\n## Non-Goals\nNothing.".into(),
+        };
+        handoff::save_artifact(&dir, &upstream).unwrap();
+
+        let loc = epic::LoopLocation {
+            epic: "e".into(),
+            prd: "p".into(),
+            phase: "ph".into(),
+            title: "t".into(),
+        };
+        let locs = vec![("phase-b".into(), loc, vec![])];
+        let injections = handoff_injections(&dir, &plan, &locs)
+            .expect("consumer receives its publisher artifact");
+
+        let artifacts = &injections["phase-b"];
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].topic, "phase-a-plan");
+        assert!(artifacts[0].artifact.body.contains("R1 do the thing"));
+        let rendered = handoff::render_injection("phase-b", artifacts);
+        assert!(rendered.contains("R1 do the thing"));
+        assert!(rendered.contains("Handoff citations"));
+
+        // The shared store may change while a consumer turn is running.
+        // Attribution must use the exact snapshot injected into that turn.
+        std::fs::remove_file(dir.join(handoff::store_relative_path("phase-a-plan"))).unwrap();
+        plan.phases[1].assigned_agent_name = Some("reviewer".into());
+        record_handoff_citations(&dir, &plan, &locs, &injections, "No citations.");
+        let entries = handoff::handoffs_for_run(&dir, &plan.id).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].from_role, "planner");
+        assert_eq!(entries[0].to_role, "reviewer");
+        assert_eq!(entries[0].citation, handoff::CitationResult::Missing);
+        assert!(handoff::handoffs_for_run(&dir, "another-run")
+            .unwrap()
+            .is_empty());
+        assert!(handoff_injections(&dir, &plan, &locs).is_err());
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     // ── Handoff topics (`prd-agent-handoff` Phase 1) ─────────────────────
