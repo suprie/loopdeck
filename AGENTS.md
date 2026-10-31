@@ -4,8 +4,8 @@
 
 - **Frontend**: Tauri v2 + Vite + React 19 + TypeScript
 - **Backend**: Rust (src-tauri/)
-- **Storage**: `.loopdeck/project.yaml` (per-repo) + `~/.config/loopdeck/config.yaml` (global registry)
-- **Database**: None — local-first, offline-first
+- **Storage**: Repository-authored specs/memory + global YAML registry; mutable run plans and execution snapshots live outside repositories
+- **Database**: Per-user local SQLite operational store — local-first, offline-first
 
 ## Project Structure
 
@@ -38,7 +38,7 @@ loopdeck/
 
 ## Key Architecture Decisions
 
-- **State**: `Mutex<GlobalConfig>` managed by Tauri, serialized command execution
+- **State**: Tauri-managed `Mutex<GlobalConfig>`, per-session async locks, and centralized SQLite run/execution snapshots shared by linked worktrees
 - **Scanner**: `walkdir` with marker-file detection (`.git`, `Cargo.toml`, `package.json`, etc.)
 - **Config paths**: `directories` crate for XDG cross-platform resolution
 - **Frontend state**: Zustand with selector subscriptions, typed IPC wrappers (never raw `invoke()`)

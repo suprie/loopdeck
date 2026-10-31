@@ -62,7 +62,8 @@ fn chartered_claude_config() -> AgentConfig {
 /// child's cwd to the project path, so each test reads its own capture.
 const FAKE_CLAUDE: &str = concat!(
     "#!/bin/sh\n",
-    "printf '%s\\n' \"$@\" > claude-argv.txt\n",
+    "printf '%s\\n' \"$@\" > claude-argv.tmp\n",
+    "mv claude-argv.tmp claude-argv.txt\n",
     "exec cat > /dev/null\n",
 );
 
@@ -74,7 +75,8 @@ const FAKE_CLAUDE: &str = concat!(
 /// captured stdin line and then drop the session.
 const FAKE_CODEX: &str = concat!(
     "#!/bin/sh\n",
-    "printf '%s\\n' \"$@\" > codex-argv.txt\n",
+    "printf '%s\\n' \"$@\" > codex-argv.tmp\n",
+    "mv codex-argv.tmp codex-argv.txt\n",
     "while IFS= read -r line; do\n",
     "  printf '%s\\n' \"$line\" >> codex-stdin.jsonl\n",
     "  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n",
@@ -211,6 +213,7 @@ fn assert_claude_charter_argv(project_dir: &Path) {
         "## Allowed skills",
         "- loopdeck-prd-verifier",
         "## Output contract",
+        "ASD-STE100",
     ] {
         assert!(
             rendered.contains(expected),
@@ -279,10 +282,10 @@ async fn multi_agent_path_injects_charter_into_claude_argv() {
     assert_claude_charter_argv(&worktree);
 }
 
-// ── Negative: no charter → no injection ─────────────────────────────────────
+// ── No charter: shared writing policy still applies ─────────────────────────
 
 #[tokio::test]
-async fn charterless_agent_spawns_without_system_prompt_flag() {
+async fn charterless_agent_receives_shared_writing_policy() {
     let state = empty_state();
     let project = fresh_project_dir("charterless");
     let config = AgentConfig::default();
@@ -293,9 +296,10 @@ async fn charterless_agent_spawns_without_system_prompt_flag() {
     assert_eq!(session.lock().await.harness(), AgentHarness::Claude);
     let capture = read_capture(&project.join("claude-argv.txt"));
     assert!(
-        !capture.contains("--append-system-prompt"),
-        "charterless spawn must not inject, argv:\n{capture}"
+        capture.contains("--append-system-prompt") && capture.contains("ASD-STE100"),
+        "charterless spawn must receive writing guidance, argv:\n{capture}"
     );
+    assert!(!capture.contains("# Role charter"));
 }
 
 // ── Codex: charter prepended to the first task prompt ───────────────────────
@@ -366,6 +370,8 @@ async fn codex_path_prepends_charter_to_first_task_prompt() {
         turn_line.contains("You are the QA-role agent"),
         "charter persona must be rendered:\n{turn_line}"
     );
+    assert!(turn_line.contains("ASD-STE100"));
+    assert!(turn_line.contains("required output markers exactly"));
     // Sanity: the child really was the app-server fixture.
     let argv = read_capture(&project.join("codex-argv.txt"));
     assert!(argv.contains("app-server"), "argv:\n{argv}");

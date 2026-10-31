@@ -68,6 +68,25 @@ export function describeTool(name: string, rawInput: string): string {
   } catch {
     // Non-JSON tool input falls through to the raw value below.
   }
+  if (name.startsWith("Sub-agent ")) {
+    const parts: string[] = [];
+    if (typeof input.status === "string") parts.push(`call ${input.status}`);
+    if (typeof input.model === "string") parts.push(input.model);
+    const states = input.agentsStates;
+    const ids = Array.isArray(input.receiverThreadIds) ? input.receiverThreadIds : [];
+    const agentStates = states && typeof states === "object" && !Array.isArray(states)
+      ? states as Record<string, { status?: unknown }>
+      : {};
+    for (const id of new Set([...ids, ...Object.keys(agentStates)])) {
+      if (typeof id !== "string") continue;
+      const status = agentStates[id]?.status;
+      parts.push(`${id}: ${typeof status === "string" ? status : "status unknown"}`);
+    }
+    if (typeof input.prompt === "string" && input.prompt.trim()) {
+      parts.push(input.prompt.replace(/\s+/g, " ").trim().slice(0, 200));
+    }
+    return [name, ...parts].join(" · ");
+  }
   const str = (value: unknown): string =>
     typeof value === "string" ? value : JSON.stringify(value);
   const candidate =

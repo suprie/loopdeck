@@ -369,6 +369,11 @@ export async function answerParkedQuestion(
   });
 }
 
+/** Update a stopped run's limits while retaining all phase progress. */
+export async function updateRunBudgets(path: string, budgets: RunBudgets): Promise<RunPlan> {
+  return invoke<RunPlan>("update_run_budgets", { path, budgets });
+}
+
 /** Requeue a retryable terminal phase (plus dependents parked solely because of it). */
 export async function requeueRunPhase(
   path: string,

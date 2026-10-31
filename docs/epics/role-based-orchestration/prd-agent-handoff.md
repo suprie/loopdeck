@@ -2,7 +2,7 @@
 prd: prd-agent-handoff
 epic: role-based-orchestration
 milestone: "0.6.0"
-status: proposed
+status: completed
 description: >
   A file-based handoff store under .loopdeck/: upstream phases emit contract
   artifacts, dependent phases get them injected into their prompts, phases
@@ -86,21 +86,21 @@ numbered items) bound downstream injection.
 
 ### Phase 1 — Handoff store
 
-- [ ] `agent-handoff/store-model` Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
-- [ ] `agent-handoff/artifact-write` Emit each finished phase's contract artifact into the store from the run executor
+- [x] `agent-handoff/store-model` Define the .loopdeck handoff store layout and artifact record (author role, phase, type, path) with load/save helpers
+- [x] `agent-handoff/artifact-write` Emit each finished phase's contract artifact into the store from the run executor
 
 ### Phase 2 — Downstream injection + waiting
 
-- [ ] `agent-handoff/downstream-injection` Inject upstream artifacts into a dependent phase's prompt with bounded size and contract citation
-- [ ] `agent-handoff/waiting-status` Wire the unused Waiting status so phases with unmet handoff dependencies wait instead of parking
+- [x] `agent-handoff/downstream-injection` Inject upstream artifacts into a dependent phase's prompt with bounded size and contract citation
+- [x] `agent-handoff/waiting-status` Wire the unused Waiting status so phases with unmet handoff dependencies wait instead of parking
 
 ### Phase 3 — Report + audit
 
-- [ ] `agent-handoff/report-attribution` Record every handoff (from-role, to-role, artifact path, citation check) in the run report
+- [x] `agent-handoff/report-attribution` Record every handoff (from-role, to-role, artifact path, citation check) in the run report
 
 ### Phase 4 — Tests/verification
 
-- [ ] `agent-handoff/tests` Add Rust tests for store round-trips, injection bounds, and Waiting transitions; verify against the spike's contract
+- [x] `agent-handoff/tests` Add Rust tests for store round-trips, injection bounds, and Waiting transitions; verify against the spike's contract
 
 ## Open Questions
 
