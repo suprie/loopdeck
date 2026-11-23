@@ -644,11 +644,10 @@ pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
             .worktree_path
             .clone()
             .or_else(|| plan.environment.worktree_path.clone());
-        let worktree_survives = worktree
-            .as_ref()
-            .is_some_and(|path| path.is_dir() || worktrees.iter().any(|known| known == path));
-        let session_survives =
-            phase.session_id.is_some() || crate::conversation::last_session_id(repo_path).is_some();
+        let worktree_survives = worktree.as_ref().is_some_and(|path| {
+            path.is_dir() && (worktrees.is_empty() || worktrees.contains(path))
+        });
+        let session_survives = phase.session_id.as_ref().is_some_and(|id| !id.is_empty());
         match crate::scheduler::classify_interrupted_phase(worktree_survives, session_survives) {
             crate::scheduler::ResumeDecision::AutoResume => {
                 phase.status =
@@ -1596,6 +1595,43 @@ mod tests {
         assert!(reason.contains("worktree"), "{reason}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restart_does_not_borrow_a_session_from_another_phase() {
+        let dir = std::env::temp_dir().join(format!("loopdeck-restart-{}", uuid::Uuid::new_v4()));
+        let worktree = dir.join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::conversation::append_turn(
+            &dir,
+            &crate::conversation::ConversationTurn::assistant(
+                "previous phase",
+                "another-session".into(),
+                false,
+                None,
+                0,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+
+        let mut plan = make_plan_with_statuses(vec![("phase1", RunPhaseStatus::Running, vec![])]);
+        plan.phases[0].worktree_path = Some(worktree);
+        runplan::save(&dir, &plan).unwrap();
+
+        assert!(reconcile_running_phases(&dir).unwrap());
+        let reconciled = runplan::load(&dir).unwrap().unwrap();
+        assert_eq!(reconciled.phases[0].status, RunPhaseStatus::Parked);
+        assert!(reconciled.phases[0].resume_session_id.is_none());
+        assert!(reconciled.phases[0]
+            .park_payload
+            .as_deref()
+            .unwrap()
+            .contains("saved provider session"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

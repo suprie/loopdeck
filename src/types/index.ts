@@ -452,7 +452,7 @@ export interface DeliveryReportResponse {
    * starts fresh from the default branch (`clean-handoff`). */
   handoff?: HandoffRecord;
   /** Recoverable delivery awaiting the idempotent retry (`retry-recovery`). */
-  retry?: RetryState;
+  retries: RetryState[];
 }
 
 /** Mirrors Rust `handoff::HandoffRecord`. */

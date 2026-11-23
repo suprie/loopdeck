@@ -253,6 +253,23 @@ pub struct RunPlan {
     pub phases: Vec<RunPhase>,
 }
 
+impl RunPlan {
+    pub(crate) fn set_dependencies(
+        &mut self,
+        mut dependencies: std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<(), AppError> {
+        for phase in &mut self.phases {
+            phase.depends_on = dependencies.remove(&phase.execution_id).unwrap_or_default();
+        }
+        if let Some(id) = dependencies.keys().next() {
+            return Err(AppError::RunPlan(format!(
+                "dependencies reference phase {id:?}, which is not part of this plan"
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn default_max_concurrency() -> u32 {
     limits::DEFAULT_RUN_MAX_CONCURRENCY
 }

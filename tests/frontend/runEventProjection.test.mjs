@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   emptyRunEventProjection,
   projectRunEvent,
+  projectRunQueueEvent,
 } from "../../src/lib/runEventProjection.ts";
 
 let sequence = 0;
@@ -234,4 +235,41 @@ test("unsupported capability gaps do not disturb streaming state", () => {
     event({ type: "unsupported", capability: "plan_approval", detail_redacted: null }),
   );
   assert.equal(after, before);
+});
+
+test("parallel phase events preserve sibling text, busy state, and pending controls", () => {
+  const phases = new Map();
+  function send(phase, payload) {
+    return projectRunQueueEvent(phases, {
+      execution_id: phase,
+      project_path: "/repo",
+      control_path: `/repo/runs/${phase}`,
+      event: event(payload),
+    });
+  }
+
+  send("a", { type: "content", kind: "text", text: "phase A" });
+  const whileBothRun = send("b", { type: "content", kind: "text", text: "phase B" });
+  assert.deepEqual(whileBothRun.blocks, [{ type: "text", text: "phase A" }]);
+  send("b", {
+    type: "decision",
+    decision_id: "approve-b",
+    kind: "approval",
+    state: "pending",
+    summary: "approval pending",
+    detail_redacted: JSON.stringify({ tool_name: "Edit", input: { file_path: "b.rs" } }),
+  });
+
+  const afterA = send("a", { type: "terminal", outcome: "completed" });
+  assert.equal(afterA.busy, true);
+  assert.deepEqual(afterA.blocks, [{ type: "text", text: "phase B" }]);
+  assert.equal(afterA.permission.controlPath, "/repo/runs/b");
+
+  const afterB = send("b", { type: "terminal", outcome: "completed" });
+  assert.equal(afterB.busy, false);
+  assert.equal(afterB.permission, null);
+  assert.equal(afterB.result.text, "phase B");
+
+  send("", { type: "terminal", outcome: "completed" });
+  assert.equal(phases.size, 0);
 });

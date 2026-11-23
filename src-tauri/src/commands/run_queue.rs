@@ -26,7 +26,9 @@ use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::handoff;
 use crate::limits;
-use crate::provider_event::{RunEvent, RunEventEnvelope};
+use crate::provider_event::{
+    Provider, RunEvent, RunEventEnvelope, RunEventPayload, TerminalOutcome,
+};
 use crate::provider_normalize::RunEventChannel;
 use crate::run_executor::{
     self, build_batch_interview_prompt, build_codex_batch_interview_prompt,
@@ -66,6 +68,8 @@ fn normalized_run_channel(
     app: AppHandle,
     project_path: String,
     execution_id: String,
+    control_path: String,
+    on_session_started: impl Fn(String) + Send + Sync + 'static,
 ) -> Channel<RunEvent> {
     Channel::new(move |event| {
         let event = match event.deserialize::<RunEvent>() {
@@ -75,11 +79,24 @@ fn normalized_run_channel(
                 return Ok(());
             }
         };
+        if let RunEventPayload::Started {
+            session_id: Some(id),
+            ..
+        } = &event.payload
+        {
+            if !id.is_empty() {
+                on_session_started(match event.provider {
+                    Provider::Codex => format!("codex:{id}"),
+                    Provider::Claude => id.clone(),
+                });
+            }
+        }
         if let Err(error) = app.emit(
             RUN_EVENT_TOPIC,
             RunEventEnvelope {
                 project_path: project_path.clone(),
                 execution_id: execution_id.clone(),
+                control_path: Some(control_path.clone()),
                 event,
             },
         ) {
@@ -102,7 +119,35 @@ pub struct RunQueueStatus {
     active: bool,
 }
 
-fn emit_run_queue_terminal(app: &AppHandle, root: &Path, result: String, is_error: bool) {
+fn emit_run_queue_terminal(
+    app: &AppHandle,
+    root: &Path,
+    run_id: &str,
+    result: String,
+    is_error: bool,
+) {
+    let _ = app.emit(
+        RUN_EVENT_TOPIC,
+        RunEventEnvelope {
+            project_path: root.to_string_lossy().into_owned(),
+            execution_id: String::new(),
+            control_path: None,
+            event: RunEvent::new(
+                run_id,
+                Uuid::new_v4().to_string(),
+                Utc::now(),
+                Provider::Claude,
+                RunEventPayload::Terminal {
+                    outcome: if is_error {
+                        TerminalOutcome::Error
+                    } else {
+                        TerminalOutcome::Completed
+                    },
+                    message_redacted: Some(crate::provider_normalize::redact_text(&result)),
+                },
+            ),
+        },
+    );
     let event = ClaudeEvent::Result {
         text: String::new(),
         thinking: None,
@@ -568,11 +613,10 @@ fn apply_handoff_topics(
 /// picker set one) is validated against the agent roster the same way, so a
 /// deleted profile is caught at queue time — the executor's missing-agent
 /// park is only the overnight safety net for entries removed between plan
-/// creation and execution. `depends_on` defaults to the authored
-/// selection order — each phase depends on its immediate predecessor — per
-/// the PRD's "linear chain, no editor" v1 design; there is no edge editor in
-/// this phase. Every phase starts `Queued`/`Pending` (interview unanswered),
-/// so `queue_run` still gates on the pre-flight interview as usual.
+/// creation and execution. If no dependency map is supplied, each phase
+/// depends on its predecessor in selection order. An explicit map names all
+/// dependency edges, so a missing entry marks an independent phase.
+/// Every phase starts queued and awaiting a pre-flight interview.
 ///
 /// Replaces any existing plan outright — a fresh picker selection is always
 /// meant to start a new plan, not merge into a stale one — but refuses while
@@ -596,6 +640,7 @@ pub async fn create_run_plan(
     // Phase 2). `None` keeps the four-phase default; the picker may set any
     // value in 1..=MAX_RUN_MAX_CONCURRENCY.
     max_concurrency: Option<u32>,
+    dependencies: Option<HashMap<String, Vec<String>>>,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
@@ -703,6 +748,9 @@ pub async fn create_run_plan(
         &execution_ids,
         handoff_topics.unwrap_or_default(),
     )?;
+    if let Some(dependencies) = dependencies {
+        plan.set_dependencies(dependencies)?;
+    }
     plan.budgets = budgets;
     plan.max_concurrency = max_concurrency;
     // Reject a cycle before it is persisted: a plan with one would hold every
@@ -782,9 +830,15 @@ pub async fn queue_run(
     let cancel = Arc::clone(&handle.cancel);
     {
         let mut handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+        if handles.contains_key(&root) {
+            return Err(AppError::RunPlan(
+                "a run is already in progress for this project".into(),
+            ));
+        }
         handles.insert(root.clone(), handle);
     }
 
+    let run_id = plan.id;
     let app_handle = app.clone();
     let run_root = root.clone();
     tokio::spawn(async move {
@@ -800,10 +854,10 @@ pub async fn queue_run(
                 (error.to_string(), true)
             }
         };
+        emit_run_queue_terminal(&app_handle, &run_root, &run_id, terminal_message, is_error);
         if let Ok(mut handles) = state.run_handles.lock() {
             handles.remove(&run_root);
         };
-        emit_run_queue_terminal(&app_handle, &run_root, terminal_message, is_error);
     });
 
     info!("queued run started for {}", root.display());
@@ -1800,9 +1854,10 @@ async fn run_phase_turn(
                 false,
                 task.resume_session_id.as_deref(),
             );
+            let elapsed = started.elapsed();
             let (watchdog_timeout, watchdog_reason) = scheduler::phase_watchdog(
-                task.phase_timeout,
-                run_remaining.saturating_sub(started.elapsed()),
+                task.phase_timeout.saturating_sub(elapsed),
+                run_remaining.saturating_sub(elapsed),
             );
             info!(
                 target: "loopdeck::run_queue",
@@ -2236,6 +2291,9 @@ fn apply_phase_outcome(
                 // Clean handoff: this branch, PR, and worktree stay for
                 // review; the next phase/run starts from the default branch.
                 record_handoff(root, &outcome.branch, &outcome.worktree, &url);
+                if let Err(error) = delivery_retry::clear_branch(root, &outcome.branch) {
+                    warn!("could not clear the completed delivery retry: {error}");
+                }
                 return Ok(());
             }
 
@@ -2328,13 +2386,14 @@ async fn execute_run(
     runplan::save(root, &plan)?;
 
     let mut tasks: tokio::task::JoinSet<PhaseTurnOutcome> = tokio::task::JoinSet::new();
-    let mut running: HashMap<usize, PathBuf> = HashMap::new();
+    let mut running: HashMap<tokio::task::Id, (usize, PathBuf)> = HashMap::new();
+    let (session_started, mut session_updates) = tokio::sync::mpsc::unbounded_channel();
 
     loop {
         plan.wall_clock_secs = run_started.elapsed().as_secs();
 
         if cancel.load(Ordering::SeqCst) {
-            for worktree in running.values() {
+            for (_, worktree) in running.values() {
                 let _ = terminate_session(state, worktree);
                 let _ = fire_interrupt(state, worktree);
             }
@@ -2345,7 +2404,7 @@ async fn execute_run(
             while tasks.join_next().await.is_some() {}
             // Aborting a task after it inserted its session leaves the child
             // in the cache map; evict again so no orphan process survives.
-            for worktree in running.values() {
+            for (_, worktree) in running.values() {
                 let _ = terminate_session(state, worktree);
             }
             notify_run_terminal(app, root, "Selasar run killed", "Run was cancelled");
@@ -2353,7 +2412,7 @@ async fn execute_run(
         }
 
         if run_started.elapsed() >= resolved_run_timeout(&plan) {
-            for worktree in running.values() {
+            for (_, worktree) in running.values() {
                 let _ = terminate_session(state, worktree);
             }
             stop_unfinished_phases(&mut plan, "total run wall-clock budget exceeded");
@@ -2361,7 +2420,7 @@ async fn execute_run(
             runplan::save(root, &plan)?;
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
-            for worktree in running.values() {
+            for (_, worktree) in running.values() {
                 let _ = terminate_session(state, worktree);
             }
             notify_run_terminal(
@@ -2380,54 +2439,65 @@ async fn execute_run(
             runplan::save(root, &plan)?;
         }
 
-        // Fill spare concurrency slots with ready phases.
+        // Recompute readiness after each preparation: a failure can park a
+        // previously eligible phase or leave another independent phase ready.
         let max = plan.max_concurrency.max(1) as usize;
-        let slots = max.saturating_sub(running.len());
-        if slots > 0 {
+        while running.len() < max {
+            if cancel.load(Ordering::SeqCst) || run_started.elapsed() >= resolved_run_timeout(&plan)
+            {
+                break;
+            }
             let in_flight: HashSet<String> = running
-                .keys()
-                .map(|&index| plan.phases[index].execution_id.clone())
+                .values()
+                .map(|(index, _)| plan.phases[*index].execution_id.clone())
                 .collect();
-            for index in scheduler::select_ready(&plan, &in_flight, slots) {
-                match prepare_phase(app, state, root, &mut plan, index, run_started) {
-                    Ok(task) => {
-                        let task_index = task.index;
-                        let worktree = task.worktree.clone();
-                        let app_handle = app.clone();
-                        let run_root = root.to_path_buf();
-                        let cancel_flag = Arc::clone(cancel);
-                        plan.phases[index].status = RunPhaseStatus::Running;
-                        plan.phases[index].park_payload = None;
-                        runplan::save(root, &plan)?;
-                        running.insert(task_index, worktree);
-                        tasks.spawn(async move {
-                            let state = app_handle.state::<AppState>();
-                            run_phase_turn(&state, &run_root, &cancel_flag, task).await
-                        });
-                    }
-                    Err(error) => {
-                        // Preparation failure is local to this phase. A missing
-                        // roster entry parks (recoverable via requeue); any
-                        // other preparation error fails the phase. Either way
-                        // its dependents fail and independent phases continue.
-                        let (status, reason) = match error {
-                            PhasePrepareError::Parked(reason) => (RunPhaseStatus::Parked, reason),
-                            PhasePrepareError::Failed(reason) => (
-                                RunPhaseStatus::Failed,
-                                format!("phase preparation failed: {reason}"),
-                            ),
-                        };
-                        let execution_id = plan.phases[index].execution_id.clone();
-                        plan.phases[index].status = status;
-                        plan.phases[index].park_payload = Some(reason.clone());
-                        plan.environment.worktree_kept = true;
-                        scheduler::fail_dependents(&mut plan, &execution_id, &reason);
-                        runplan::save(root, &plan)?;
-                    }
+            let Some(index) = scheduler::select_ready(&plan, &in_flight, 1)
+                .first()
+                .copied()
+            else {
+                break;
+            };
+            let started = session_started.clone();
+            match prepare_phase(app, state, root, &mut plan, index, run_started, move |id| {
+                let _ = started.send((index, id));
+            }) {
+                Ok(task) => {
+                    let worktree = task.worktree.clone();
+                    let app_handle = app.clone();
+                    let run_root = root.to_path_buf();
+                    let cancel_flag = Arc::clone(cancel);
+                    let phase = &mut plan.phases[index];
+                    phase.session_id.clone_from(&task.resume_session_id);
+                    phase.status = RunPhaseStatus::Running;
+                    phase.park_payload = None;
+                    runplan::save(root, &plan)?;
+                    let task = tasks.spawn(async move {
+                        let state = app_handle.state::<AppState>();
+                        run_phase_turn(&state, &run_root, &cancel_flag, task).await
+                    });
+                    running.insert(task.id(), (index, worktree));
+                }
+                Err(error) => {
+                    let (status, reason) = match error {
+                        PhasePrepareError::Parked(reason) => (RunPhaseStatus::Parked, reason),
+                        PhasePrepareError::Failed(reason) => (
+                            RunPhaseStatus::Failed,
+                            format!("phase preparation failed: {reason}"),
+                        ),
+                    };
+                    let execution_id = plan.phases[index].execution_id.clone();
+                    plan.phases[index].status = status;
+                    plan.phases[index].park_payload = Some(reason.clone());
+                    plan.environment.worktree_kept = true;
+                    scheduler::fail_dependents(&mut plan, &execution_id, &reason);
+                    runplan::save(root, &plan)?;
                 }
             }
         }
 
+        if cancel.load(Ordering::SeqCst) || run_started.elapsed() >= resolved_run_timeout(&plan) {
+            continue;
+        }
         if running.is_empty() {
             if !scheduler::has_active_phases(&plan) {
                 break;
@@ -2458,16 +2528,24 @@ async fn execute_run(
         // Wait for one phase to finish, but wake periodically so cancel and
         // the total-run cap stay responsive while long turns run.
         tokio::select! {
-            joined = tasks.join_next() => {
+            biased;
+            Some((index, id)) = session_updates.recv() => {
+                let phase = &mut plan.phases[index];
+                if phase.status == RunPhaseStatus::Running && phase.session_id.as_ref() != Some(&id) {
+                    phase.session_id = Some(id);
+                    runplan::save(root, &plan)?;
+                }
+            }
+            joined = tasks.join_next_with_id() => {
                 match joined {
-                    Some(Ok(outcome)) => {
-                        running.remove(&outcome.index);
+                    Some(Ok((task_id, outcome))) => {
+                        running.remove(&task_id);
                         if let Err(error) =
                             apply_phase_outcome(app, state, root, &mut plan, run_started, outcome)
                         {
                             // Bookkeeping failure is fatal for the run, but
                             // sibling turns must not be left orphaned.
-                            for worktree in running.values() {
+                            for (_, worktree) in running.values() {
                                 let _ = terminate_session(state, worktree);
                             }
                             tasks.abort_all();
@@ -2476,17 +2554,17 @@ async fn execute_run(
                         }
                     }
                     Some(Err(join_error)) => {
-                        // A panicked turn task is unrecoverable for the phases
-                        // it owned; their statuses cannot be trusted.
-                        let reason = format!("phase task failed unexpectedly: {join_error}");
-                        for (index, _) in running.drain() {
+                        if let Some((index, worktree)) = running.remove(&join_error.id()) {
+                            let _ = terminate_session(state, &worktree);
+                            let reason = format!("phase task failed unexpectedly: {join_error}");
                             plan.phases[index].status = RunPhaseStatus::Failed;
                             plan.phases[index].park_payload = Some(reason.clone());
                             let execution_id = plan.phases[index].execution_id.clone();
                             scheduler::fail_dependents(&mut plan, &execution_id, &reason);
+                            plan.environment.worktree_kept = true;
+                            runplan::save(root, &plan)?;
+                            end_phase_execution(root, &execution_id, reason)?;
                         }
-                        plan.environment.worktree_kept = true;
-                        runplan::save(root, &plan)?;
                     }
                     None => {}
                 }
@@ -2553,6 +2631,7 @@ fn prepare_phase(
     plan: &mut RunPlan,
     index: usize,
     run_started: Instant,
+    on_session_started: impl Fn(String) + Send + Sync + 'static,
 ) -> Result<PhaseTask, PhasePrepareError> {
     let execution_id = plan.phases[index].execution_id.clone();
     let Some(loc) = epic::find_loop_by_id(root, &execution_id) else {
@@ -2631,6 +2710,8 @@ fn prepare_phase(
             app.clone(),
             root.to_string_lossy().into_owned(),
             execution_id.clone(),
+            worktree.to_string_lossy().into_owned(),
+            on_session_started,
         ),
     ));
 

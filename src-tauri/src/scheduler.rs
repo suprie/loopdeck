@@ -472,6 +472,32 @@ mod tests {
     }
 
     #[test]
+    fn explicit_plan_dependencies_make_independent_phases_ready() {
+        let mut plan = crate::run_executor::build_run_plan(
+            "parallel".into(),
+            PathBuf::from("/repo"),
+            chrono::Utc::now(),
+            &["first".into(), "second".into(), "consumer".into()],
+            crate::runplan::StallPolicy::ContinueIndependent,
+            false,
+            &[],
+        );
+        assert_eq!(select_ready(&plan, &HashSet::new(), 4), vec![0]);
+
+        plan.set_dependencies(std::collections::HashMap::from([(
+            "consumer".into(),
+            vec!["first".into(), "second".into()],
+        )]))
+        .unwrap();
+        validate_dependency_graph(&plan.phases).unwrap();
+        assert_eq!(select_ready(&plan, &HashSet::new(), 4), vec![0, 1]);
+
+        plan.phases[0].status = RunPhaseStatus::Failed;
+        fail_dependents(&mut plan, "first", "could not prepare phase");
+        assert_eq!(select_ready(&plan, &HashSet::new(), 1), vec![1]);
+    }
+
+    #[test]
     fn diamond_graph_validates_and_orders_roots_first() {
         let mut plan = diamond();
         validate_dependency_graph(&plan.phases).expect("diamond is acyclic");

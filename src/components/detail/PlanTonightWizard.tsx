@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, Moon } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../../lib/tauri";
-import { dependencyLabel, hasQueueablePhases } from "../../lib/nightRun";
+import { hasQueueablePhases, phasePredecessor } from "../../lib/nightRun";
 import { buildIdToTitle } from "./EpicsPanel";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
 import {
@@ -108,6 +108,7 @@ export function PlanTonightWizard({
 }: PlanTonightWizardProps) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [selected, setSelected] = useState<string[]>([]);
+  const [predecessorByPhase, setPredecessorByPhase] = useState<Record<string, string>>({});
   /** Per-phase agent assignment (prd-role-foundations Phase 4):
    *  executionId → roster id. Absent = the default agent. */
   const [agentByPhase, setAgentByPhase] = useState<Record<string, string>>({});
@@ -147,6 +148,7 @@ export function PlanTonightWizard({
     if (open) return;
     setStep(1);
     setSelected([]);
+    setPredecessorByPhase({});
     setAgentByPhase({});
     setDraftPrAuthorized(true);
     setCreating(false);
@@ -235,7 +237,12 @@ export function PlanTonightWizard({
         budgetsFromInputs(),
         assignmentsFromSelection(),
         [],
-        Number(maxConcurrency),
+        concurrency,
+        Object.fromEntries(selected.map((id, index) => {
+          const earlier = selected.slice(0, index);
+          const predecessor = phasePredecessor(earlier, predecessorByPhase[id]);
+          return [id, predecessor ? [predecessor] : []];
+        })),
       );
       setPlan(created);
       setStep(2);
@@ -383,6 +390,10 @@ export function PlanTonightWizard({
             <StepPhases
               entries={entries}
               selected={selected}
+              predecessorByPhase={predecessorByPhase}
+              onSetPredecessor={(id, predecessor) =>
+                setPredecessorByPhase((previous) => ({ ...previous, [id]: predecessor }))
+              }
               idToTitle={idToTitle}
               roster={roster}
               agentByPhase={agentByPhase}
@@ -491,6 +502,8 @@ export function PlanTonightWizard({
 function StepPhases({
   entries,
   selected,
+  predecessorByPhase,
+  onSetPredecessor,
   idToTitle,
   roster,
   agentByPhase,
@@ -511,6 +524,8 @@ function StepPhases({
 }: {
   entries: PickerEntry[];
   selected: string[];
+  predecessorByPhase: Record<string, string>;
+  onSetPredecessor: (id: string, predecessor: string) => void;
   idToTitle: Record<string, string>;
   roster: NamedAgentConfig[];
   agentByPhase: Record<string, string>;
@@ -534,11 +549,14 @@ function StepPhases({
     <div className="space-y-4">
       <div>
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Phases — check in run order
+          Phases
         </div>
         <ul className="space-y-0.5">
           {entries.map(({ loop, group }) => {
-            const index = selected.indexOf(loop.id!);
+            const id = loop.id!;
+            const index = selected.indexOf(id);
+            const earlier = selected.slice(0, Math.max(index, 0));
+            const predecessor = phasePredecessor(earlier, predecessorByPhase[id]);
             const showGroup = group !== lastGroup;
             lastGroup = group;
             return (
@@ -555,18 +573,29 @@ function StepPhases({
                     onChange={() => onToggle(loop.id!)}
                     className="mt-0.5 size-3.5"
                   />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-foreground">{loop.title}</span>
-                    {index !== -1 && (
-                      <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
-                        <span>
-                          <span className="mr-1 font-mono">{index + 1}.</span>
-                          {dependencyLabel(index, selected, idToTitle)}
-                        </span>
-                      </span>
-                    )}
-                  </span>
+                  <span className="min-w-0 flex-1 text-foreground">{loop.title}</span>
                 </label>
+                {index > 0 && (
+                  <div className="mb-1 ml-6 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <span className="shrink-0">Starts after</span>
+                    <Select
+                      value={predecessor ?? "independent"}
+                      onValueChange={(value) => onSetPredecessor(id, value === "independent" ? "" : value)}
+                    >
+                      <SelectTrigger aria-label={`Dependency for ${loop.title}`} className="h-5 w-40 gap-1 rounded px-1.5 text-[10px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="independent">No dependency</SelectItem>
+                        {earlier.map((phaseId) => (
+                          <SelectItem key={phaseId} value={phaseId}>
+                            {idToTitle[phaseId] ?? phaseId}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 {/* Per-phase staffing (prd-role-foundations Phase 4): which
                     roster agent runs this phase. Kept outside the label so
                     picker clicks never toggle the checkbox. */}

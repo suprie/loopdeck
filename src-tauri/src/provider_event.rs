@@ -198,13 +198,16 @@ pub struct RunEvent {
 /// Transport envelope for the app-wide additive stream.
 ///
 /// `event.run_id` identifies the LoopDeck run; `project_path` routes the
-/// stream to the frontend's per-project stores, and `execution_id` names the
-/// queued phase batch that produced it.
+/// stream to the frontend, and `execution_id` identifies the phase. An empty
+/// execution id is reserved for the queue-level terminal.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "../../src/types/generated/")]
 pub struct RunEventEnvelope {
     pub project_path: String,
     pub execution_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control_path: Option<String>,
     pub event: RunEvent,
 }
 

@@ -2,8 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { RunEventEnvelope } from "../types/runEvent";
 import {
-  emptyRunEventProjection,
-  projectRunEvent,
+  projectRunQueueEvent,
   type RunEventProjectionState,
 } from "../lib/runEventProjection";
 import { usePendingInteractions } from "../store/pendingInteractions";
@@ -29,18 +28,25 @@ const RUN_EVENT = "run-event";
 export function useRunQueueEvents() {
   useEffect(() => {
     let disposed = false;
-    // Projection state is per project and survives navigation with this hook.
-    const projections = new Map<string, RunEventProjectionState>();
+    const projections = new Map<string, {
+      runId: string;
+      phases: Map<string, RunEventProjectionState>;
+    }>();
 
     const unlisten = listen<RunEventEnvelope>(RUN_EVENT, ({ payload }) => {
       if (disposed) return;
 
       const projectPath = payload.project_path;
-      const previous = projections.get(projectPath) ?? emptyRunEventProjection();
-      const next = projectRunEvent(previous, payload.event);
-      // Duplicate delivery / unsupported payloads return the same reference.
-      if (next === previous) return;
-      projections.set(projectPath, next);
+      const current = projections.get(projectPath);
+      const runId = payload.event.run_id;
+      if (current && current.runId !== runId && payload.execution_id === "") return;
+      const phases = current?.runId === runId
+        ? current.phases
+        : new Map<string, RunEventProjectionState>();
+      const next = projectRunQueueEvent(phases, payload);
+      if (!next) return;
+      if (phases.size > 0) projections.set(projectPath, { runId, phases });
+      else projections.delete(projectPath);
 
       // Keep the legacy store shape so existing render components (Chat,
       // TaskPanel, pending-card surfaces) work unchanged during migration.

@@ -38,7 +38,7 @@ export function DeliveryReportTab({ projectPath }: { projectPath: string }) {
   const [external, setExternal] = useState<ExternalWorktree[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [runningRubric, setRunningRubric] = useState(false);
-  const [retrying, setRetrying] = useState(false);
+  const [retryingBranch, setRetryingBranch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -77,16 +77,16 @@ export function DeliveryReportTab({ projectPath }: { projectPath: string }) {
     }
   };
 
-  const handleRetry = async () => {
-    setRetrying(true);
+  const handleRetry = async (branch: string) => {
+    setRetryingBranch(branch);
     try {
-      const outcome = await api.retryDelivery(projectPath);
+      const outcome = await api.retryDelivery(projectPath, branch);
       toast.success(retryToast(outcome));
       await refresh();
     } catch (err) {
       toast.error(`Delivery retry failed: ${String(err)}`);
     } finally {
-      setRetrying(false);
+      setRetryingBranch(null);
     }
   };
 
@@ -139,7 +139,15 @@ export function DeliveryReportTab({ projectPath }: { projectPath: string }) {
       </header>
 
       {activeLoop && <LoopCard loop={activeLoop} expanded />}
-      {report?.retry && <RetryCard retry={report.retry} retrying={retrying} onRetry={() => void handleRetry()} />}
+      {report?.retries.map((retry) => (
+        <RetryCard
+          key={retry.record.branch}
+          retry={retry}
+          retrying={retryingBranch === retry.record.branch}
+          disabled={retryingBranch !== null}
+          onRetry={() => void handleRetry(retry.record.branch)}
+        />
+      ))}
       {report?.handoff && <HandoffBanner handoff={report.handoff} />}
       {historyLoops.length > 0 && (
         <details className="rounded-lg border border-[color:var(--border)] p-3">
@@ -342,10 +350,12 @@ function HandoffBanner({ handoff }: { handoff: DeliveryReportResponse["handoff"]
 function RetryCard({
   retry,
   retrying,
+  disabled,
   onRetry,
 }: {
   retry: RetryState;
   retrying: boolean;
+  disabled: boolean;
   onRetry: () => void;
 }) {
   const { record, next_action: nextAction } = retry;
@@ -362,7 +372,7 @@ function RetryCard({
         <button
           className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
           onClick={onRetry}
-          disabled={retrying}
+          disabled={disabled}
         >
           {retrying ? <LoadingSpinner label="" /> : <RotateCcw size={12} />}
           {retrying ? "Retrying…" : "Retry delivery"}

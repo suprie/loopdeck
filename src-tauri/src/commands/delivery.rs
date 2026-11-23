@@ -45,8 +45,7 @@ pub struct DeliveryReportResponse {
     pub loops: Vec<LoopDeliveryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<crate::handoff::HandoffRecord>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryState>,
+    pub retries: Vec<RetryState>,
 }
 
 /// The recoverable-delivery slice the UI renders: the persisted record plus
@@ -151,10 +150,13 @@ pub fn get_delivery_report(
     Ok(DeliveryReportResponse {
         loops,
         handoff: crate::handoff::load(&root)?,
-        retry: crate::delivery_retry::load(&root)?.map(|record| RetryState {
-            next_action: record.stage.next_action(),
-            record,
-        }),
+        retries: crate::delivery_retry::load_all(&root)?
+            .into_iter()
+            .map(|record| RetryState {
+                next_action: record.stage.next_action(),
+                record,
+            })
+            .collect(),
     })
 }
 
@@ -165,10 +167,17 @@ pub fn get_delivery_report(
 #[tauri::command]
 pub async fn retry_delivery(
     path: String,
+    branch: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<crate::delivery_retry::RetryOutcome, AppError> {
     let root = resolve_root(&state, &path)?;
-    crate::delivery_retry::run_retry(&root)
+    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    if handles.contains_key(&root) {
+        return Err(AppError::Conflict(
+            "wait for the run to finish before retrying delivery".into(),
+        ));
+    }
+    crate::delivery_retry::run_retry(&root, branch.as_deref())
 }
 
 /// Prompt for a fresh, user-initiated PRD-rubric run on the active loop. The
