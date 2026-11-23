@@ -1,0 +1,7 @@
+# Live parallel run smoke test
+
+This repository checkout is a disposable fixture for testing two simultaneous draft pull requests in suprie/loopdeck. Only the test marker for the queued phase may be committed. There is no application code to build. The remote test base is `smoke/parallel-20261124`.
+
+For the queued phase only, read docs/epics/parallel-smoke/prd-parallel-smoke.md and make the literal marker it requests. Keep the other phase's marker absent from your branch. Verify the marker content and use a twelve-second wait during verification so the operator can observe overlapping live provider turns. A handoff report may be left untracked under .loopdeck/handoff-artifacts/ if the executor requests it.
+
+After verification, stage only your marker, run `loopdeck secret-scan --path .`, commit using a conventional commit message with `Rubric: PASS`, and push only your current managed branch to origin. Use explicit `gh pr create --repo suprie/loopdeck --base smoke/parallel-20261124 --head <your-current-branch> --draft` with a title starting `Smoke test:` plus your phase name. The body must identify the fixture and list the verification result and run metadata from the queue prompt. This test is pre-authorized. Never change the test base or publish a ready-for-review PR. Report the actual GitHub PR URL and `**Verdict:** PASS` as literal marker lines, as requested by the executor.
