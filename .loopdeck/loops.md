@@ -8,6 +8,7 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 - **Next**: review and merge the parallel-scheduling draft PR; then run a real overnight plan with two disjoint phases to confirm concurrent draft PRs on the user's machine.
 
 ## Next Steps
+- [x] Repair draft delivery after the phase watchdog and rerun both independent phases to completion.
 - [x] Address PR #113 review findings for planning, phase isolation, restart recovery, budgets, and delivery retries.
 - [x] Resolve PR #113 against agent-handoff support on main; preserve bounded injection, citation attribution, and waiting-phase restart recovery.
 - [ ] Split `commands/run_queue.rs` and `run_executor.rs` (both exceed 1,500 lines).

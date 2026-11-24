@@ -235,7 +235,7 @@ pub(crate) fn build_combined_phase_prompt(
              - Phases:\n{phase_lines}\n\
              - Budgets: {token_cap} tokens total · {phase_secs}s wall-clock cap for \
              this turn · {run_secs}s total-run wall-clock cap\n\n\
-             After a successful draft creation, end your final response with an \
+             As soon as draft creation returns the URL, stop calling tools and end your final response with an \
              exact `**Draft PR:** https://github.com/<owner>/<repo>/pull/<number>` \
              line so the executor can retain the review artifact.",
             token_cap = budgets.phase_token_cap,

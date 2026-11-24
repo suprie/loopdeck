@@ -307,3 +307,8 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Parallel turns can finish or require recovery independently.
 - **Consequences**: The planner accepts explicit dependencies, live activity and session identity belong to each phase, and delivery retries are keyed by branch.
+
+## 2026-11-24 — Recover verified drafts after a phase deadline
+- **Status**: accepted
+- **Context**: A provider turn can time out after publishing its draft and before reporting the URL.
+- **Consequences**: The executor stops the turn, then checks the exact draft branch, commit, phase metadata, and passing rubric before completing delivery.

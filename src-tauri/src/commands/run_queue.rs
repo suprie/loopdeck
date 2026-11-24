@@ -1797,11 +1797,17 @@ struct PhaseTask {
     title: String,
     channel: Channel<ClaudeEvent>,
     run_events: Option<RunEventChannel>,
+    draft_pr_authorized: bool,
     token_cap: u64,
     phase_timeout: Duration,
     run_timeout: Duration,
     resume_session_id: Option<String>,
     injections: HashMap<String, Vec<handoff::InjectedArtifact>>,
+}
+
+struct RecoveredDraft {
+    draft: git::PhaseDraft,
+    rubric: delivery::RubricResult,
 }
 
 struct PhaseTurnOutcome {
@@ -1815,6 +1821,7 @@ struct PhaseTurnOutcome {
     exceeded: bool,
     exceeded_message: String,
     result: Result<AgentResponse, AppError>,
+    recovered_draft: Option<RecoveredDraft>,
     injections: HashMap<String, Vec<handoff::InjectedArtifact>>,
 }
 
@@ -1833,6 +1840,7 @@ async fn run_phase_turn(
     let (bootstrap_timeout, bootstrap_reason) =
         scheduler::phase_watchdog(task.phase_timeout, run_remaining);
     let bootstrapped = bootstrap_worktree(&task.worktree, bootstrap_timeout, cancel).await;
+    let mut recovered_draft = None;
     let outcome = match bootstrapped {
         Ok(BootstrapStop::Completed) => {
             let token_budget = TokenBudget::new(task.token_cap);
@@ -1876,6 +1884,29 @@ async fn run_phase_turn(
                         watchdog_timeout.as_secs()
                     ));
                     mark_turn_terminal(root, &error);
+                    if task.draft_pr_authorized
+                        && token_budget.used() <= task.token_cap
+                        && !cancel.load(Ordering::SeqCst)
+                    {
+                        let lookup_budget = run_remaining
+                            .saturating_sub(started.elapsed())
+                            .min(Duration::from_secs(10));
+                        if !lookup_budget.is_zero() {
+                            recovered_draft = tokio::time::timeout(lookup_budget, async {
+                                let draft =
+                                    git::lookup_phase_draft(&task.worktree, &task.branch).await?;
+                                let rubric = delivery::rubric_from_phase_draft(
+                                    &draft.body,
+                                    &task.execution_id,
+                                    Utc::now(),
+                                )?;
+                                Some(RecoveredDraft { draft, rubric })
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                        }
+                    }
                     Err(error)
                 }
             };
@@ -1920,6 +1951,7 @@ async fn run_phase_turn(
         exceeded_message: token_budget.exceeded_message(),
         injections: task.injections,
         result,
+        recovered_draft,
     }
 }
 
@@ -2139,12 +2171,33 @@ fn apply_phase_outcome(
         return Ok(());
     }
 
-    match outcome.result {
-        Ok(response) => {
+    let report = match outcome.recovered_draft {
+        Some(recovery) => {
+            info!(
+                target: "loopdeck::run_queue",
+                execution_id,
+                url = %recovery.draft.url,
+                "recovered verified draft after the phase watchdog expired"
+            );
+            Ok((
+                recovery.draft.body,
+                Some((recovery.draft.url, recovery.rubric)),
+            ))
+        }
+        None => outcome.result.map(|response| {
             if !response.session_id.is_empty() {
-                plan.phases[index].session_id = Some(response.session_id.clone());
+                plan.phases[index].session_id = Some(response.session_id);
             }
-            let verdict = extract_verdict(&response.result);
+            (response.result, None)
+        }),
+    };
+    match report {
+        Ok((report, recovered_delivery)) => {
+            let verdict = if recovered_delivery.is_some() {
+                Some(RunVerdict::Pass)
+            } else {
+                extract_verdict(&report)
+            };
             if verdict == Some(RunVerdict::Pass) {
                 let topic = plan.phases[index].handoff_topic.clone();
                 if let Err(error) =
@@ -2166,17 +2219,19 @@ fn apply_phase_outcome(
                         plan.phases[index].interview.clone(),
                     )],
                     &outcome.injections,
-                    &response.result,
+                    &report,
                 );
             }
             if verdict == Some(RunVerdict::Pass) && plan.consent.draft_pr_authorized {
-                // Retained before any delivery decision so a recoverable
-                // record can carry the rubric evidence (retry-recovery).
-                let rubric = delivery::extract_rubric_result(&response.result, chrono::Utc::now());
-                // The PR link: the turn's own report first; then — the
-                // crash-retry path — an already-open PR for this phase branch.
-                let url = extract_draft_pr_url(&response.result)
-                    .or_else(|| git::open_pr_for_branch(&outcome.worktree, &outcome.branch));
+                let (url, rubric) = match recovered_delivery {
+                    Some((url, rubric)) => (Some(url), Some(rubric)),
+                    None => (
+                        extract_draft_pr_url(&report).or_else(|| {
+                            git::open_pr_for_branch(&outcome.worktree, &outcome.branch)
+                        }),
+                        delivery::extract_rubric_result(&report, Utc::now()),
+                    ),
+                };
                 let Some(url) = url else {
                     let reason =
                         "green verification passed, but no unattended draft PR URL was recorded";
@@ -2202,8 +2257,8 @@ fn apply_phase_outcome(
                     return park_phase(root, plan, index, reason.to_string());
                 };
 
-                // Delivery gates, evaluated fresh from this turn's own
-                // verifier report — never a stale persisted verdict.
+                // Evaluate the delivery gates with the current phase's
+                // verifier report, from the completed turn or its draft.
                 // Idempotent finish is exempt: when the checklist item is
                 // already checked and an open PR claims the branch, this is a
                 // retry completing bookkeeping, not a new delivery.
@@ -2726,6 +2781,7 @@ fn prepare_phase(
         agent_config,
         channel,
         run_events,
+        draft_pr_authorized: plan.consent.draft_pr_authorized,
         token_cap: resolved_phase_token_cap(plan),
         phase_timeout: resolved_phase_timeout(plan),
         run_timeout: resolved_run_timeout(plan).saturating_sub(run_started.elapsed()),
