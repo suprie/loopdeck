@@ -1,4 +1,4 @@
-//! Persisted run-queue plan — `.loopdeck/run-plan.yaml`.
+//! Persisted run-queue plan — central SQLite, with one-time legacy YAML import.
 //!
 //! Phase 1 of `prd-run-queue.md` (milestone 0.4.0, epic `overnight-orchestration`).
 //! Captures *what* an unattended run executes, *with which pre-flight
@@ -17,6 +17,7 @@
 use crate::error::AppError;
 use crate::handoff::HandoffLedgerEntry;
 use crate::limits;
+#[cfg(test)]
 use crate::persist;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,12 @@ pub struct RunPhase {
     pub execution_id: String,
     #[serde(default = "default_status")]
     pub status: RunPhaseStatus,
+    /// Number of provider dispatches attempted for this phase.
+    #[serde(default)]
+    pub attempt: u32,
+    /// Set by the explicit continue action for unfinished work.
+    #[serde(default)]
+    pub recovery_requested: bool,
     #[serde(default)]
     pub interview: Vec<PinnedAnswer>,
     /// Set by `run_phase_interview`/`skip_phase_interview` (Phase 3). Starts
@@ -194,7 +201,11 @@ pub struct RunPhase {
     /// Provider session id of this phase's last turn. Retained so restart
     /// reconciliation can decide whether a saved session still exists before
     /// auto-resuming an in-flight phase.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "provider_session_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub session_id: Option<String>,
     /// Session id the next turn for this phase resumes. Set only when restart
     /// reconciliation auto-resumes a phase; cleared once the turn starts.
@@ -226,7 +237,7 @@ pub struct PhaseHandoffTopic {
     pub topic: String,
 }
 
-/// The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`.
+/// The full run plan. Legacy YAML remains the first-import source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunPlan {
     pub id: String,
@@ -279,11 +290,17 @@ pub fn run_plan_path(repo_path: &Path) -> PathBuf {
     repo_path.join(".loopdeck").join("run-plan.yaml")
 }
 
-/// Load `.loopdeck/run-plan.yaml` for `repo_path`. `Ok(None)` means no plan
-/// is queued (nothing on disk) — distinct from a malformed file, which
-/// errors. See [`load_from_path`].
+/// Load the central run plan, importing `.loopdeck/run-plan.yaml` once if
+/// present. `Ok(None)` means there is no plan in either source.
 pub fn load(repo_path: &Path) -> Result<Option<RunPlan>, AppError> {
-    load_from_path(&run_plan_path(repo_path))
+    let Some(contents) =
+        crate::operational_store::load_document(repo_path, "run_plan", &run_plan_path(repo_path))?
+    else {
+        return Ok(None);
+    };
+    serde_yaml::from_str::<RunPlan>(&contents)
+        .map(Some)
+        .map_err(|error| AppError::RunPlan(format!("central run plan is malformed: {error}")))
 }
 
 /// Load from an explicit path. Missing file → `Ok(None)`; malformed file →
@@ -298,13 +315,15 @@ pub fn load_from_path(path: &Path) -> Result<Option<RunPlan>, AppError> {
         .map_err(|e| AppError::RunPlan(format!("run plan at {} is malformed: {e}", path.display())))
 }
 
-/// Persist `plan` to `.loopdeck/run-plan.yaml` for `repo_path`. See
-/// [`save_to_path`].
+/// Persist the mutable run plan centrally. Authored and legacy repository
+/// files are intentionally left untouched after import.
 pub fn save(repo_path: &Path, plan: &RunPlan) -> Result<(), AppError> {
-    save_to_path(&run_plan_path(repo_path), plan)
+    let yaml = serde_yaml::to_string(plan)?;
+    crate::operational_store::save_document(repo_path, "run_plan", &yaml)
 }
 
 /// Atomically write `plan` to `path` via [`persist::atomic_write`].
+#[cfg(test)]
 pub fn save_to_path(path: &Path, plan: &RunPlan) -> Result<(), AppError> {
     let yaml = serde_yaml::to_string(plan)?;
     persist::atomic_write(path, &yaml)?;

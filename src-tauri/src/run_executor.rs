@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 /// Per-project handle for a live queued run. See `AppState::run_handles`.
 pub struct RunHandle {
+    /// Registered root used for this run's interrupt slot and events.
+    pub root: PathBuf,
     /// Checked by the executor loop between phases (and passed through to
     /// `cancel_run`, which also fires the project's interrupt slot so an
     /// in-flight turn stops immediately rather than waiting for the phase to
@@ -30,16 +32,11 @@ pub struct RunHandle {
 }
 
 impl RunHandle {
-    pub fn new() -> Self {
+    pub fn new(root: PathBuf) -> Self {
         Self {
+            root,
             cancel: Arc::new(AtomicBool::new(false)),
         }
-    }
-}
-
-impl Default for RunHandle {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -556,6 +553,8 @@ pub(crate) fn build_run_plan(
             RunPhase {
                 execution_id: exec_id.clone(),
                 status: RunPhaseStatus::Queued,
+                attempt: 0,
+                recovery_requested: false,
                 interview: Vec::new(),
                 interview_status: InterviewStatus::Pending,
                 depends_on: if i == 0 {
@@ -653,9 +652,9 @@ pub fn reconcile_running_phases(repo_path: &Path) -> Result<bool, AppError> {
                 phase.status =
                     crate::transition::transition_phase(phase.status, RunPhaseStatus::Queued)?;
                 phase.resume_session_id = phase.session_id.clone();
-                phase.park_payload = Some(
-                    "resumed after app restart: worktree and provider session both survived".into(),
-                );
+                phase.park_payload.get_or_insert_with(|| {
+                    "resumed after app restart: worktree and provider session both survived".into()
+                });
                 changed = true;
             }
             crate::scheduler::ResumeDecision::Park => {

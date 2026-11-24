@@ -35,6 +35,7 @@ regex = "1"
 # TypeScript bindings for the provider-neutral run-event contract. Generated
 # files live in `src/types/generated/` and CI fails on drift.
 ts-rs = { version = "12", features = ["chrono-impl"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 [profile.release]
 panic = "abort"

@@ -16,6 +16,30 @@ use crate::permission::PermissionPolicy;
 use std::path::Path;
 use tauri::ipc::Channel;
 
+/// Shared writing policy for every LoopDeck-managed agent session.
+pub(crate) const WRITING_GUIDANCE: &str = "## LoopDeck writing style\n\
+Use ASD-STE100 Simplified Technical English principles for user-facing explanations and reports. \
+Use short sentences, active voice, simple words, and consistent technical terms. \
+Give one instruction or one topic in each sentence. \
+Use a maximum of 20 words per instruction sentence and 25 words per descriptive sentence. \
+State the result first. Explain technical terms when necessary. \
+Respect the user's requested language. \
+Preserve code, identifiers, commands, file paths, literal quotations, schemas, and required output markers exactly.";
+
+pub(crate) fn session_prompt(config: &AgentConfig) -> String {
+    let mut prompt = config
+        .charter
+        .as_ref()
+        .filter(|charter| !charter.is_empty())
+        .map(crate::config::RoleCharter::render)
+        .unwrap_or_default();
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(WRITING_GUIDANCE);
+    prompt
+}
+
 /// Provider adapter contract used by the heterogeneous session owner below.
 ///
 /// The two command-line harnesses intentionally retain concrete session types:

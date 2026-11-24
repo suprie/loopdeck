@@ -582,7 +582,8 @@ fn parse_legacy_dt(s: &str, fallback: DateTime<Utc>) -> DateTime<Utc> {
 pub fn preview(repo_path: &Path, now: DateTime<Utc>) -> Result<MigrationPreview, AppError> {
     let exec_path = execution::execution_path(repo_path);
     let loops_path = memory::loops_md_path(repo_path);
-    let execution_yaml_present = exec_path.exists();
+    let execution_yaml_present =
+        exec_path.exists() || crate::operational_store::has_document(repo_path, "execution")?;
     let loops_md_present = loops_path.exists();
 
     if execution_yaml_present {
@@ -630,7 +631,7 @@ pub fn apply(repo_path: &Path, now: DateTime<Utc>) -> Result<ExecutionState, App
     let legacy_path = repo_path.join(".loopdeck").join("loops.legacy.md");
 
     // Already structured — reconcile any half-finished rename, then return.
-    if exec_path.exists() {
+    if exec_path.exists() || crate::operational_store::has_document(repo_path, "execution")? {
         if loops_path.exists() && !legacy_path.exists() {
             std::fs::rename(&loops_path, &legacy_path)?;
         }
@@ -996,8 +997,9 @@ mod tests {
         let original = std::fs::read(&loops_path).unwrap();
 
         let state = apply(&dir, now()).expect("apply succeeds");
-        // execution.yaml written and reloads to the same state.
-        assert!(exec_path.exists());
+        // Runtime state is centralized; migration does not add execution YAML.
+        assert!(!exec_path.exists());
+        assert!(crate::operational_store::has_document(&dir, "execution").unwrap());
         assert_eq!(execution::load(&dir).unwrap().state, state);
         // loops.md renamed away; legacy snapshot is byte-identical to the original.
         assert!(!loops_path.exists(), "loops.md should be renamed away");

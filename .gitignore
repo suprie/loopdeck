@@ -8,6 +8,7 @@ node_modules/
 .loopdeck/agent-runs/
 .loopdeck/run-plan.yml
 .loopdeck/execution.yml
+.loopdeck/handoffs/*
 .loopdeck/*.bak
 # IDE / local tooling
 .vscode/

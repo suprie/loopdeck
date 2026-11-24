@@ -603,6 +603,9 @@ export interface RunEnvironment {
 export interface RunPhase {
   execution_id: string;
   status: RunPhaseStatus;
+  /** Provider dispatch count, retained across interruption and continuation. */
+  attempt: number;
+  recovery_requested: boolean;
   interview: PinnedAnswer[];
   interview_status: InterviewStatus;
   /** Other phases in this plan (by `execution_id`) that must complete before
@@ -658,7 +661,7 @@ export interface PhaseHandoffTopic {
   topic: string;
 }
 
-/** The full run plan — the on-disk shape of `.loopdeck/run-plan.yaml`. */
+/** The centrally persisted run plan; legacy YAML is imported once. */
 export interface RunPlan {
   id: string;
   project: string;

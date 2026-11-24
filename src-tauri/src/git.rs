@@ -36,6 +36,35 @@ fn git_command(repo_path: &Path) -> Option<Command> {
     Some(cmd)
 }
 
+/// Return the main checkout for a linked worktree root.
+pub(crate) fn linked_main_checkout(repo_path: &Path) -> Option<PathBuf> {
+    // Git also discovers repositories from their subdirectories. Only roots
+    // with a Git indirection file can be linked worktrees.
+    if !repo_path.join(".git").is_file() {
+        return None;
+    }
+    let output = git_command(repo_path)?
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let paths = std::str::from_utf8(&output.stdout).ok()?;
+    let mut paths = paths.lines();
+    let git_dir = Path::new(paths.next()?).canonicalize().ok()?;
+    let common_dir = Path::new(paths.next()?).canonicalize().ok()?;
+    if common_dir.file_name()? != ".git" || git_dir.parent()? != common_dir.join("worktrees") {
+        return None;
+    }
+    Some(common_dir.parent()?.to_path_buf())
+}
+
 /// Best-effort `git init` for a fresh project directory. Never fails the
 /// caller: a missing git binary or failed spawn returns `false`, and a
 /// project without git simply degrades (epics stay authorable; promote-with-

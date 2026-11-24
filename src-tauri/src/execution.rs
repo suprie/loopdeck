@@ -14,6 +14,7 @@
 
 use crate::error::AppError;
 use crate::limits;
+#[cfg(test)]
 use crate::persist;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -555,7 +556,22 @@ pub struct LoadedExecution {
 
 /// Load `.loopdeck/execution.yaml` for `repo_path`. See [`load_from_path`].
 pub fn load(repo_path: &Path) -> Result<LoadedExecution, AppError> {
-    load_from_path(&execution_path(repo_path))
+    let path = execution_path(repo_path);
+    let Some(contents) = crate::operational_store::load_document(repo_path, "execution", &path)?
+    else {
+        return Ok(LoadedExecution {
+            state: ExecutionState::default(),
+            source: LoadSource::Default,
+            warnings: Vec::new(),
+            file_present: false,
+        });
+    };
+    let loaded = load_from_contents(&contents, &path)?;
+    if loaded.source == LoadSource::BackupRecovered {
+        let repaired = serde_yaml::to_string(&loaded.state)?;
+        crate::operational_store::save_document(repo_path, "execution", &repaired)?;
+    }
+    Ok(loaded)
 }
 
 /// Load from an explicit path with non-destructive recovery:
@@ -578,7 +594,11 @@ pub fn load_from_path(path: &Path) -> Result<LoadedExecution, AppError> {
     }
 
     let contents = limits::read_bounded_to_string(path, limits::EXECUTION_MAX_BYTES)?;
-    match serde_yaml::from_str::<ExecutionState>(&contents) {
+    load_from_contents(&contents, path)
+}
+
+fn load_from_contents(contents: &str, path: &Path) -> Result<LoadedExecution, AppError> {
+    match serde_yaml::from_str::<ExecutionState>(contents) {
         Ok(state) => {
             // Version compatibility is a hard, read-only event — distinct
             // from structural defects, which are non-fatal warnings.
@@ -694,7 +714,14 @@ pub fn save(
     new_state: &ExecutionState,
     expected_revision: u64,
 ) -> Result<(), AppError> {
-    save_to_path(&execution_path(repo_path), new_state, expected_revision)
+    new_state.validate()?;
+    let yaml = serde_yaml::to_string(new_state)?;
+    crate::operational_store::save_revisioned_document(
+        repo_path,
+        "execution",
+        &yaml,
+        expected_revision,
+    )
 }
 
 /// Atomically write `new_state` after validating it and confirming the on-disk
@@ -706,6 +733,7 @@ pub fn save(
 /// A malformed or version-incompatible primary is never overwritten here —
 /// that is the load/recovery path's job. This refuses to write against a
 /// primary it cannot read a revision from.
+#[cfg(test)]
 pub fn save_to_path(
     path: &Path,
     new_state: &ExecutionState,
@@ -743,6 +771,7 @@ pub fn save_to_path(
 /// The revision currently on disk, or `0` if there is no primary yet. A
 /// primary that cannot be parsed is treated as unrecoverable-for-write: the
 /// caller must repair it via the load path rather than overwrite it blind.
+#[cfg(test)]
 fn read_on_disk_revision(path: &Path) -> Result<u64, AppError> {
     if !path.exists() {
         return Ok(0);

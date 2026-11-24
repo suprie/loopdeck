@@ -1733,7 +1733,15 @@ pub(crate) fn spawn_fresh_with_config_resume(
         resolve_permission_policy(state, policy_root)
     };
 
-    let session = HarnessSession::spawn(path, agent_config, resume_session_id, policy)?;
+    let session = match HarnessSession::spawn(path, agent_config, resume_session_id, policy.clone())
+    {
+        Ok(session) => session,
+        Err(error) if resume_session_id.is_some() && native_resume_unavailable(&error) => {
+            tracing::warn!("native session could not be resumed before dispatch; falling back to repository recovery prompt: {error}");
+            HarnessSession::spawn(path, agent_config, None, policy)?
+        }
+        Err(error) => return Err(error),
+    };
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state
         .claude_sessions
@@ -1742,6 +1750,18 @@ pub(crate) fn spawn_fresh_with_config_resume(
         .insert(path.to_path_buf(), Arc::clone(&arc));
 
     Ok(arc)
+}
+
+fn native_resume_unavailable(error: &AppError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "session not found",
+        "no conversation found",
+        "invalid session",
+        "no conversation found with session id",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Fresh-start send pipeline used by `agent_start_loop`. Mirrors
@@ -2007,7 +2027,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_resume(
     // exception and deliberately use interactive Plan mode.
     // No attachments — the loop prompt is text by construction (see the
     // non-streaming fresh-start path).
-    let response = match send_streaming_with_retry(
+    let mut outcome = send_streaming_with_retry(
         &mut session,
         prompt,
         &[],
@@ -2018,8 +2038,38 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_resume(
         plan_mode,
         token_budget,
     )
-    .await
-    {
+    .await;
+    drop(session);
+    // Claude can reject --resume in its terminal response, after spawn.
+    // Only this explicit rejection with no tool activity is safe to replay.
+    if let (Some(config), Ok(response)) = (agent_config, &outcome) {
+        if resume_session_id.is_some()
+            && response.is_error
+            && response.tool_calls.is_empty()
+            && native_resume_unavailable(&AppError::Agent(response.result.clone()))
+        {
+            drop(session_arc);
+            let fresh =
+                spawn_fresh_with_config(state, path, policy_root, config, force_autonomous)?;
+            let mut session = fresh.lock().await;
+            if let Some(events) = run_events.clone() {
+                session.attach_run_events(events);
+            }
+            outcome = send_streaming_with_retry(
+                &mut session,
+                prompt,
+                &[],
+                channel,
+                &slots,
+                &islot,
+                run_events.as_ref(),
+                plan_mode,
+                token_budget,
+            )
+            .await;
+        }
+    }
+    let response = match outcome {
         Ok(r) => r,
         Err(e) => {
             mark_turn_terminal(policy_root, &e);

@@ -26,6 +26,7 @@ use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::handoff;
 use crate::limits;
+use crate::operational_store;
 use crate::provider_event::{
     Provider, RunEvent, RunEventEnvelope, RunEventPayload, TerminalOutcome,
 };
@@ -46,7 +47,7 @@ use std::process::Child;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -86,8 +87,8 @@ fn normalized_run_channel(
         {
             if !id.is_empty() {
                 on_session_started(match event.provider {
-                    Provider::Codex => format!("codex:{id}"),
-                    Provider::Claude => id.clone(),
+                    Provider::Codex if !id.starts_with("codex:") => format!("codex:{id}"),
+                    _ => id.clone(),
                 });
             }
         }
@@ -244,20 +245,32 @@ where
 ///
 /// Returns `(path, branch, created)`; the caller persists both fields on the
 /// phase before spawning the turn.
-fn ensure_phase_worktree(
+pub(crate) fn ensure_phase_worktree(
     root: &Path,
     plan: &RunPlan,
     index: usize,
 ) -> Result<(PathBuf, String, bool), AppError> {
     let phase = &plan.phases[index];
-    let branch = phase
-        .worktree_branch
-        .clone()
-        .unwrap_or_else(|| scheduler::phase_branch_name(&plan.id, &phase.execution_id, index));
-    let path = phase
-        .worktree_path
-        .clone()
-        .unwrap_or_else(|| scheduler::phase_worktree_path(root, &branch));
+    let legacy_path = plan.environment.worktree_path.as_ref().filter(|_| {
+        phase.worktree_path.is_none()
+            && (phase.recovery_requested || phase.resume_session_id.is_some())
+    });
+    let (path, branch) = if let Some(path) = legacy_path {
+        let branch = plan.environment.worktree_branch.clone().ok_or_else(|| {
+            AppError::RunPlan("legacy recovery worktree branch was not recorded".into())
+        })?;
+        (path.clone(), branch)
+    } else {
+        let branch = phase
+            .worktree_branch
+            .clone()
+            .unwrap_or_else(|| scheduler::phase_branch_name(&plan.id, &phase.execution_id, index));
+        let path = phase
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| scheduler::phase_worktree_path(root, &branch));
+        (path, branch)
+    };
 
     let known = git::worktree_list(root).map_err(AppError::RunPlan)?;
     if known.iter().any(|candidate| candidate == &path) {
@@ -271,6 +284,11 @@ fn ensure_phase_worktree(
             worktree.path.display()
         );
         return Ok((worktree.path, worktree.branch, true));
+    }
+    if legacy_path.is_some() {
+        return Err(AppError::RunPlan(format!(
+            "legacy recovery worktree and branch {branch} are both missing"
+        )));
     }
 
     ignore_managed_runs_dir(root);
@@ -422,6 +440,9 @@ async fn bootstrap_worktree(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<BootstrapStop, AppError> {
+    if timeout.is_zero() {
+        return Ok(BootstrapStop::TimedOut);
+    }
     if !path.join("package.json").is_file() || path.join("node_modules").is_dir() {
         return Ok(BootstrapStop::Completed);
     }
@@ -540,6 +561,21 @@ fn resolved_run_timeout(plan: &RunPlan) -> Duration {
             .total_run_wall_clock_secs
             .unwrap_or(limits::DEFAULT_RUN_TOTAL_WALL_CLOCK_SECS),
     )
+}
+
+struct RunClock {
+    saved_elapsed: Duration,
+    started: Instant,
+}
+
+impl RunClock {
+    fn elapsed(&self) -> Duration {
+        self.saved_elapsed.saturating_add(self.started.elapsed())
+    }
+
+    fn remaining(&self, cap: Duration) -> Duration {
+        cap.saturating_sub(self.elapsed())
+    }
 }
 
 fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
@@ -664,15 +700,6 @@ pub async fn create_run_plan(
         ));
     }
 
-    {
-        let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        if handles.contains_key(&root) {
-            return Err(AppError::RunPlan(
-                "a run is already in progress for this project — cancel it before queuing a new plan".into(),
-            ));
-        }
-    }
-
     for id in &execution_ids {
         epic::find_loop_by_id(&root, id).ok_or_else(|| {
             AppError::RunPlan(format!(
@@ -713,6 +740,11 @@ pub async fn create_run_plan(
         }
     }
 
+    let _handles = lock_inactive_run(
+        &state,
+        &root,
+        "a run is already in progress for this project — cancel it before queuing a new plan",
+    )?;
     if let Some(existing) = runplan::load(&root)? {
         for phase in &existing.phases {
             let has_draft_pr = phase
@@ -781,14 +813,12 @@ pub async fn queue_run(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
-
-    {
-        let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        if handles.contains_key(&root) {
-            return Err(AppError::RunPlan(
-                "a run is already in progress for this project".into(),
-            ));
-        }
+    let key = operational_store::project_root(&root);
+    let mut handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    if handles.contains_key(&key) {
+        return Err(AppError::RunPlan(
+            "a run is already in progress for this project".into(),
+        ));
     }
 
     // A `Running` phase left over from a prior crash isn't actually running
@@ -826,17 +856,10 @@ pub async fn queue_run(
         ));
     }
 
-    let handle = RunHandle::new();
+    let handle = RunHandle::new(root.clone());
     let cancel = Arc::clone(&handle.cancel);
-    {
-        let mut handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        if handles.contains_key(&root) {
-            return Err(AppError::RunPlan(
-                "a run is already in progress for this project".into(),
-            ));
-        }
-        handles.insert(root.clone(), handle);
-    }
+    handles.insert(key.clone(), handle);
+    drop(handles);
 
     let run_id = plan.id;
     let app_handle = app.clone();
@@ -856,7 +879,7 @@ pub async fn queue_run(
         };
         emit_run_queue_terminal(&app_handle, &run_root, &run_id, terminal_message, is_error);
         if let Ok(mut handles) = state.run_handles.lock() {
-            handles.remove(&run_root);
+            handles.remove(&key);
         };
     });
 
@@ -883,19 +906,15 @@ pub async fn queue_run(
 #[tauri::command]
 pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
-
-    let found = {
+    let key = operational_store::project_root(&root);
+    let root = {
         let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        handles
-            .get(&root)
-            .map(|h| h.cancel.store(true, Ordering::SeqCst))
-            .is_some()
+        let handle = handles
+            .get(&key)
+            .ok_or_else(|| AppError::RunPlan("no run is in progress for this project".into()))?;
+        handle.cancel.store(true, Ordering::SeqCst);
+        handle.root.clone()
     };
-    if !found {
-        return Err(AppError::RunPlan(
-            "no run is in progress for this project".into(),
-        ));
-    }
 
     // Phase sessions run in their own isolated worktrees, while legacy/manual
     // sessions are keyed by the registered root. Signal every active phase
@@ -928,11 +947,9 @@ pub async fn get_run_status(
     state: State<'_, AppState>,
 ) -> Result<RunQueueStatus, AppError> {
     let root = resolve_root(&state, &path)?;
-    let active = state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root);
+    let key = operational_store::project_root(&root);
+    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    let active = handles.contains_key(&key);
     if !active {
         run_executor::reconcile_running_phases(&root)?;
     }
@@ -975,6 +992,7 @@ pub async fn answer_parked_question(
     state: State<'_, AppState>,
 ) -> Result<crate::runplan::RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
 
@@ -1166,6 +1184,54 @@ fn reconcile_inactive_execution_state(
     Ok(Some(next))
 }
 
+/// Keep inactive plan edits and the executor's start check serialized.
+fn lock_inactive_run<'a>(
+    state: &'a AppState,
+    root: &Path,
+    active_error: &str,
+) -> Result<MutexGuard<'a, HashMap<PathBuf, RunHandle>>, AppError> {
+    let key = operational_store::project_root(root);
+    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    if handles.contains_key(&key) {
+        return Err(AppError::RunPlan(active_error.into()));
+    }
+    Ok(handles)
+}
+
+fn edit_inactive_run_plan(
+    state: &AppState,
+    root: &Path,
+    active_error: &str,
+    edit: impl FnOnce(&mut RunPlan) -> Result<(), AppError>,
+) -> Result<RunPlan, AppError> {
+    let _handles = lock_inactive_run(state, root, active_error)?;
+    let mut plan = runplan::load(root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
+    edit(&mut plan)?;
+    runplan::save(root, &plan)?;
+    Ok(plan)
+}
+
+/// Change limits on the existing plan without discarding saved progress.
+#[tauri::command]
+pub async fn update_run_budgets(
+    path: String,
+    budgets: RunBudgets,
+    state: State<'_, AppState>,
+) -> Result<RunPlan, AppError> {
+    validate_budgets(&budgets)?;
+    let root = resolve_root(&state, &path)?;
+    edit_inactive_run_plan(
+        &state,
+        &root,
+        "cannot change budgets while the run is still active",
+        |plan| {
+            plan.budgets = budgets;
+            Ok(())
+        },
+    )
+}
+
 /// Requeue one retryable terminal phase and any phases parked only because
 /// they depend on it. The next `queue_run` starts a fresh unattended turn.
 #[tauri::command]
@@ -1175,22 +1241,12 @@ pub async fn requeue_run_phase(
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
-    if state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root)
-    {
-        return Err(AppError::RunPlan(
-            "cannot retry a phase while the run is still active".into(),
-        ));
-    }
-
-    let mut plan = runplan::load(&root)?
-        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
-    requeue_terminal_phase(&mut plan, &execution_id)?;
-    runplan::save(&root, &plan)?;
-    Ok(plan)
+    edit_inactive_run_plan(
+        &state,
+        &root,
+        "cannot retry a phase while the run is still active",
+        |plan| requeue_terminal_phase(plan, &execution_id),
+    )
 }
 
 #[tauri::command]
@@ -1201,16 +1257,11 @@ pub async fn relink_delivered_phase(
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
-    if state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root)
-    {
-        return Err(AppError::RunPlan(
-            "cannot relink a phase while the run is still active".into(),
-        ));
-    }
+    let _handles = lock_inactive_run(
+        &state,
+        &root,
+        "cannot relink a phase while the run is still active",
+    )?;
     if execution_id == replacement_id {
         return Err(AppError::RunPlan(
             "choose a different PRD item to relink".into(),
@@ -1332,37 +1383,27 @@ pub async fn relink_delivered_phase(
 /// Requeue every retryable terminal phase at once — the mass-retry path for
 /// a run that died wholesale (e.g. a bootstrap failure that killed the whole
 /// batch). Unlike [`requeue_run_phase`], no dependents cascade is needed:
-/// every terminal phase is requeued regardless of why it stopped, so the
-/// next `queue_run` picks them all up as one combined turn (single session,
-/// one verify→ship) instead of N per-phase re-reads.
+/// every retryable terminal phase is requeued regardless of why it stopped.
 #[tauri::command]
 pub async fn requeue_failed_run_phases(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
-    if state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root)
-    {
-        return Err(AppError::RunPlan(
-            "cannot retry phases while the run is still active".into(),
-        ));
-    }
-
-    let mut plan = runplan::load(&root)?
-        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
-    let requeued = requeue_all_terminal_phases(&mut plan);
-    if requeued == 0 {
-        return Err(AppError::RunPlan(
-            "no retryable phases — nothing is parked, failed, interrupted, or killed".into(),
-        ));
-    }
-    runplan::save(&root, &plan)?;
-    info!("requeued {requeued} terminal phase(s) for mass retry");
-    Ok(plan)
+    edit_inactive_run_plan(
+        &state,
+        &root,
+        "cannot retry phases while the run is still active",
+        |plan| {
+            if requeue_all_terminal_phases(plan) == 0 {
+                return Err(AppError::RunPlan(
+                    "no retryable phases — nothing is parked, failed, interrupted, or killed"
+                        .into(),
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn requeue_terminal_phase(
@@ -1390,7 +1431,7 @@ pub(crate) fn requeue_terminal_phase(
         )));
     }
     phase.status = RunPhaseStatus::Queued;
-    phase.park_payload = None;
+    phase.recovery_requested = true;
 
     let mut requeued = HashSet::from([execution_id.to_string()]);
     loop {
@@ -1409,6 +1450,7 @@ pub(crate) fn requeue_terminal_phase(
             if blocked_by_requeued_phase {
                 phase.status = RunPhaseStatus::Queued;
                 phase.park_payload = None;
+                phase.recovery_requested = false;
                 requeued.insert(phase.execution_id.clone());
                 changed = true;
             }
@@ -1421,7 +1463,7 @@ pub(crate) fn requeue_terminal_phase(
 }
 
 /// Requeue every retryable terminal phase (`Parked`/`Failed`/`Interrupted`/
-/// `Killed`), clearing its park payload. Returns how many phases were
+/// `Killed`), retaining diagnostics for recovery. Returns how many phases were
 /// requeued — 0 means the plan had nothing to retry. `Completed`/`Queued`/
 /// `Running` phases are left untouched.
 fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
@@ -1435,7 +1477,7 @@ fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
                 | RunPhaseStatus::Killed
         ) {
             phase.status = RunPhaseStatus::Queued;
-            phase.park_payload = None;
+            phase.recovery_requested = true;
             requeued += 1;
         }
     }
@@ -1526,6 +1568,7 @@ pub async fn run_phase_interview(
     // Reload rather than reuse the plan loaded before the (possibly long)
     // interview turn — `cancel_run`/the executor could have touched other
     // phases meanwhile; only this phase's fields are ours to set.
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
     let idx = plan
@@ -1642,6 +1685,7 @@ pub async fn run_batch_phase_interviews(
     .await?;
     let answers_by_phase = extract_batch_interview_answers(&response.result);
 
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
     for execution_id in ids {
@@ -1717,6 +1761,7 @@ pub async fn skip_phase_interview(
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
 
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
     let idx = plan
@@ -1983,6 +2028,15 @@ fn build_phase_prompt(
     prompt.push_str(&format!(
         "\n\nThis phase runs in its own worktree on branch `{branch}`, cut from the repository's default branch. Do not merge or rebase onto another phase's branch."
     ));
+    if phase.recovery_requested || phase.resume_session_id.is_some() {
+        prompt.push_str("\n\nRECOVERY CONTINUATION: Inspect the existing worktree, branch, diff, and completed artifacts. Preserve the existing changes and complete the remaining work. Do not reset, clean, or recreate the worktree.");
+        if let Some(reason) = &phase.park_payload {
+            prompt.push_str(&format!(
+                "\nPrevious outcome: {}",
+                reason.chars().take(4000).collect::<String>()
+            ));
+        }
+    }
     if let Some(topic) = phase.handoff_topic.as_deref() {
         // Only phases opted into a handoff carry an artifact contract; the
         // topic is fixed by the plan so a downstream consumer's reference
@@ -2143,14 +2197,15 @@ fn apply_phase_outcome(
     state: &AppState,
     root: &Path,
     plan: &mut RunPlan,
-    run_started: Instant,
+    clock: &RunClock,
     outcome: PhaseTurnOutcome,
 ) -> Result<(), AppError> {
     let index = outcome.index;
     let execution_id = outcome.execution_id.clone();
     plan.phases[index].wall_clock_secs = outcome.elapsed.as_secs();
     plan.phases[index].token_usage = outcome.tokens;
-    plan.wall_clock_secs = run_started.elapsed().as_secs();
+    plan.wall_clock_secs = clock.elapsed().as_secs();
+    plan.phases[index].recovery_requested = false;
 
     if outcome.exceeded {
         // Per-phase budget kill: end only this phase, never the run.
@@ -2429,7 +2484,10 @@ async fn execute_run(
         return Ok(());
     };
     let _keep_awake = KeepAwake::acquire();
-    let run_started = Instant::now();
+    let clock = RunClock {
+        saved_elapsed: Duration::from_secs(plan.wall_clock_secs),
+        started: Instant::now(),
+    };
     ignore_managed_runs_dir(root);
     // A cycle would leave every member Waiting forever; reject before any
     // worktree or provider process exists.
@@ -2445,7 +2503,7 @@ async fn execute_run(
     let (session_started, mut session_updates) = tokio::sync::mpsc::unbounded_channel();
 
     loop {
-        plan.wall_clock_secs = run_started.elapsed().as_secs();
+        plan.wall_clock_secs = clock.elapsed().as_secs();
 
         if cancel.load(Ordering::SeqCst) {
             for (_, worktree) in running.values() {
@@ -2466,7 +2524,7 @@ async fn execute_run(
             return Ok(());
         }
 
-        if run_started.elapsed() >= resolved_run_timeout(&plan) {
+        if clock.remaining(resolved_run_timeout(&plan)).is_zero() {
             for (_, worktree) in running.values() {
                 let _ = terminate_session(state, worktree);
             }
@@ -2496,9 +2554,15 @@ async fn execute_run(
 
         // Recompute readiness after each preparation: a failure can park a
         // previously eligible phase or leave another independent phase ready.
-        let max = plan.max_concurrency.max(1) as usize;
+        // Older plans can share one retained worktree across several phases.
+        let max = if plan.environment.worktree_path.is_some() {
+            1
+        } else {
+            plan.max_concurrency.max(1) as usize
+        };
         while running.len() < max {
-            if cancel.load(Ordering::SeqCst) || run_started.elapsed() >= resolved_run_timeout(&plan)
+            if cancel.load(Ordering::SeqCst)
+                || clock.remaining(resolved_run_timeout(&plan)).is_zero()
             {
                 break;
             }
@@ -2513,7 +2577,7 @@ async fn execute_run(
                 break;
             };
             let started = session_started.clone();
-            match prepare_phase(app, state, root, &mut plan, index, run_started, move |id| {
+            match prepare_phase(app, state, root, &mut plan, index, &clock, move |id| {
                 let _ = started.send((index, id));
             }) {
                 Ok(task) => {
@@ -2524,6 +2588,7 @@ async fn execute_run(
                     let phase = &mut plan.phases[index];
                     phase.session_id.clone_from(&task.resume_session_id);
                     phase.status = RunPhaseStatus::Running;
+                    phase.attempt = phase.attempt.saturating_add(1);
                     phase.park_payload = None;
                     runplan::save(root, &plan)?;
                     let task = tasks.spawn(async move {
@@ -2550,7 +2615,7 @@ async fn execute_run(
             }
         }
 
-        if cancel.load(Ordering::SeqCst) || run_started.elapsed() >= resolved_run_timeout(&plan) {
+        if cancel.load(Ordering::SeqCst) || clock.remaining(resolved_run_timeout(&plan)).is_zero() {
             continue;
         }
         if running.is_empty() {
@@ -2596,7 +2661,7 @@ async fn execute_run(
                     Some(Ok((task_id, outcome))) => {
                         running.remove(&task_id);
                         if let Err(error) =
-                            apply_phase_outcome(app, state, root, &mut plan, run_started, outcome)
+                            apply_phase_outcome(app, state, root, &mut plan, &clock, outcome)
                         {
                             // Bookkeeping failure is fatal for the run, but
                             // sibling turns must not be left orphaned.
@@ -2632,7 +2697,7 @@ async fn execute_run(
     // park it so it is visible in the morning report rather than waiting
     // forever unattended (`prd-agent-handoff` Phase 2).
     run_executor::park_waiting_at_run_end(&mut plan, "run ended with an unmet handoff dependency")?;
-    plan.wall_clock_secs = run_started.elapsed().as_secs();
+    plan.wall_clock_secs = clock.elapsed().as_secs();
     finalize_worktree(&mut plan);
     runplan::save(root, &plan)?;
 
@@ -2685,7 +2750,7 @@ fn prepare_phase(
     root: &Path,
     plan: &mut RunPlan,
     index: usize,
-    run_started: Instant,
+    clock: &RunClock,
     on_session_started: impl Fn(String) + Send + Sync + 'static,
 ) -> Result<PhaseTask, PhasePrepareError> {
     let execution_id = plan.phases[index].execution_id.clone();
@@ -2731,8 +2796,14 @@ fn prepare_phase(
     if let Some(artifacts) = injections.get(&execution_id) {
         prompt.push_str(&handoff::render_injection(&execution_id, artifacts));
     }
-    let resume_session_id = plan.phases[index].resume_session_id.clone();
-    plan.phases[index].resume_session_id = None;
+    let phase = &mut plan.phases[index];
+    let resume_session_id = phase.resume_session_id.take().or_else(|| {
+        if phase.recovery_requested {
+            phase.session_id.clone()
+        } else {
+            None
+        }
+    });
     begin_phase_execution(root, &execution_id, &loc)
         .map_err(|error| PhasePrepareError::Failed(error.to_string()))?;
 
@@ -2784,7 +2855,7 @@ fn prepare_phase(
         draft_pr_authorized: plan.consent.draft_pr_authorized,
         token_cap: resolved_phase_token_cap(plan),
         phase_timeout: resolved_phase_timeout(plan),
-        run_timeout: resolved_run_timeout(plan).saturating_sub(run_started.elapsed()),
+        run_timeout: clock.remaining(resolved_run_timeout(plan)),
         resume_session_id,
         injections,
     })
@@ -2930,7 +3001,13 @@ mod unattended_tests {
             .phases
             .iter()
             .all(|phase| phase.status == RunPhaseStatus::Queued));
-        assert!(plan.phases.iter().all(|phase| phase.park_payload.is_none()));
+        assert_eq!(
+            plan.phases[0].park_payload.as_deref(),
+            Some("approval required")
+        );
+        assert!(plan.phases[1..]
+            .iter()
+            .all(|phase| phase.park_payload.is_none()));
     }
 
     #[test]
@@ -2974,7 +3051,11 @@ mod unattended_tests {
                 .expect("failed and interrupted phases should be retryable");
 
             assert_eq!(plan.phases[0].status, RunPhaseStatus::Queued);
-            assert!(plan.phases[0].park_payload.is_none());
+            assert_eq!(
+                plan.phases[0].park_payload.as_deref(),
+                Some("turn interrupted")
+            );
+            assert!(plan.phases[0].recovery_requested);
         }
     }
 
@@ -3008,7 +3089,18 @@ mod unattended_tests {
             .phases
             .iter()
             .all(|phase| phase.status == RunPhaseStatus::Queued));
-        assert!(plan.phases.iter().all(|phase| phase.park_payload.is_none()));
+        assert_eq!(
+            plan.phases
+                .iter()
+                .map(|phase| phase.park_payload.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("harness spawn failed"),
+                Some("total run wall-clock budget exceeded"),
+                Some("verify verdict: BLOCK")
+            ]
+        );
+        assert!(plan.phases.iter().all(|phase| phase.recovery_requested));
     }
 
     #[test]
@@ -3025,7 +3117,11 @@ mod unattended_tests {
         assert_eq!(plan.phases[0].status, RunPhaseStatus::Completed);
         assert_eq!(plan.phases[1].status, RunPhaseStatus::Running);
         assert_eq!(plan.phases[2].status, RunPhaseStatus::Queued);
-        assert!(plan.phases[2].park_payload.is_none());
+        assert_eq!(
+            plan.phases[2].park_payload.as_deref(),
+            Some("turn interrupted")
+        );
+        assert!(plan.phases[2].recovery_requested);
     }
 
     #[test]
@@ -3151,6 +3247,96 @@ mod unattended_tests {
             .phases
             .iter()
             .all(|phase| phase.handoff_topic.is_none()));
+    }
+
+    #[test]
+    fn edited_budgets_reject_zero_for_every_limit() {
+        for budgets in [
+            RunBudgets {
+                per_phase_token_cap: Some(0),
+                ..Default::default()
+            },
+            RunBudgets {
+                per_phase_wall_clock_secs: Some(0),
+                ..Default::default()
+            },
+            RunBudgets {
+                total_run_wall_clock_secs: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_budgets(&budgets).is_err());
+        }
+        assert!(validate_budgets(&RunBudgets {
+            per_phase_token_cap: Some(5_000_000),
+            ..Default::default()
+        })
+        .is_ok());
+        assert!(validate_budgets(&RunBudgets::default()).is_ok());
+    }
+
+    #[test]
+    fn continuation_counts_saved_elapsed_time_against_total_cap() {
+        let clock = RunClock {
+            saved_elapsed: Duration::from_secs(50 * 60),
+            started: Instant::now(),
+        };
+        let cap = Duration::from_secs(60 * 60);
+        assert!(clock.elapsed() >= Duration::from_secs(50 * 60));
+        assert!(clock.remaining(cap) <= Duration::from_secs(10 * 60));
+        assert!(clock.remaining(cap) > Duration::ZERO);
+        assert_eq!(
+            clock.remaining(Duration::from_secs(45 * 60)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn requeue_and_budget_edits_preserve_both_updates() {
+        let directory =
+            std::env::temp_dir().join(format!("loopdeck-budget-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let root = directory.as_path();
+        let state = empty_app_state();
+        let mut initial = parked_chain();
+        initial.phases[0].status = RunPhaseStatus::Interrupted;
+        let execution_id = &initial.phases[0].execution_id;
+        runplan::save(root, &initial).unwrap();
+
+        let (requeue_loaded, wait_for_requeue) = std::sync::mpsc::channel();
+        let (budget_started, wait_for_budget) = std::sync::mpsc::channel();
+        let state = &state;
+        std::thread::scope(|threads| {
+            let requeue = threads.spawn(move || {
+                edit_inactive_run_plan(state, root, "active", |plan| {
+                    requeue_loaded.send(()).unwrap();
+                    wait_for_budget.recv().unwrap();
+                    assert!(matches!(
+                        state.run_handles.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    requeue_terminal_phase(plan, execution_id)
+                })
+                .unwrap();
+            });
+            wait_for_requeue.recv().unwrap();
+            let budget = threads.spawn(move || {
+                budget_started.send(()).unwrap();
+                edit_inactive_run_plan(state, root, "active", |plan| {
+                    plan.budgets.total_run_wall_clock_secs = Some(3600);
+                    Ok(())
+                })
+                .unwrap();
+            });
+            requeue.join().unwrap();
+            budget.join().unwrap();
+        });
+
+        let saved = runplan::load(root).unwrap().unwrap();
+        assert_eq!(saved.phases[0].status, RunPhaseStatus::Queued);
+        assert!(saved.phases[0].recovery_requested);
+        assert_eq!(saved.budgets.total_run_wall_clock_secs, Some(3600));
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
