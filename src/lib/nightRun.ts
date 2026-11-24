@@ -8,8 +8,8 @@ import type { AskUserQuestionSpec, Epic, PhaseVerdict, RunPhase, RunPhaseStatus,
 
 export const STATUS_LABEL: Record<RunPhaseStatus, string> = {
   queued: "queued",
+  waiting: "waiting",
   running: "running",
-  waiting: "waiting on upstream handoff",
   parked: "parked",
   delivered: "needs linking",
   completed: "completed",
@@ -20,8 +20,8 @@ export const STATUS_LABEL: Record<RunPhaseStatus, string> = {
 
 export const STATUS_COLOR: Record<RunPhaseStatus, string> = {
   queued: "var(--muted-foreground)",
-  running: "var(--primary)",
   waiting: "var(--muted-foreground)",
+  running: "var(--primary)",
   parked: "var(--warning)",
   delivered: "var(--warning)",
   completed: "var(--success)",
@@ -180,20 +180,12 @@ export function hasQueueablePhases(epics: Epic[]): boolean {
   return false;
 }
 
-/** Dependency label for one selected phase in the plan-tonight wizard's
- *  picker (prd-night-run-surfaces Phase 2, item 1). Mirrors
- *  `run_executor.rs::build_run_plan`'s authored-order default: phase 0 has no
- *  dependencies, every later phase depends on its immediate predecessor in
- *  selection order. The wizard shows these labels so the picker's checkbox
- *  order visibly IS the dependency chain the run will execute under. */
-export function dependencyLabel(
-  index: number,
-  selectedIds: string[],
-  idToTitle: Record<string, string>,
-): string {
-  if (index <= 0) return "runs first — no dependencies";
-  const prev = selectedIds[index - 1];
-  return `depends on ${idToTitle[prev] ?? prev}`;
+export function phasePredecessor(
+  earlier: string[],
+  configured: string | undefined,
+): string | undefined {
+  if (configured === undefined) return earlier[earlier.length - 1];
+  return earlier.includes(configured) ? configured : undefined;
 }
 
 /** Seconds → `"Xh Ym"` past an hour, else `"Xm Ys"`, else `"Ys"`. */

@@ -113,10 +113,13 @@ async fn two_phase_role_demo_attributes_each_phase_to_its_role() {
         Some(roster.qa_id.as_str())
     );
 
-    // 2. The staffing change splits the combined turn: one batch per role.
+    // 2. One turn per phase (`prd-parallel-scheduling`): the authored chain
+    //    makes only the dev phase ready first. Staffing no longer splits a
+    //    combined turn because there is no combined turn — each phase gets
+    //    its own.
     assert_eq!(
-        crate::commands::run_queue::next_queued_batch(&plan),
-        Some(vec![0])
+        crate::scheduler::select_ready(&plan, &Default::default(), 4),
+        vec![0]
     );
 
     // 3. Execute each staffing batch through the executor's exact seam:
@@ -191,10 +194,10 @@ fn unassigned_phase_stays_on_the_default_agent() {
     );
     assert!(plan.phases[0].assigned_agent_id.is_none());
     assert!(plan.phases[0].assigned_agent_name.is_none());
-    // All-unassigned plans still batch into one combined turn.
+    // An unassigned phase is still schedulable: it is the one ready phase.
     assert_eq!(
-        crate::commands::run_queue::next_queued_batch(&plan),
-        Some(vec![0])
+        crate::scheduler::select_ready(&plan, &Default::default(), 4),
+        vec![0]
     );
 }
 

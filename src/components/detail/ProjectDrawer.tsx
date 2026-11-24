@@ -410,14 +410,17 @@ function StuckQuestionCallout({ projectPath }: { projectPath: string }) {
 
   async function onSubmit(answers: AskUserQuestionAnswers) {
     try {
-      await api.agentAnswerQuestion(projectPath, pending.requestId, answers);
+      await api.agentAnswerQuestion(pending.controlPath ?? projectPath, pending.requestId, answers);
     } catch (err) {
       // The turn may have ended while the user deliberated; the backend
       // returns a "no pending question" error in that case. Either way the
       // entry is stale — clear it locally so the banner doesn't linger.
       console.warn("agentAnswerQuestion failed", err);
     }
-    clearQuestion(projectPath);
+    const current = usePendingInteractions.getState().questions[projectPath];
+    if (current?.requestId === pending.requestId && current.controlPath === pending.controlPath) {
+      clearQuestion(projectPath);
+    }
   }
 
   if (mode === "collapsed") {
@@ -494,7 +497,7 @@ function StuckPermissionCallout({ projectPath }: { projectPath: string }) {
     // becomes ✓/✗ consistently). On IPC error (the turn already ended, no
     // pending approval), the entry is stale — clear it so the banner goes away.
     try {
-      await api.agentAnswerPermission(projectPath, pending.requestId, decision);
+      await api.agentAnswerPermission(pending.controlPath ?? projectPath, pending.requestId, decision);
     } catch (err) {
       console.warn("agentAnswerPermission failed", err);
       clearPermission(projectPath);
@@ -503,7 +506,7 @@ function StuckPermissionCallout({ projectPath }: { projectPath: string }) {
 
   async function onAlwaysAllow() {
     try {
-      await api.agentAnswerPermission(projectPath, pending.requestId, {
+      await api.agentAnswerPermission(pending.controlPath ?? projectPath, pending.requestId, {
         allow: true,
       });
       const rule = buildAllowRule(pending.toolName, pending.input);
@@ -532,7 +535,7 @@ function StuckPlanCallout({ projectPath }: { projectPath: string }) {
 
   async function onDecide(decision: PlanApprovalDecision) {
     try {
-      await api.agentAnswerPlan(projectPath, pending.requestId, decision);
+      await api.agentAnswerPlan(pending.controlPath ?? projectPath, pending.requestId, decision);
     } catch (err) {
       console.warn("agentAnswerPlan failed", err);
       clearPlan(projectPath);

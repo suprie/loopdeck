@@ -1701,7 +1701,7 @@ pub(crate) fn spawn_fresh_with_config(
     agent_config: &crate::config::AgentConfig,
     force_autonomous: bool,
 ) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
-    spawn_fresh_with_config_resuming(
+    spawn_fresh_with_config_resume(
         state,
         path,
         policy_root,
@@ -1711,7 +1711,12 @@ pub(crate) fn spawn_fresh_with_config(
     )
 }
 
-pub(crate) fn spawn_fresh_with_config_resuming(
+/// Resume-aware counterpart of [`spawn_fresh_with_config`]. Restart
+/// reconciliation (`parallel-scheduling/restart-reconcile`) passes the saved
+/// provider session id so an auto-resumed phase keeps its model context in a
+/// surviving worktree. `None` preserves the fresh-session behavior every
+/// other caller relies on.
+pub(crate) fn spawn_fresh_with_config_resume(
     state: &AppState,
     path: &Path,
     policy_root: &Path,
@@ -1935,7 +1940,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     force_autonomous: bool,
     plan_mode: bool,
 ) -> Result<AgentResponse, AppError> {
-    start_fresh_and_record_streaming_in_root_with_config_and_resume(
+    start_fresh_and_record_streaming_in_root_with_config_resume(
         state,
         path,
         policy_root,
@@ -1953,8 +1958,13 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     .await
 }
 
+/// Resume-aware counterpart of
+/// [`start_fresh_and_record_streaming_in_root_with_config`]. The run-queue
+/// executor passes a phase's saved session id only when restart
+/// reconciliation classified it auto-resumable; every other caller goes
+/// through the wrapper above with `None`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_and_resume(
+pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_resume(
     state: &AppState,
     path: &Path,
     policy_root: &Path,
@@ -1970,7 +1980,7 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_and_res
     resume_session_id: Option<&str>,
 ) -> Result<AgentResponse, AppError> {
     let session_arc = match agent_config {
-        Some(config) => spawn_fresh_with_config_resuming(
+        Some(config) => spawn_fresh_with_config_resume(
             state,
             path,
             policy_root,

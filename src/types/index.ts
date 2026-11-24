@@ -452,7 +452,7 @@ export interface DeliveryReportResponse {
    * starts fresh from the default branch (`clean-handoff`). */
   handoff?: HandoffRecord;
   /** Recoverable delivery awaiting the idempotent retry (`retry-recovery`). */
-  retry?: RetryState;
+  retries: RetryState[];
 }
 
 /** Mirrors Rust `handoff::HandoffRecord`. */
@@ -553,10 +553,9 @@ export type StallPolicy = "continue_independent" | "halt";
 /** serde `rename_all = "lowercase"`. Where a queued phase is in the run. */
 export type RunPhaseStatus =
   | "queued"
-  | "running"
-  /** Blocked on an unmet upstream handoff dependency, not on a human
-   * (`prd-agent-handoff` Phase 2). Transient. */
+  /** Held by the dependency gate until every `depends_on` phase lands green. */
   | "waiting"
+  | "running"
   | "parked"
   | "delivered"
   | "completed"
@@ -606,8 +605,6 @@ export interface RunPhase {
   status: RunPhaseStatus;
   /** Provider dispatch count, retained across interruption and continuation. */
   attempt: number;
-  /** Provider-native session retained for continuation when available. */
-  provider_session_id?: string;
   recovery_requested: boolean;
   interview: PinnedAnswer[];
   interview_status: InterviewStatus;
@@ -635,6 +632,15 @@ export interface RunPhase {
    * (`prd-agent-handoff` Phase 1). Absent = the phase has no artifact
    * contract; the executor emits nothing for it. */
   handoff_topic?: string;
+  /** This phase's own isolated worktree (`prd-parallel-scheduling`). One
+   * worktree per in-flight phase keeps provider sessions keyed honestly. */
+  worktree_path?: string;
+  /** Branch cut for the phase worktree from the repository default branch. */
+  worktree_branch?: string;
+  /** Provider session id of this phase's last turn. */
+  session_id?: string;
+  /** Session id the next turn resumes after a safe restart auto-resume. */
+  resume_session_id?: string;
 }
 
 /** Queue-time per-phase staffing choice passed to `create_run_plan`
@@ -665,6 +671,8 @@ export interface RunPlan {
   environment: RunEnvironment;
   wall_clock_secs: number;
   stall_policy: StallPolicy;
+  /** Maximum phases the executor may run at the same time. Defaults to 4. */
+  max_concurrency: number;
   phases: RunPhase[];
 }
 

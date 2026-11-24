@@ -15,6 +15,7 @@ import type {
  * pending-variant fields.
  */
 export interface PendingPermission {
+  controlPath?: string;
   requestId: string;
   toolName: string;
   input: string;
@@ -27,6 +28,7 @@ export interface PendingPermission {
  * turn ends. Mirrors the Rust `ClaudeEvent::AskUserQuestion` fields.
  */
 export interface PendingQuestion {
+  controlPath?: string;
   requestId: string;
   questions: AskUserQuestionSpec[];
 }
@@ -41,6 +43,7 @@ export interface PendingQuestion {
  * pending-variant fields.
  */
 export interface PendingPlan {
+  controlPath?: string;
   requestId: string;
   plan: string;
 }
@@ -159,6 +162,13 @@ export const usePendingInteractions = create<PendingInteractionState>((set) => (
     const next: Record<string, PendingQuestion> = {};
     const newlyStuck: string[] = [];
     for (const e of entries) {
+      const project = Object.keys(prev).find((path) =>
+        prev[path].controlPath === e.path && prev[path].requestId === e.requestId,
+      );
+      if (project) {
+        next[project] = prev[project];
+        continue;
+      }
       next[e.path] = { requestId: e.requestId, questions: e.questions };
       if (!prev[e.path]) newlyStuck.push(e.path);
     }
@@ -172,6 +182,13 @@ export const usePendingInteractions = create<PendingInteractionState>((set) => (
     const next: Record<string, PendingPermission> = {};
     const newlyStuck: string[] = [];
     for (const e of entries) {
+      const project = Object.keys(prev).find((path) =>
+        prev[path].controlPath === e.path && prev[path].requestId === e.requestId,
+      );
+      if (project) {
+        next[project] = prev[project];
+        continue;
+      }
       next[e.path] = {
         requestId: e.requestId,
         toolName: e.toolName,
@@ -189,6 +206,13 @@ export const usePendingInteractions = create<PendingInteractionState>((set) => (
     const next: Record<string, PendingPlan> = {};
     const newlyStuck: string[] = [];
     for (const e of entries) {
+      const project = Object.keys(prev).find((path) =>
+        prev[path].controlPath === e.path && prev[path].requestId === e.requestId,
+      );
+      if (project) {
+        next[project] = prev[project];
+        continue;
+      }
       next[e.path] = { requestId: e.requestId, plan: e.plan };
       if (!prev[e.path]) newlyStuck.push(e.path);
     }

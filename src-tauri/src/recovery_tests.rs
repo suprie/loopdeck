@@ -1,6 +1,6 @@
 //! Recovery tests exercise real persistence and linked worktrees without a live provider.
 
-use crate::commands::run_queue::requeue_terminal_phase;
+use crate::commands::run_queue::ensure_phase_worktree;
 use crate::execution::{self, ExecutionState};
 use crate::run_executor;
 use crate::runplan::{self, RunPhaseStatus, StallPolicy};
@@ -32,6 +32,8 @@ impl Repository {
     fn new() -> Self {
         let directory =
             std::env::temp_dir().join(format!("loopdeck-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let directory = directory.canonicalize().unwrap();
         let root = directory.join("project");
         let worktree = directory.join("worker");
         fs::create_dir_all(&root).unwrap();
@@ -90,6 +92,7 @@ async fn restart_continues_unfinished_phase_and_retains_worktree_changes() {
     plan.phases[0].status = RunPhaseStatus::Completed;
     plan.phases[1].status = RunPhaseStatus::Running;
     plan.phases[1].attempt = 1;
+    plan.phases[1].session_id = Some("codex:saved-thread".into());
     plan.phases[1].park_payload = Some("verification was interrupted".into());
     plan.environment.worktree_path = Some(repo.worktree.clone());
     plan.environment.worktree_branch = Some("recovery-worker".into());
@@ -99,38 +102,25 @@ async fn restart_continues_unfinished_phase_and_retains_worktree_changes() {
     )
     .unwrap();
     runplan::save(&repo.root, &plan).unwrap();
-    runplan::checkpoint_session(
-        &repo.root,
-        &plan.id,
-        &["sample/unfinished".into()],
-        "codex:saved-thread",
-    )
-    .unwrap();
 
     // No in-memory executor/session is retained: reconstruct from central state.
     assert!(run_executor::reconcile_running_phases(&repo.worktree).unwrap());
     assert!(!run_executor::reconcile_running_phases(&repo.root).unwrap());
-    let mut recovered = runplan::load(&repo.root).unwrap().unwrap();
-    assert_eq!(recovered.phases[1].status, RunPhaseStatus::Interrupted);
-    requeue_terminal_phase(&mut recovered, "sample/unfinished").unwrap();
-    runplan::save(&repo.worktree, &recovered).unwrap();
-
     let continued = runplan::load(&repo.root).unwrap().unwrap();
     assert_eq!(continued.phases[0].status, RunPhaseStatus::Completed);
     assert_eq!(continued.phases[1].status, RunPhaseStatus::Queued);
-    assert!(continued.phases[1].recovery_requested);
     assert_eq!(
-        continued.phases[1].provider_session_id.as_deref(),
+        continued.phases[1].resume_session_id.as_deref(),
         Some("codex:saved-thread")
     );
     assert_eq!(
         continued.phases[1].park_payload.as_deref(),
         Some("verification was interrupted")
     );
-    assert_eq!(
-        continued.environment.worktree_path.as_ref(),
-        Some(&repo.worktree)
-    );
+    let (worktree, branch, created) = ensure_phase_worktree(&repo.root, &continued, 1).unwrap();
+    assert_eq!(worktree, repo.worktree);
+    assert_eq!(branch, "recovery-worker");
+    assert!(!created);
     assert_eq!(
         fs::read_to_string(repo.worktree.join("unfinished.rs")).unwrap(),
         "// implementation already written\n"
@@ -211,39 +201,10 @@ fn central_execution_revision_rejects_stale_writes_without_repository_files() {
 }
 
 #[test]
-fn late_session_checkpoint_cannot_attach_to_a_replacement_run() {
-    let repo = Repository::new();
-    let mut plan = run_executor::build_run_plan(
-        "old-run".into(),
-        repo.root.clone(),
-        chrono::Utc::now(),
-        &["sample/shared-loop".into()],
-        StallPolicy::ContinueIndependent,
-        false,
-        &[],
-    );
-    plan.phases[0].status = RunPhaseStatus::Running;
-    runplan::save(&repo.root, &plan).unwrap();
-    runplan::checkpoint_session(
-        &repo.root,
-        "old-run",
-        &["sample/shared-loop".into()],
-        "codex:old-thread",
+fn legacy_provider_checkpoint_uses_the_scheduler_session_field() {
+    let phase: runplan::RunPhase = serde_yaml::from_str(
+        "execution_id: sample/shared-loop\nprovider_session_id: codex:old-thread\n",
     )
     .unwrap();
-
-    plan.id = "replacement-run".into();
-    runplan::save(&repo.root, &plan).unwrap();
-    assert!(matches!(
-        runplan::checkpoint_session(
-            &repo.root,
-            "old-run",
-            &["sample/shared-loop".into()],
-            "codex:late-thread"
-        ),
-        Err(crate::error::AppError::Conflict(_))
-    ));
-    assert!(runplan::load(&repo.root).unwrap().unwrap().phases[0]
-        .provider_session_id
-        .is_none());
+    assert_eq!(phase.session_id.as_deref(), Some("codex:old-thread"));
 }

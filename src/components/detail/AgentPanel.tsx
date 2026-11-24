@@ -366,7 +366,9 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
               toolName: perm.toolName,
               input: perm.input,
             });
-          } else if (!perm && pendingStore.permissions[projectPath]) {
+          } else if (
+            !perm && pendingStore.permissions[projectPath] && !pendingStore.permissions[projectPath].controlPath
+          ) {
             // Backend says nothing pending but the store does — clear the
             // stale entry (turn ended while the user was away).
             clearPendingPermission(projectPath);
@@ -376,7 +378,9 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
               requestId: q.requestId,
               questions: q.questions,
             });
-          } else if (!q && pendingStore.questions[projectPath]) {
+          } else if (
+            !q && pendingStore.questions[projectPath] && !pendingStore.questions[projectPath].controlPath
+          ) {
             clearPendingQuestion(projectPath);
           }
           // Unlike the permission/question checks above, also refresh when
@@ -882,11 +886,13 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     if (!pendingQuestion) return;
     const requestId = pendingQuestion.requestId;
     try {
-      await api.agentAnswerQuestion(projectPath, requestId, answers);
-      if (mountedRef.current) clearPendingQuestion(projectPath);
+      await api.agentAnswerQuestion(pendingQuestion.controlPath ?? projectPath, requestId, answers);
     } catch (err) {
-      if (mountedRef.current) {
-        setError(describeError(err));
+      if (mountedRef.current) setError(describeError(err));
+    } finally {
+      const current = usePendingInteractions.getState().questions[projectPath];
+      if (mountedRef.current && current?.requestId === requestId &&
+          current.controlPath === pendingQuestion.controlPath) {
         clearPendingQuestion(projectPath);
       }
     }
@@ -903,7 +909,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     if (!pendingPermission) return;
     const requestId = pendingPermission.requestId;
     try {
-      await api.agentAnswerPermission(projectPath, requestId, decision);
+      await api.agentAnswerPermission(pendingPermission.controlPath ?? projectPath, requestId, decision);
       // Don't clear `pendingPermission` here — wait for the resolved
       // permission_request event to arrive so the ⏳ marker becomes ✓/✗ in
       // the same flow as auto-decided tools. If the IPC errored, clear + banner.
@@ -927,7 +933,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
     if (!pendingPlan) return;
     const requestId = pendingPlan.requestId;
     try {
-      await api.agentAnswerPlan(projectPath, requestId, decision);
+      await api.agentAnswerPlan(pendingPlan.controlPath ?? projectPath, requestId, decision);
     } catch (err) {
       if (mountedRef.current) {
         setError(describeError(err));
@@ -955,7 +961,7 @@ export function AgentPanel({ projectPath }: AgentPanelProps) {
 
     // Resolve the current approval first — unblocks the parked turn.
     try {
-      await api.agentAnswerPermission(projectPath, requestId, { allow: true });
+      await api.agentAnswerPermission(pendingPermission.controlPath ?? projectPath, requestId, { allow: true });
     } catch (err) {
       if (mountedRef.current) {
         setError(describeError(err));

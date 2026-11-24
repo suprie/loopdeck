@@ -399,6 +399,65 @@ pub fn open_pr_for_branch(repo_path: &Path, branch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PhaseDraft {
+    pub url: String,
+    pub body: String,
+    is_draft: bool,
+    is_cross_repository: bool,
+    head_ref_name: String,
+    head_ref_oid: String,
+}
+
+fn matching_phase_draft(output: &[u8], branch: &str, commit: &str) -> Option<PhaseDraft> {
+    let drafts: Vec<PhaseDraft> = serde_json::from_slice(output).ok()?;
+    let mut matches = drafts.into_iter().filter(|draft| {
+        draft.is_draft
+            && !draft.is_cross_repository
+            && draft.head_ref_name == branch
+            && draft.head_ref_oid == commit
+            && draft.url.starts_with("https://github.com/")
+            && draft.url.contains("/pull/")
+    });
+    let draft = matches.next()?;
+    matches.next().is_none().then_some(draft)
+}
+
+/// Inspect an already-published draft. The caller bounds the lookup; dropping
+/// this future kills the CLI even if GitHub or credential lookup stalls.
+pub(crate) async fn lookup_phase_draft(worktree: &Path, branch: &str) -> Option<PhaseDraft> {
+    if current_branch(worktree).as_deref() != Some(branch) {
+        return None;
+    }
+    let commit = head_commit(worktree)?;
+    let gh = crate::binary::resolve_command("gh").ok()?;
+    let output = tokio::process::Command::new(gh)
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "url,body,isDraft,isCrossRepository,headRefName,headRefOid",
+            "--limit",
+            "2",
+        ])
+        .env_remove("GH_REPO")
+        .env("GH_PROMPT_DISABLED", "1")
+        .current_dir(worktree)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    matching_phase_draft(&output.stdout, branch, &commit)
+}
+
 /// Classify recorded commit evidence. A commit is reachable only when it
 /// resolves to a commit object and is an ancestor of the current `HEAD`.
 pub fn commit_reachability(repo_path: &Path, commit: Option<&str>) -> CommitReachability {
@@ -721,6 +780,37 @@ fn last_modified_time(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn watchdog_lookup_requires_a_unique_draft_for_the_exact_branch_and_commit() {
+        let draft = serde_json::json!({
+            "url": "https://github.com/o/r/pull/17",
+            "body": "verification",
+            "isDraft": true,
+            "isCrossRepository": false,
+            "headRefName": "run/phase",
+            "headRefOid": "abc123",
+        });
+        let encoded = |drafts: Vec<serde_json::Value>| serde_json::to_vec(&drafts).unwrap();
+        let one = encoded(vec![draft.clone()]);
+        assert!(matching_phase_draft(&one, "run/phase", "abc123").is_some());
+        assert!(matching_phase_draft(&one, "run/sibling", "abc123").is_none());
+        assert!(matching_phase_draft(&one, "run/phase", "stale").is_none());
+        assert!(matching_phase_draft(
+            &encoded(vec![draft.clone(), draft.clone()]),
+            "run/phase",
+            "abc123"
+        )
+        .is_none());
+
+        let mut ready = draft.clone();
+        ready["isDraft"] = false.into();
+        assert!(matching_phase_draft(&encoded(vec![ready]), "run/phase", "abc123").is_none());
+
+        let mut fork = draft;
+        fork["isCrossRepository"] = true.into();
+        assert!(matching_phase_draft(&encoded(vec![fork]), "run/phase", "abc123").is_none());
+    }
+
     use super::*;
     use std::fs;
     use std::io::Write;

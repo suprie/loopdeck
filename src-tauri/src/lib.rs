@@ -34,6 +34,7 @@ pub mod retry;
 mod run_executor;
 mod runplan;
 mod scanner;
+mod scheduler;
 mod secret_scan;
 mod secrets;
 mod skills;

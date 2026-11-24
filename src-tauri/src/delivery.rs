@@ -317,6 +317,52 @@ pub fn extract_rubric_result(text: &str, checked_at: DateTime<Utc>) -> Option<Ru
     })
 }
 
+/// The unattended draft body carries the verifier report and phase metadata.
+pub(crate) fn rubric_from_phase_draft(
+    body: &str,
+    execution_id: &str,
+    checked_at: DateTime<Utc>,
+) -> Option<RubricResult> {
+    let mut verification = Vec::new();
+    let mut in_verification = false;
+    let mut in_metadata = false;
+    let mut phase_matches = false;
+    for line in body.lines().map(str::trim) {
+        match line {
+            "## Verify Verdict" => in_verification = true,
+            "## Run metadata" => {
+                in_verification = false;
+                in_metadata = true;
+            }
+            heading if heading.starts_with("## ") && heading != "## PRD Verification" => {
+                in_verification = false;
+                in_metadata = false;
+            }
+            _ if in_verification => verification.push(line),
+            _ if in_metadata => {
+                let item = line
+                    .strip_prefix("- Phase: ")
+                    .or_else(|| line.strip_prefix("- "));
+                if let Some((id, _)) = item
+                    .and_then(|item| item.strip_prefix('`'))
+                    .and_then(|item| item.split_once('`'))
+                {
+                    if phase_matches || id != execution_id {
+                        return None;
+                    }
+                    phase_matches = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !phase_matches {
+        return None;
+    }
+    extract_rubric_result(&verification.join("\n"), checked_at)
+        .filter(|rubric| !rubric.criteria.is_empty() && rubric.all_pass())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +370,41 @@ mod tests {
 
     fn ts() -> DateTime<Utc> {
         Utc.timestamp_opt(1_800_000_000, 0).unwrap()
+    }
+
+    #[test]
+    fn draft_recovery_requires_this_phase_and_a_passing_verifier_table() {
+        let body = "\
+## Verify Verdict
+## PRD Verification
+**Verdict:** PASS
+
+| 1 | Expected file | PASS | smoke-beta.txt:1 |
+
+## Run metadata
+- Phases:
+  - `smoke/beta` — Beta
+";
+        assert!(rubric_from_phase_draft(body, "smoke/beta", ts()).is_some());
+        assert!(rubric_from_phase_draft(body, "smoke/alpha", ts()).is_none());
+        assert!(rubric_from_phase_draft(
+            &body.replace("| PASS |", "| PARTIAL |"),
+            "smoke/beta",
+            ts()
+        )
+        .is_none());
+        assert!(rubric_from_phase_draft(
+            &body.replace("| 1 | Expected file | PASS | smoke-beta.txt:1 |", ""),
+            "smoke/beta",
+            ts()
+        )
+        .is_none());
+        assert!(rubric_from_phase_draft(
+            &body.replace("## Verify Verdict", "## Summary"),
+            "smoke/beta",
+            ts()
+        )
+        .is_none());
     }
 
     fn links() -> DeliveryLinks {

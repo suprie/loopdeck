@@ -83,8 +83,8 @@ pub fn detect_stage(worktree: &Path) -> DeliveryStage {
 }
 
 /// The persisted recoverable delivery record (`.loopdeck/delivery-retry.yaml`).
-/// Written by the executor at the failure site; cleared by a successful
-/// retry. One record per project — the latest failed delivery.
+/// Written by the executor at the failure site and cleared when that branch
+/// is delivered or requeued.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeliveryRetryRecord {
     /// The loops whose delivery stopped (execution IDs, re-resolved fresh at
@@ -112,25 +112,51 @@ pub fn retry_record_path(repo_path: &Path) -> PathBuf {
     repo_path.join(".loopdeck").join("delivery-retry.yaml")
 }
 
-pub fn load(repo_path: &Path) -> Result<Option<DeliveryRetryRecord>, AppError> {
-    let path = retry_record_path(repo_path);
-    if !path.exists() {
-        return Ok(None);
-    }
-    Ok(serde_yaml::from_str(&std::fs::read_to_string(&path)?)?)
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRecords {
+    List(Vec<DeliveryRetryRecord>),
+    Legacy(DeliveryRetryRecord),
+}
+
+pub fn load_all(repo_path: &Path) -> Result<Vec<DeliveryRetryRecord>, AppError> {
+    let Some(contents) = crate::persist::read_if_exists(&retry_record_path(repo_path))? else {
+        return Ok(Vec::new());
+    };
+    Ok(match serde_yaml::from_str(&contents)? {
+        StoredRecords::List(records) => records,
+        StoredRecords::Legacy(record) => vec![record],
+    })
 }
 
 pub fn save(repo_path: &Path, record: &DeliveryRetryRecord) -> Result<(), AppError> {
-    let path = retry_record_path(repo_path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let mut records = load_all(repo_path)?;
+    records.retain(|existing| existing.branch != record.branch);
+    records.push(record.clone());
+    write_records(repo_path, &records)
+}
+
+pub(crate) fn clear_branch(repo_path: &Path, branch: &str) -> Result<(), AppError> {
+    let mut records = load_all(repo_path)?;
+    let previous_len = records.len();
+    records.retain(|record| record.branch != branch);
+    if records.len() != previous_len {
+        write_records(repo_path, &records)?;
     }
-    std::fs::write(&path, serde_yaml::to_string(record)?)?;
     Ok(())
 }
 
-pub fn clear(repo_path: &Path) {
-    let _ = std::fs::remove_file(retry_record_path(repo_path));
+fn write_records(repo_path: &Path, records: &[DeliveryRetryRecord]) -> Result<(), AppError> {
+    let path = retry_record_path(repo_path);
+    if records.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    crate::persist::atomic_write(&path, &serde_yaml::to_string(records)?)?;
+    Ok(())
 }
 
 /// What one retry invocation did — the UI's toast and the report's outcome.
@@ -222,10 +248,16 @@ fn create_draft_pr(record: &DeliveryRetryRecord) -> Option<String> {
 /// advisory; Git is the truth), so a retry that half-completed yesterday and
 /// a retry clicked twice in a row both converge to the same end state:
 /// PR exists + checklist checked + delivery links persisted + record cleared.
-pub fn run_retry(root: &Path) -> Result<RetryOutcome, AppError> {
-    let Some(mut record) = load(root)? else {
+pub fn run_retry(root: &Path, branch: Option<&str>) -> Result<RetryOutcome, AppError> {
+    let records = load_all(root)?;
+    let branch = branch.or_else(|| (records.len() == 1).then(|| records[0].branch.as_str()));
+    let Some(mut record) = records
+        .iter()
+        .find(|record| Some(record.branch.as_str()) == branch)
+        .cloned()
+    else {
         return Err(AppError::Conflict(
-            "no recoverable delivery to retry — the last delivery either completed or never started".into(),
+            "select a branch with a recoverable delivery".into(),
         ));
     };
     let live_stage = detect_stage(&record.worktree);
@@ -246,7 +278,7 @@ pub fn run_retry(root: &Path) -> Result<RetryOutcome, AppError> {
             }
             runplan::save(root, &plan)?;
         }
-        clear(root);
+        clear_branch(root, &record.branch)?;
         return Ok(RetryOutcome::Requeued {
             execution_ids: requeued,
         });
@@ -282,7 +314,7 @@ pub fn run_retry(root: &Path) -> Result<RetryOutcome, AppError> {
     };
 
     complete_bookkeeping(root, &record, &url)?;
-    clear(root);
+    clear_branch(root, &record.branch)?;
     Ok(RetryOutcome::DeliveryCompleted {
         pr_url: url,
         resumed_from: live_stage,
@@ -613,7 +645,7 @@ mod tests {
     #[test]
     fn retry_without_a_record_is_a_conflict() {
         let f = fixture("no-record");
-        assert!(run_retry(&f.root).is_err());
+        assert!(run_retry(&f.root, None).is_err());
         std::fs::remove_dir_all(f.root.parent().unwrap()).ok();
     }
 
@@ -622,7 +654,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("loopdeck-retry-yaml-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(load(&dir).unwrap().is_none());
+        assert!(load_all(&dir).unwrap().is_empty());
 
         let record = DeliveryRetryRecord {
             execution_ids: vec![LOOP_ID.to_string()],
@@ -634,10 +666,31 @@ mod tests {
             pr_title: "Do the thing".into(),
             recorded_at: Utc::now(),
         };
-        save(&dir, &record).unwrap();
-        assert_eq!(load(&dir).unwrap(), Some(record));
-        clear(&dir);
-        assert!(load(&dir).unwrap().is_none());
+        crate::persist::atomic_write(
+            &retry_record_path(&dir),
+            &serde_yaml::to_string(&record).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_all(&dir).unwrap(), vec![record.clone()]);
+
+        let sibling = DeliveryRetryRecord {
+            branch: "run/independent".into(),
+            execution_ids: vec!["other/phase".into()],
+            ..record.clone()
+        };
+        save(&dir, &sibling).unwrap();
+        assert_eq!(
+            load_all(&dir).unwrap(),
+            vec![record.clone(), sibling.clone()]
+        );
+        assert!(matches!(run_retry(&dir, None), Err(AppError::Conflict(_))));
+        assert!(matches!(
+            run_retry(&dir, Some(&record.branch)).unwrap(),
+            RetryOutcome::Requeued { .. }
+        ));
+        assert_eq!(load_all(&dir).unwrap(), vec![sibling.clone()]);
+        clear_branch(&dir, &sibling.branch).unwrap();
+        assert!(load_all(&dir).unwrap().is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -654,7 +707,7 @@ mod tests {
                 r#"[{"url":"https://github.com/o/r/pull/7"}]"#,
             );
 
-            let outcome = run_retry(&f.root).unwrap();
+            let outcome = run_retry(&f.root, None).unwrap();
             assert_eq!(
                 outcome,
                 RetryOutcome::DeliveryCompleted {
@@ -678,8 +731,11 @@ mod tests {
 
             // Idempotent end state: the record is gone, so a second click has
             // nothing to retry.
-            assert!(load(&f.root).unwrap().is_none());
-            assert!(matches!(run_retry(&f.root), Err(AppError::Conflict(_))));
+            assert!(load_all(&f.root).unwrap().is_empty());
+            assert!(matches!(
+                run_retry(&f.root, None),
+                Err(AppError::Conflict(_))
+            ));
 
             std::fs::remove_dir_all(f.root.parent().unwrap()).ok();
         });
@@ -695,7 +751,7 @@ mod tests {
             // `pr list` empty; `pr create` succeeds and prints the URL.
             std::env::set_var("GH_STUB_CREATE_URL", "https://github.com/o/r/pull/9");
 
-            let outcome = run_retry(&f.root).unwrap();
+            let outcome = run_retry(&f.root, None).unwrap();
             assert_eq!(
                 outcome,
                 RetryOutcome::DeliveryCompleted {
@@ -704,7 +760,7 @@ mod tests {
                 }
             );
             assert_eq!(f.prd_checked(), Some(true));
-            assert!(load(&f.root).unwrap().is_none());
+            assert!(load_all(&f.root).unwrap().is_empty());
 
             std::fs::remove_dir_all(f.root.parent().unwrap()).ok();
         });
@@ -719,7 +775,7 @@ mod tests {
             f.record_failure(DeliveryStage::Committed, false);
             std::env::set_var("GH_STUB_CREATE_URL", "https://github.com/o/r/pull/11");
 
-            let outcome = run_retry(&f.root).unwrap();
+            let outcome = run_retry(&f.root, None).unwrap();
             assert_eq!(
                 outcome,
                 RetryOutcome::DeliveryCompleted {
@@ -755,7 +811,7 @@ mod tests {
             // No GH_STUB_LIST / GH_STUB_CREATE_URL: list → empty, create →
             // non-zero exit.
 
-            let outcome = run_retry(&f.root).unwrap();
+            let outcome = run_retry(&f.root, None).unwrap();
             let RetryOutcome::StillBlocked { stage, reason } = outcome else {
                 panic!("expected StillBlocked, got {outcome:?}");
             };
@@ -766,7 +822,7 @@ mod tests {
             // describing the live (pushed) stage.
             assert_eq!(f.prd_checked(), Some(false));
             assert_eq!(f.phase_status(), RunPhaseStatus::Parked);
-            let record = load(&f.root).unwrap().expect("record retained");
+            let record = load_all(&f.root).unwrap().pop().expect("record retained");
             assert_eq!(record.stage, DeliveryStage::Pushed);
 
             std::fs::remove_dir_all(f.root.parent().unwrap()).ok();
@@ -783,14 +839,14 @@ mod tests {
             // Break the remote: push must fail without mutating anything.
             std::fs::remove_dir_all(&f.origin).unwrap();
 
-            let outcome = run_retry(&f.root).unwrap();
+            let outcome = run_retry(&f.root, None).unwrap();
             let RetryOutcome::StillBlocked { stage, reason } = outcome else {
                 panic!("expected StillBlocked, got {outcome:?}");
             };
             assert_eq!(stage, DeliveryStage::Committed);
             assert!(reason.contains("push failed"));
 
-            let record = load(&f.root).unwrap().expect("record retained");
+            let record = load_all(&f.root).unwrap().pop().expect("record retained");
             assert_eq!(record.stage, DeliveryStage::Committed);
             assert_eq!(f.prd_checked(), Some(false));
 
@@ -806,7 +862,7 @@ mod tests {
         f.record_failure(DeliveryStage::NothingMutated, false);
         std::fs::write(f.worktree.join("wip.md"), "uncommitted\n").unwrap();
 
-        let outcome = run_retry(&f.root).unwrap();
+        let outcome = run_retry(&f.root, None).unwrap();
         assert_eq!(
             outcome,
             RetryOutcome::Requeued {
@@ -814,7 +870,7 @@ mod tests {
             }
         );
         assert_eq!(f.phase_status(), RunPhaseStatus::Queued);
-        assert!(load(&f.root).unwrap().is_none(), "record consumed");
+        assert!(load_all(&f.root).unwrap().is_empty(), "record consumed");
         // The worktree is untouched — still dirty, nothing lost.
         assert_eq!(detect_stage(&f.worktree), DeliveryStage::NothingMutated);
 

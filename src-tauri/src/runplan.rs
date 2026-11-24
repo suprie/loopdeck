@@ -47,12 +47,14 @@ pub enum StallPolicy {
 pub enum RunPhaseStatus {
     #[default]
     Queued,
-    Running,
-    /// Blocked on an upstream handoff artifact, not on a human
-    /// (`prd-agent-handoff` Phase 2). Transient: the executor re-checks it
-    /// after every turn and parks it only when upstream is terminal-bad or
-    /// the run ends.
+    /// Held by the dependency gate: this phase is eligible to run only after
+    /// every phase in its `depends_on` completes green. The scheduler releases
+    /// it to `Queued` when the gate opens, or marks it `Failed` when an
+    /// upstream phase ends non-green. Never set at queue time — the executor
+    /// computes the initial Waiting set when the run starts, so pre-existing
+    /// plans still start from all-`Queued`.
     Waiting,
+    Running,
     Parked,
     Delivered,
     Completed,
@@ -132,9 +134,6 @@ pub struct RunPhase {
     /// Number of provider dispatches attempted for this phase.
     #[serde(default)]
     pub attempt: u32,
-    /// Native provider session to resume after a process interruption.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_session_id: Option<String>,
     /// Set by the explicit continue action for unfinished work.
     #[serde(default)]
     pub recovery_requested: bool,
@@ -187,6 +186,31 @@ pub struct RunPhase {
     /// from the execution id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_topic: Option<String>,
+    /// Isolated worktree this phase executes in. One worktree per in-flight
+    /// phase keeps the existing session cache keying honest: sessions are
+    /// keyed by worktree path, so concurrent phases can never share a
+    /// provider process. `None` until the phase first starts (legacy plans
+    /// used the single plan-level worktree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<PathBuf>,
+    /// Branch cut for this phase's worktree. Every phase branch is cut from
+    /// the repository's default branch — no stacking — and opens its own
+    /// draft PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    /// Provider session id of this phase's last turn. Retained so restart
+    /// reconciliation can decide whether a saved session still exists before
+    /// auto-resuming an in-flight phase.
+    #[serde(
+        default,
+        alias = "provider_session_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_id: Option<String>,
+    /// Session id the next turn for this phase resumes. Set only when restart
+    /// reconciliation auto-resumes a phase; cleared once the turn starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_session_id: Option<String>,
 }
 
 /// Queue-time per-phase staffing choice (`prd-role-foundations` Phase 4):
@@ -230,8 +254,35 @@ pub struct RunPlan {
     pub wall_clock_secs: u64,
     #[serde(default)]
     pub stall_policy: StallPolicy,
+    /// Maximum number of phases the executor may run at the same time.
+    /// `parallel-scheduling/parallel-batches` adds this knob: the default is
+    /// four, and the picker may lower or raise it per plan. Absent in older
+    /// plan files, so the serde default keeps them loadable.
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
     #[serde(default)]
     pub phases: Vec<RunPhase>,
+}
+
+impl RunPlan {
+    pub(crate) fn set_dependencies(
+        &mut self,
+        mut dependencies: std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<(), AppError> {
+        for phase in &mut self.phases {
+            phase.depends_on = dependencies.remove(&phase.execution_id).unwrap_or_default();
+        }
+        if let Some(id) = dependencies.keys().next() {
+            return Err(AppError::RunPlan(format!(
+                "dependencies reference phase {id:?}, which is not part of this plan"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn default_max_concurrency() -> u32 {
+    limits::DEFAULT_RUN_MAX_CONCURRENCY
 }
 
 /// Path to a project's run plan.
@@ -271,29 +322,6 @@ pub fn save(repo_path: &Path, plan: &RunPlan) -> Result<(), AppError> {
     crate::operational_store::save_document(repo_path, "run_plan", &yaml)
 }
 
-/// Checkpoint the native session before its first task can finish. A delayed
-/// event from a replaced run cannot attach its session to a newer plan.
-pub(crate) fn checkpoint_session(
-    repo_path: &Path,
-    run_id: &str,
-    phase_ids: &[String],
-    session_id: &str,
-) -> Result<(), AppError> {
-    let mut plan =
-        load(repo_path)?.ok_or_else(|| AppError::RunPlan("no active run to checkpoint".into()))?;
-    if plan.id != run_id {
-        return Err(AppError::Conflict(
-            "session checkpoint belongs to a different run".into(),
-        ));
-    }
-    for phase in &mut plan.phases {
-        if phase_ids.contains(&phase.execution_id) && phase.status == RunPhaseStatus::Running {
-            phase.provider_session_id = Some(session_id.to_string());
-        }
-    }
-    save(repo_path, &plan)
-}
-
 /// Atomically write `plan` to `path` via [`persist::atomic_write`].
 #[cfg(test)]
 pub fn save_to_path(path: &Path, plan: &RunPlan) -> Result<(), AppError> {
@@ -316,7 +344,7 @@ pub enum PhaseVerdict {
     Failed,
     Parked,
     Running,
-    /// Blocked on an unmet upstream handoff dependency, not on a human.
+    /// Still held behind an unsatisfied dependency gate when the run ended.
     Waiting,
 }
 
@@ -462,6 +490,7 @@ mod tests {
             environment: RunEnvironment::default(),
             wall_clock_secs: 0,
             stall_policy: StallPolicy::Halt,
+            max_concurrency: 4,
             phases: vec![RunPhase {
                 execution_id: "prd-run-queue/phase-1".to_string(),
                 status: RunPhaseStatus::Queued,
@@ -501,6 +530,11 @@ phases:
         assert_eq!(plan.consent, RunConsent::default());
         assert_eq!(plan.budgets, RunBudgets::default());
         assert_eq!(plan.stall_policy, StallPolicy::ContinueIndependent);
+        assert_eq!(
+            plan.max_concurrency,
+            crate::limits::DEFAULT_RUN_MAX_CONCURRENCY,
+            "older plans without the field get the four-phase default"
+        );
         assert_eq!(plan.phases.len(), 1);
         let phase = &plan.phases[0];
         assert_eq!(phase.status, RunPhaseStatus::Queued);
@@ -563,6 +597,7 @@ phases:
             environment: RunEnvironment::default(),
             wall_clock_secs: 3600,
             stall_policy: StallPolicy::ContinueIndependent,
+            max_concurrency: 4,
             phases: vec![
                 // Completed phase with draft PR
                 RunPhase {
@@ -704,6 +739,36 @@ phases:
         let (verdict, url) = derive_verdict(&phase);
         assert_eq!(verdict, PhaseVerdict::Parked);
         assert!(url.is_none());
+    }
+
+    #[test]
+    fn report_derives_waiting_verdict_for_a_gated_phase() {
+        let phase = RunPhase {
+            execution_id: "x".into(),
+            status: RunPhaseStatus::Waiting,
+            ..Default::default()
+        };
+        let (verdict, url) = derive_verdict(&phase);
+        assert_eq!(verdict, PhaseVerdict::Waiting);
+        assert!(url.is_none());
+    }
+
+    #[test]
+    fn max_concurrency_round_trips_and_legacy_plans_default_to_four() {
+        let mut plan = sample_plan();
+        plan.max_concurrency = 2;
+        let yaml = serde_yaml::to_string(&plan).unwrap();
+        let back: RunPlan = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.max_concurrency, 2);
+
+        let legacy: RunPlan = serde_yaml::from_str(
+            "id: run-legacy\nproject: /repo\ncreated: 2026-07-28T09:00:00Z\nphases: []\n",
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.max_concurrency,
+            crate::limits::DEFAULT_RUN_MAX_CONCURRENCY
+        );
     }
 
     #[test]

@@ -24,16 +24,18 @@ remain repository files.
 
 ## Continue an unfinished queued loop
 
-After restart, previously running phases become interrupted. Use **Continue
-unfinished** in the run queue, or **Continue unfinished loop** on a phase.
-Completed/delivered phases are not requeued. The recorded managed worktree and
-branch are reused, including uncommitted changes.
+After restart, the scheduler requeues running phases with a retained worktree
+and saved session. It parks the other interrupted phases. Use **Continue
+unfinished** in the run queue to retry parked phases. Completed and delivered
+phases stay complete. Continuation reuses the recorded worktree and its edits
+when the worktree survives.
 
 Each phase retains its dispatch count, native provider session ID, and previous
 failure/park reason. Provider start events checkpoint the session before a final
 response exists. Continuation supplies the queued task contract plus recovery
 instructions to inspect existing files/diffs and complete only remaining work.
-Phases with different saved provider sessions run in separate turns.
+Each phase runs in a separate turn. Plans with a legacy shared worktree run one
+phase at a time so two phases cannot write to that worktree concurrently.
 
 The total wall-clock budget includes elapsed time saved by earlier attempts.
 Raise the limit before continuing a run that exhausted its total budget.
