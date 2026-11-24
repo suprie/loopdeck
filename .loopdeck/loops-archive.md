@@ -2046,3 +2046,45 @@ Full history (28 completed loops, 2026-06-22 onward): [`loops-archive.md`](./loo
 - **Status**: completed
 - **Completed**: 2026-10-08
 - **Summary**: Boxed both concrete provider sessions in `HarnessSession` and updated delegation to satisfy `large_enum_variant`; CI-style Clippy and the Rust library suite pass.
+
+### 2026-10-14 — execution-foundations / prd-domain-contract Phase 1
+- **Status**: completed
+- **Completed**: 2026-10-14
+- **Summary**: Added the state/ownership inventory, measured SQLite-vs-file decision and rollback procedure, and legacy identity/migration map; accepted SQLite as the target mutable operational store with compatibility exports.
+
+### 2026-10-28 — execution-foundations / prd-provider-contract capture-fixtures
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: Added sanitized Claude and Codex wire fixtures for text, tool use, approval/question, usage, error, interrupt, and successful completion under `src-tauri/tests/fixtures/provider-events/`, with a manifest mapping each scenario to both providers and its expected semantic payloads. Added `provider_fixture_tests.rs` to enforce JSON validity, Claude-parser compatibility, Codex envelope shape, payload coverage, one terminal event per terminating fragment, and secret/home-path cleanliness. Fixtures are hand-authored from the adapters' documented wire shapes (no live capture available); replace with sanitized live captures when possible. Also allowed `too_many_arguments` on `codex_session::turn_start_params` to keep `clippy -D warnings` green.
+
+### 2026-10-28 — Fix Claude control_response schema blocking unattended mutations
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: The overnight provider-contract run could not write files: every mutating tool call failed with a harness `ZodError` because LoopDeck emitted `{"behavior":"allow"}` without `updatedInput`. `ControlResponsePayload::allow` now requires and serializes the original tool input, deny always carries a `message`, and regression tests cover both allow shapes. `cargo test` (692 passed), `cargo clippy -D warnings`, and `cargo fmt --check` are green. The parked run still needs a rebuild + re-queue.
+
+### 2026-10-28 — execution-foundations / prd-provider-contract Phases 2–3
+- **Status**: completed
+- **Completed**: 2026-10-28
+- **Summary**: Both adapters now convert provider output at their boundary into the versioned `RunEvent` envelope and dual-emit it alongside the unchanged `ClaudeEvent` channel. Claude lines and Codex app-server messages map to started/content/tool/decision/usage/terminal/unsupported with a per-segment terminal gate, redaction, and `auto-allow` encoded as `allowed` + summary prefix. `ts-rs` generates `src/types/generated/` with a CI drift check; `useRunQueueEvents` migrated to the `run-event` topic through the pure `runEventProjection` reducer. Fixture parity tests (`provider_contract_tests.rs`) and reducer tests prove one terminal per segment, preserved approval payloads, and typed bindings. Full Rust suite, clippy, frontend build, and frontend tests pass.
+
+### 2026-10-30 — role-based-orchestration / prd-parallel-scheduling (all six loops)
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: The run executor now fires one turn per run-plan phase instead of one combined queued-batch turn. A new `scheduler.rs` validates the dependency graph (cycles, self-edges, and dangling edges are rejected at plan creation and again at run start), holds dependents in a persisted `Waiting` state, and releases them only when every upstream is Completed or Delivered. Ready phases fan out concurrently under `RunPlan.max_concurrency` (default 4, configurable in the plan-tonight picker), each in its own worktree and branch cut from the default branch, each with its own provider session, token budget, and wall-clock watchdog. A non-green upstream fails its Waiting dependents while independent in-flight phases continue. Restart reconciliation now classifies every `Running` phase, auto-resuming only when worktree and saved session both survive and parking the rest with a reason. Scheduler property tests cover generated DAGs, cycle rejection, and restart decisions; worktree tests prove disjoint paths and isolated cleanup. `cargo test` (747 passed), `cargo clippy --all-targets` (0 errors), `npx tsc --noEmit`, `npm run build`, and `npm run test:frontend` (34 passed) are green.
+
+### 2026-10-30 — Central queued-run state and unfinished-loop continuation
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Centralized run plans and execution snapshots in SQLite and added recovery-aware continuation with retained worktrees, provider checkpoints, and completed-phase preservation.
+
+### 2026-10-30 — Shared agent writing guidance
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Added shared ASD-STE100 writing guidance to Claude system instructions and the initial Codex prompt, including profiles without role charters.
+
+### 2026-10-30 — Codex sub-agent activity visibility
+- **Status**: completed
+- **Completed**: 2026-10-30
+- **Summary**: Show collaboration call starts/results in live and persisted Worker activity through both event paths. Keep call completion separate from child status. Added event and display regression tests.
+- **Validation**: All 36 frontend tests, TypeScript, formatting, and diff checks passed. Rust regression test is queued behind an existing Cargo build lock.
+- **Follow-up**: Live smoke with delegated Codex work; child transcript subscription and reconciliation of authored loop status with provider lifecycle remain separate work.

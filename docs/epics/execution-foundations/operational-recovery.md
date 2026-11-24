@@ -11,11 +11,13 @@ remain repository files.
 - `operational_documents` stores schema-versioned run-plan and execution
   snapshots, with import source and timestamps. This is an incremental storage
   boundary, not the complete normalized operational-store schema.
-- Linked worktrees resolve through Git's common directory to their main
-  checkout. The main checkout supplies the initial legacy YAML; stale copies
-  in worktrees are not imported.
+- Linked worktree roots share the main checkout's operational state and
+  active-run checks. The main checkout supplies the initial legacy YAML.
+  Separately registered subdirectories keep their own operational state.
 - A missing central record imports a validated legacy document once. Legacy
   files are retained unchanged; subsequent runtime writes go to SQLite.
+  A valid execution YAML backup can be imported if the legacy primary is
+  malformed. A malformed SQLite record is reported and preserved.
 - Execution revision checks run inside a write transaction. SQLite writes
   have a bounded busy timeout; short in-process operations are serialized.
 - Project identity currently follows the canonical main-checkout path.
@@ -24,15 +26,21 @@ remain repository files.
 
 ## Continue an unfinished queued loop
 
-After restart, previously running phases become interrupted. Use **Continue
-unfinished** in the run queue, or **Continue unfinished loop** on a phase.
-Completed/delivered phases are not requeued. The recorded managed worktree and
-branch are reused, including uncommitted changes.
+After restart, the scheduler requeues running phases with a retained worktree
+and saved session. It parks the other interrupted phases. Use **Continue
+unfinished** in the run queue to retry parked phases. Completed and delivered
+phases stay complete. Continuation reuses the recorded worktree and its edits
+when the worktree survives.
 
 Each phase retains its dispatch count, native provider session ID, and previous
 failure/park reason. Provider start events checkpoint the session before a final
 response exists. Continuation supplies the queued task contract plus recovery
 instructions to inspect existing files/diffs and complete only remaining work.
+Each phase runs in a separate turn. Plans with a legacy shared worktree run one
+phase at a time so two phases cannot write to that worktree concurrently.
+
+The total wall-clock budget includes elapsed time saved by earlier attempts.
+Raise the limit before continuing a run that exhausted its total budget.
 
 Compatible native sessions are resumed. Codex falls back before task dispatch
 when its saved thread is explicitly missing. Claude can fall back on an explicit

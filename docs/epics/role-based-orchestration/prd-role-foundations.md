@@ -2,7 +2,7 @@
 prd: prd-role-foundations
 epic: role-based-orchestration
 milestone: "0.6.0"
-status: proposed
+status: completed
 description: >
   Give agent configs an identity beyond connection settings: a role charter
   (persona, allowed skills, output contract) injected into every spawned
@@ -83,7 +83,7 @@ Stub — points to resolve while implementing:
 
 ### Phase 5 — Tests/verification
 
-- [ ] `role-foundations/tests` Add Rust tests for charter migration, injection routing, and assignment; pass prd-verifier against this PRD
+- [x] `role-foundations/tests` Add Rust tests for charter migration, injection routing, and assignment; pass prd-verifier against this PRD
 
 ## Open Questions
 

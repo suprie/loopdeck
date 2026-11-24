@@ -417,6 +417,11 @@ impl CodexSession {
             .thread_id
             .clone()
             .ok_or_else(|| AppError::Agent("Codex thread was not initialized".into()))?;
+        if let Some(sink) = self.run_events.as_mut() {
+            if let Some(event) = sink.normalizer().started(Some(thread_id.clone())) {
+                sink.send(event);
+            }
+        }
         let request_id = self.next_id();
         // Charter injection: a pending charter (set at spawn) is prepended to
         // this first task prompt — role identity first, task second. Consumed
@@ -671,6 +676,28 @@ impl CodexSession {
                             item_type = item.get("type").and_then(|value| value.as_str()).unwrap_or("unknown"),
                             "Codex item completed"
                         );
+                        // A collab result can include newly assigned child IDs and
+                        // statuses that were unavailable when the call started.
+                        if let Some((name, input)) = collab_tool_completion(item) {
+                            let key = format!(
+                                "completed:{}",
+                                item.get("id").and_then(Value::as_str).unwrap_or_default()
+                            );
+                            if seen_tools.insert(key) {
+                                let input = input.to_string();
+                                tool_calls.push(ToolCallRecord {
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                });
+                                blocks.push(ContentBlockRecord::ToolUse {
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                });
+                                if let Some(channel) = channel {
+                                    let _ = channel.send(ClaudeEvent::ToolUse { name, input });
+                                }
+                            }
+                        }
                         if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                             if let Some(final_text) = item.get("text").and_then(Value::as_str) {
                                 if item.get("phase").and_then(Value::as_str) == Some("final_answer")
@@ -1484,6 +1511,15 @@ fn first_turn_prompt(charter: Option<String>, task: &str) -> String {
     }
 }
 
+/// Completion of a collaboration *call*, not completion of the child task.
+pub(crate) fn collab_tool_completion(item: &Value) -> Option<(String, Value)> {
+    if item.get("type").and_then(Value::as_str) != Some("collabAgentToolCall") {
+        return None;
+    }
+    let (name, input) = tool_from_item(item)?;
+    Some((format!("{name} result"), input))
+}
+
 pub(crate) fn tool_from_item(item: &Value) -> Option<(String, Value)> {
     match item.get("type")?.as_str()? {
         "commandExecution" => Some((
@@ -1505,6 +1541,20 @@ pub(crate) fn tool_from_item(item: &Value) -> Option<(String, Value)> {
                 item.get("arguments").cloned().unwrap_or_else(|| json!({})),
             ))
         }
+        "collabAgentToolCall" => Some((
+            format!(
+                "Sub-agent {}",
+                item.get("tool").and_then(Value::as_str).unwrap_or("call")
+            ),
+            json!({
+                "tool": item.get("tool"),
+                "status": item.get("status"),
+                "model": item.get("model"),
+                "prompt": item.get("prompt"),
+                "receiverThreadIds": item.get("receiverThreadIds"),
+                "agentsStates": item.get("agentsStates"),
+            }),
+        )),
         "dynamicToolCall" => Some((
             item.get("tool")
                 .and_then(Value::as_str)

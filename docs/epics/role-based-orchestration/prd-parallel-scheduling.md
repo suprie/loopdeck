@@ -2,7 +2,7 @@
 prd: prd-parallel-scheduling
 epic: role-based-orchestration
 milestone: "0.6.0"
-status: proposed
+status: completed
 description: >
   Execute run plans one phase per turn and run phases with satisfied,
   disjoint depends_on concurrently in separate worktrees, with gated starts
@@ -61,21 +61,21 @@ Stub — points to resolve while implementing:
 
 ### Phase 1 — Per-phase turn execution
 
-- [ ] `parallel-scheduling/one-turn-per-phase` Replace the combined queued-batch turn with one executor turn per run-plan phase
+- [x] `parallel-scheduling/one-turn-per-phase` Replace the combined queued-batch turn with one executor turn per run-plan phase
 
 ### Phase 2 — Dependency-aware fan-out
 
-- [ ] `parallel-scheduling/parallel-batches` Run phases with satisfied, disjoint depends_on concurrently in separate worktrees under a bounded concurrency limit
-- [ ] `parallel-scheduling/gated-start` Hold dependent phases in Waiting until upstream phases complete, releasing or failing per the stall policy
+- [x] `parallel-scheduling/parallel-batches` Run phases with satisfied, disjoint depends_on concurrently in separate worktrees under a bounded concurrency limit
+- [x] `parallel-scheduling/gated-start` Hold dependent phases in Waiting until upstream phases complete, releasing or failing per the stall policy
 
 ### Phase 3 — Reconciliation + budgets
 
-- [ ] `parallel-scheduling/restart-reconcile` Extend restart reconciliation to multiple in-flight phases after a crash or restart
-- [ ] `parallel-scheduling/budget-split` Apply per-phase token and wall-clock budgets per in-flight phase instead of per combined batch
+- [x] `parallel-scheduling/restart-reconcile` Extend restart reconciliation to multiple in-flight phases after a crash or restart
+- [x] `parallel-scheduling/budget-split` Apply per-phase token and wall-clock budgets per in-flight phase instead of per combined batch
 
 ### Phase 4 — Tests/verification
 
-- [ ] `parallel-scheduling/tests` Add scheduler property tests (diamond graphs, cycle rejection, mid-flight crash recovery) and worktree cleanup race checks
+- [x] `parallel-scheduling/tests` Add scheduler property tests (diamond graphs, cycle rejection, mid-flight crash recovery) and worktree cleanup race checks
 
 ## Open Questions
 

@@ -121,14 +121,15 @@ fn default_and_assigned_resolvers_carry_only_their_roles_charter() {
 #[test]
 fn legacy_run_plan_without_assignment_fields_keeps_the_default_agent() {
     let dir = temp_dir("legacy-plan");
-    let path = dir.join("run-plan.yaml");
+    let path = runplan::run_plan_path(&dir);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
         "id: run-legacy\nproject: /repo\ncreated: 2026-07-28T09:00:00Z\nphases:\n  - execution_id: demo/one\n  - execution_id: demo/two\n",
     )
     .unwrap();
 
-    let plan = runplan::load_from_path(&path)
+    let plan = runplan::load(&dir)
         .expect("legacy plan loads")
         .expect("plan present");
     for phase in &plan.phases {
@@ -137,10 +138,12 @@ fn legacy_run_plan_without_assignment_fields_keeps_the_default_agent() {
         assert!(phase.assigned_agent_name.is_none());
         assert!(phase.handoff_topic.is_none());
     }
+    // Legacy plans have no authored edges, so both phases are ready at once;
+    // the executor still gives each phase its own turn.
     assert_eq!(
-        crate::commands::run_queue::next_queued_batch(&plan),
-        Some(vec![0, 1]),
-        "all-unassigned phases still share one combined turn"
+        crate::scheduler::select_ready(&plan, &Default::default(), 4),
+        vec![0, 1],
+        "legacy plans remain schedulable under per-phase turns"
     );
 
     std::fs::remove_dir_all(dir).ok();
@@ -183,10 +186,11 @@ fn assignment_and_handoff_topic_round_trip_through_the_plan_file() {
         loaded.phases[1].handoff_topic.as_deref(),
         Some("demo-qa-verify")
     );
-    // dev builds, QA verifies: the staffing change splits the combined turn.
+    // dev builds, QA verifies: the authored chain makes only the dev phase
+    // ready first. Each phase then runs in its own turn.
     assert_eq!(
-        crate::commands::run_queue::next_queued_batch(&loaded),
-        Some(vec![0])
+        crate::scheduler::select_ready(&loaded, &Default::default(), 4),
+        vec![0]
     );
 
     std::fs::remove_dir_all(dir).ok();

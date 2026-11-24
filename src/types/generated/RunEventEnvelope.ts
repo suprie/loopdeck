@@ -5,7 +5,7 @@ import type { RunEvent } from "./RunEvent";
  * Transport envelope for the app-wide additive stream.
  *
  * `event.run_id` identifies the LoopDeck run; `project_path` routes the
- * stream to the frontend's per-project stores, and `execution_id` names the
- * queued phase batch that produced it.
+ * stream to the frontend, and `execution_id` identifies the phase. An empty
+ * execution id is reserved for the queue-level terminal.
  */
-export type RunEventEnvelope = { project_path: string, execution_id: string, event: RunEvent, };
+export type RunEventEnvelope = { project_path: string, execution_id: string, control_path?: string, event: RunEvent, };

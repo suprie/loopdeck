@@ -438,6 +438,13 @@ impl RunEventNormalizer {
                 let Some(item) = params.get("item") else {
                     return Vec::new();
                 };
+                if let Some((name, input)) = crate::codex_session::collab_tool_completion(item) {
+                    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                    if !self.codex_tool_items.insert(format!("completed:{id}")) {
+                        return Vec::new();
+                    }
+                    return vec![self.tool(name, &input)];
+                }
                 if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
                     return Vec::new();
                 }
@@ -909,6 +916,52 @@ mod tests {
             }
             other => panic!("expected tool, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codex_subagent_activity_preserves_call_and_child_status_without_finishing_turn() {
+        let mut normalizer = codex_normalizer();
+        let mut item = json!({
+            "id": "spawn-1", "type": "collabAgentToolCall", "tool": "spawnAgent",
+            "status": "inProgress", "model": "small-model", "prompt": "Check recovery",
+            "receiverThreadIds": [], "agentsStates": {}
+        });
+        let started = json!({"method": "item/started", "params": {"item": item.clone()}});
+        let events = normalizer.convert_codex_message(&started);
+        assert!(
+            matches!(&events[0].payload, RunEventPayload::Tool { name, .. } if name == "Sub-agent spawnAgent")
+        );
+        assert!(normalizer.convert_codex_message(&started).is_empty());
+        item["status"] = json!("completed");
+        item["receiverThreadIds"] = json!(["child-1"]);
+        item["agentsStates"] = json!({"child-1": {"status": "running"}});
+        let completed = json!({"method": "item/completed", "params": {"item": item.clone()}});
+        let events = normalizer.convert_codex_message(&completed);
+        match &events[0].payload {
+            RunEventPayload::Tool {
+                name,
+                input_redacted,
+                ..
+            } => {
+                assert_eq!(name, "Sub-agent spawnAgent result");
+                let input: Value = serde_json::from_str(input_redacted).unwrap();
+                assert_eq!(input["status"], "completed");
+                assert_eq!(input["agentsStates"]["child-1"]["status"], "running");
+            }
+            other => panic!("expected tool activity, got {other:?}"),
+        }
+        assert!(normalizer.convert_codex_message(&completed).is_empty());
+        assert!(!normalizer.terminal_emitted);
+        // Some servers suppress start notifications. Keep the result anyway.
+        item["id"] = json!("wait-1");
+        item["tool"] = json!("wait");
+        item["status"] = json!("failed");
+        assert_eq!(
+            normalizer
+                .convert_codex_message(&json!({"method":"item/completed", "params":{"item":item}}))
+                .len(),
+            1
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub mod retry;
 mod run_executor;
 mod runplan;
 mod scanner;
+mod scheduler;
 mod secret_scan;
 mod secrets;
 mod skills;
@@ -234,6 +235,7 @@ pub fn run() {
             commands::run_queue::get_run_status,
             commands::run_queue::get_run_report,
             commands::run_queue::answer_parked_question,
+            commands::run_queue::update_run_budgets,
             commands::run_queue::requeue_run_phase,
             commands::run_queue::relink_delivered_phase,
             commands::run_queue::requeue_failed_run_phases,

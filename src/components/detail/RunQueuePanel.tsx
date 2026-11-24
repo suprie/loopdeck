@@ -1,3 +1,4 @@
+import { RunBudgetEditor } from "./RunBudgetEditor";
 import { useCallback, useEffect, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Play, RotateCcw, Shield, Square as StopIcon, XCircle, Zap } from "lucide-react";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
@@ -299,11 +300,15 @@ export function RunQueuePanel({
     plan?.phases.filter((p) =>
       ["parked", "failed", "interrupted", "killed"].includes(p.status),
     ).length ?? 0;
-  const hasQueuedPhase = plan?.phases.some((p) => p.status === "queued") ?? false;
+  // `waiting` phases are held by the dependency gate but still count as work
+  // the scheduler will run, so Start must stay enabled for them.
+  const isRunnable = (p: { status: string }) =>
+    p.status === "queued" || p.status === "waiting";
+  const hasQueuedPhase = plan?.phases.some(isRunnable) ?? false;
   const hasPendingInterview =
-    plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
+    plan?.phases.some((p) => isRunnable(p) && p.interview_status === "pending") ?? false;
   const pendingInterviewCount =
-    plan?.phases.filter((p) => p.status === "queued" && p.interview_status === "pending").length ?? 0;
+    plan?.phases.filter((p) => isRunnable(p) && p.interview_status === "pending").length ?? 0;
   const canStart = !isRunning && hasQueuedPhase && !hasPendingInterview;
   const startDisabledReason = isRunning
     ? "A run is already in progress"
@@ -452,6 +457,9 @@ export function RunQueuePanel({
             )}
           </div>
 
+          {!isRunning && (
+            <RunBudgetEditor key={projectPath} projectPath={projectPath} budgets={plan.budgets} onSaved={setPlan} />
+          )}
           {!isRunning && retryableCount > 0 && (
             <p className="mb-2 text-[11px] text-muted-foreground">
               Continue from saved progress in the existing worktree. Completed phases stay complete.

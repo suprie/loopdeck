@@ -41,19 +41,14 @@ fn app_database_path(_project: &Path) -> Result<PathBuf, AppError> {
     }
 }
 
-/// Resolve a repository/worktree to the shared git common directory's parent.
-/// Non-git project folders keep their canonical path as their identity.
-pub(crate) fn project_key(path: &Path) -> Result<String, AppError> {
+/// Share operational state only between a checkout and its linked worktrees.
+pub(crate) fn project_root(path: &Path) -> PathBuf {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if let Some(common_dir) = crate::git::common_dir(&canonical) {
-        let common_dir = common_dir.canonicalize().unwrap_or(common_dir);
-        if common_dir.file_name().is_some_and(|name| name == ".git") {
-            if let Some(root) = common_dir.parent() {
-                return Ok(root.to_string_lossy().into_owned());
-            }
-        }
-    }
-    Ok(canonical.to_string_lossy().into_owned())
+    crate::git::linked_main_checkout(&canonical).unwrap_or(canonical)
+}
+
+fn project_key(path: &Path) -> String {
+    project_root(path).to_string_lossy().into_owned()
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -149,7 +144,7 @@ async fn load_document_at(
     legacy_path: PathBuf,
 ) -> Result<Option<String>, AppError> {
     let pool = open(db_path).await?;
-    let key = project_key(&project)?;
+    let key = project_key(&project);
     let canonical_project = project.canonicalize().unwrap_or_else(|_| project.clone());
     let legacy_relative = legacy_path
         .strip_prefix(&project)
@@ -179,10 +174,7 @@ async fn load_document_at(
         "execution" => {
             serde_yaml::to_string(&crate::execution::load_from_path(&legacy_path)?.state)?
         }
-        "run_plan" => {
-            crate::runplan::load_from_path(&legacy_path)?;
-            crate::limits::read_bounded_to_string(&legacy_path, crate::limits::RUN_PLAN_MAX_BYTES)?
-        }
+        "run_plan" => crate::runplan::read_legacy_contents(&legacy_path)?,
         _ => crate::limits::read_bounded_to_string(&legacy_path, 2 * 1024 * 1024)?,
     };
     let imported_at = chrono::Utc::now().to_rfc3339();
@@ -191,7 +183,7 @@ async fn load_document_at(
              (project_key, kind, payload, source_path, imported_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
     )
-    .bind(key)
+    .bind(&key)
     .bind(&kind)
     .bind(payload)
     .bind(legacy_path.to_string_lossy().to_string())
@@ -202,7 +194,7 @@ async fn load_document_at(
     let row = sqlx::query(
         "SELECT payload FROM operational_documents WHERE project_key = ?1 AND kind = ?2",
     )
-    .bind(project_key(&project)?)
+    .bind(&key)
     .bind(&kind)
     .fetch_one(&pool)
     .await
@@ -246,7 +238,7 @@ async fn save_revisioned_document_at(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|error| AppError::OperationalStore(error.to_string()))?;
-    let key = project_key(&project)?;
+    let key = project_key(&project);
     let current = sqlx::query(
         "SELECT payload FROM operational_documents WHERE project_key = ?1 AND kind = ?2",
     )
@@ -260,17 +252,18 @@ async fn save_revisioned_document_at(
         .transpose()
         .map_err(|error| AppError::OperationalStore(error.to_string()))?
         .map(|yaml| {
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).map_err(|error| {
-                AppError::OperationalStore(format!(
-                    "cannot verify stored execution revision: {error}"
-                ))
-            })?;
-            Ok::<u64, AppError>(
-                value
-                    .get("revision")
-                    .and_then(serde_yaml::Value::as_u64)
-                    .unwrap_or(0),
-            )
+            let state = serde_yaml::from_str::<crate::execution::ExecutionState>(&yaml).map_err(
+                |error| {
+                    AppError::OperationalStore(format!(
+                        "cannot verify stored execution revision: {error}"
+                    ))
+                },
+            )?;
+            crate::execution::check_schema_version(
+                state.schema_version,
+                "the operational database",
+            )?;
+            Ok::<u64, AppError>(state.revision)
         })
         .transpose()?
         .unwrap_or(0);
@@ -316,7 +309,7 @@ async fn save_document_at(
          ON CONFLICT(project_key, kind) DO UPDATE SET payload = excluded.payload,
              updated_at = excluded.updated_at",
     )
-    .bind(project_key(&project)?)
+    .bind(project_key(&project))
     .bind(kind)
     .bind(payload)
     .bind(chrono::Utc::now().to_rfc3339())
@@ -335,7 +328,7 @@ pub(crate) fn has_document(project: &Path, kind: &str) -> Result<bool, AppError>
     sync(move || async move {
         let pool = open(db_path).await?;
         sqlx::query("SELECT 1 FROM operational_documents WHERE project_key = ?1 AND kind = ?2")
-            .bind(project_key(&project)?)
+            .bind(project_key(&project))
             .bind(kind)
             .fetch_optional(&pool)
             .await
@@ -432,7 +425,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        assert_eq!(project_key(&repo).unwrap(), project_key(&worktree).unwrap());
+        assert_eq!(project_root(&repo), project_root(&worktree));
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -82,3 +82,28 @@ _Older decisions archived to [decisions-archive.md](./decisions-archive.md)._
 - **Status**: accepted
 - **Context**: Agent explanations should use short sentences and consistent terms.
 - **Consequences**: Claude and Codex receive shared writing guidance at session creation; code, literal content, and required output formats remain unchanged.
+
+## 2026-10-30 — Surface Codex delegation as worker activity
+- **Status**: accepted
+- **Context**: Codex collaboration items were ignored, leaving a busy parent session with no visible delegated activity.
+- **Consequences**: Both event paths and persisted transcripts retain collaboration call starts/results, model, child IDs, prompts, and reported child states. A completed collaboration call does not imply a completed child task or parent turn. Child transcripts are not subscribed by this change.
+
+## 2026-10-30 — Edit budgets on stopped run plans
+- **Status**: accepted
+- **Context**: A phase stopped by its token or time limit needs a higher budget without replacing the run plan.
+- **Consequences**: A typed IPC command validates and saves budget changes only for inactive runs. Phase outcomes, provider sessions, and retained worktrees remain available to the existing continuation path.
+
+## 2026-10-30 — Execute run-plan phases one turn each with a ready-set scheduler
+- **Status**: accepted
+- **Context**: The run queue merged every queued phase into one LLM turn, so roles could not be attributed, budgeted per phase, or run concurrently. `prd-parallel-scheduling` makes the phase the unit of execution.
+- **Consequences**: `scheduler.rs` validates the dependency graph (cycles rejected at plan creation and run start) and selects a ready set. Each phase runs in its own worktree and branch cut from the default branch, with its own provider session, token budget, and watchdog. `RunPlan.max_concurrency` defaults to four and is configurable in the plan-tonight picker. Dependents enter `Waiting` and are released only when every upstream is Completed or Delivered; a non-green upstream fails its dependents while independent in-flight phases continue. Restart reconciliation auto-resumes a phase only when its worktree and saved session both survive, and parks the rest with a reason. Dependents receive upstream output only as seeded handoff artifacts, never as unmerged branch code.
+
+## 2026-11-24 — Track unattended activity and recovery by phase
+- **Status**: accepted
+- **Context**: Parallel turns can finish or require recovery independently.
+- **Consequences**: The planner accepts explicit dependencies, live activity and session identity belong to each phase, and delivery retries are keyed by branch.
+
+## 2026-11-24 — Recover verified drafts after a phase deadline
+- **Status**: accepted
+- **Context**: A provider turn can time out after publishing its draft and before reporting the URL.
+- **Consequences**: The executor stops the turn, then checks the exact draft branch, commit, phase metadata, and passing rubric before completing delivery.
