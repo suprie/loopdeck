@@ -30,6 +30,11 @@ _Older loops archived to [loops-archive.md](./loops-archive.md)._
 
 ## History
 
+### 2026-11-24 — Address orchestration recovery review
+- **Status**: completed
+- **Completed**: 2026-11-24
+- **Summary**: Isolated nested projects, serialized budget edits and requeueing, preserved provider checkpoints when regrouping phases, and carried saved wall-clock usage forward on continuation.
+
 ### 2026-10-30 — Prepare orchestration recovery PR
 - **Status**: completed
 - **Completed**: 2026-10-30

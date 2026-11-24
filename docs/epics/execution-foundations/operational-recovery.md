@@ -11,9 +11,9 @@ remain repository files.
 - `operational_documents` stores schema-versioned run-plan and execution
   snapshots, with import source and timestamps. This is an incremental storage
   boundary, not the complete normalized operational-store schema.
-- Linked worktrees resolve through Git's common directory to their main
-  checkout. The main checkout supplies the initial legacy YAML; stale copies
-  in worktrees are not imported.
+- Linked worktree roots share the main checkout's operational state and
+  active-run checks. The main checkout supplies the initial legacy YAML.
+  Separately registered subdirectories keep their own operational state.
 - A missing central record imports a validated legacy document once. Legacy
   files are retained unchanged; subsequent runtime writes go to SQLite.
 - Execution revision checks run inside a write transaction. SQLite writes
@@ -33,6 +33,10 @@ Each phase retains its dispatch count, native provider session ID, and previous
 failure/park reason. Provider start events checkpoint the session before a final
 response exists. Continuation supplies the queued task contract plus recovery
 instructions to inspect existing files/diffs and complete only remaining work.
+Phases with different saved provider sessions run in separate turns.
+
+The total wall-clock budget includes elapsed time saved by earlier attempts.
+Raise the limit before continuing a run that exhausted its total budget.
 
 Compatible native sessions are resumed. Codex falls back before task dispatch
 when its saved thread is explicitly missing. Claude can fall back on an explicit

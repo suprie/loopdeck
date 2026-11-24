@@ -163,6 +163,37 @@ fn first_read_from_worktree_imports_main_checkout_instead_of_stale_snapshot() {
 }
 
 #[test]
+fn nested_project_operational_state_is_independent_of_its_parent() {
+    let repo = Repository::new();
+    let nested = repo.root.join("packages/web");
+    fs::create_dir_all(&nested).unwrap();
+    let mut plan = run_executor::build_run_plan(
+        "parent-run".into(),
+        repo.root.clone(),
+        chrono::Utc::now(),
+        &["sample/parent".into()],
+        StallPolicy::ContinueIndependent,
+        false,
+        &[],
+    );
+    runplan::save(&repo.root, &plan).unwrap();
+    execution::save(&repo.root, &ExecutionState::default(), 0).unwrap();
+
+    assert!(runplan::load(&nested).unwrap().is_none());
+    assert!(!execution::load(&nested).unwrap().file_present);
+    plan.id = "nested-run".into();
+    plan.project = nested.clone();
+    runplan::save(&nested, &plan).unwrap();
+
+    assert_eq!(runplan::load(&nested).unwrap().unwrap().id, "nested-run");
+    assert_eq!(
+        runplan::load(&repo.worktree).unwrap().unwrap().id,
+        "parent-run"
+    );
+    assert!(execution::load(&repo.worktree).unwrap().file_present);
+}
+
+#[test]
 fn central_execution_revision_rejects_stale_writes_without_repository_files() {
     let repo = Repository::new();
     execution::save(&repo.root, &ExecutionState::default(), 0).unwrap();

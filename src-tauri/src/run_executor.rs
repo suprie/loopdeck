@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 /// Per-project handle for a live queued run. See `AppState::run_handles`.
 pub struct RunHandle {
+    /// Registered root used for this run's interrupt slot and events.
+    pub root: PathBuf,
     /// Checked by the executor loop between phases (and passed through to
     /// `cancel_run`, which also fires the project's interrupt slot so an
     /// in-flight turn stops immediately rather than waiting for the phase to
@@ -30,16 +32,11 @@ pub struct RunHandle {
 }
 
 impl RunHandle {
-    pub fn new() -> Self {
+    pub fn new(root: PathBuf) -> Self {
         Self {
+            root,
             cancel: Arc::new(AtomicBool::new(false)),
         }
-    }
-}
-
-impl Default for RunHandle {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

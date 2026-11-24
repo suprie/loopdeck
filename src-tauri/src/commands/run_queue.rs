@@ -26,6 +26,7 @@ use crate::execution::{self, ExecutionState, LoopOrigin};
 use crate::git;
 use crate::handoff;
 use crate::limits;
+use crate::operational_store;
 use crate::provider_event::{RunEvent, RunEventEnvelope};
 use crate::provider_normalize::RunEventChannel;
 use crate::run_executor::{
@@ -43,7 +44,7 @@ use std::process::Child;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -444,6 +445,9 @@ async fn bootstrap_worktree(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<BootstrapStop, AppError> {
+    if timeout.is_zero() {
+        return Ok(BootstrapStop::TimedOut);
+    }
     if !path.join("package.json").is_file() || path.join("node_modules").is_dir() {
         return Ok(BootstrapStop::Completed);
     }
@@ -564,6 +568,21 @@ fn resolved_run_timeout(plan: &RunPlan) -> Duration {
     )
 }
 
+struct RunClock {
+    saved_elapsed: Duration,
+    started: Instant,
+}
+
+impl RunClock {
+    fn elapsed(&self) -> Duration {
+        self.saved_elapsed.saturating_add(self.started.elapsed())
+    }
+
+    fn remaining(&self, cap: Duration) -> Duration {
+        cap.saturating_sub(self.elapsed())
+    }
+}
+
 fn validate_budgets(budgets: &RunBudgets) -> Result<(), AppError> {
     for (name, value) in [
         ("per-phase token cap", budgets.per_phase_token_cap),
@@ -670,15 +689,6 @@ pub async fn create_run_plan(
         ));
     }
 
-    {
-        let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        if handles.contains_key(&root) {
-            return Err(AppError::RunPlan(
-                "a run is already in progress for this project — cancel it before queuing a new plan".into(),
-            ));
-        }
-    }
-
     for id in &execution_ids {
         epic::find_loop_by_id(&root, id).ok_or_else(|| {
             AppError::RunPlan(format!(
@@ -719,6 +729,11 @@ pub async fn create_run_plan(
         }
     }
 
+    let _handles = lock_inactive_run(
+        &state,
+        &root,
+        "a run is already in progress for this project — cancel it before queuing a new plan",
+    )?;
     if let Some(existing) = runplan::load(&root)? {
         for phase in &existing.phases {
             let has_draft_pr = phase
@@ -779,14 +794,12 @@ pub async fn queue_run(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
-
-    {
-        let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        if handles.contains_key(&root) {
-            return Err(AppError::RunPlan(
-                "a run is already in progress for this project".into(),
-            ));
-        }
+    let key = operational_store::project_root(&root);
+    let mut handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    if handles.contains_key(&key) {
+        return Err(AppError::RunPlan(
+            "a run is already in progress for this project".into(),
+        ));
     }
 
     // A `Running` phase left over from a prior crash isn't actually running
@@ -823,12 +836,10 @@ pub async fn queue_run(
         ));
     }
 
-    let handle = RunHandle::new();
+    let handle = RunHandle::new(root.clone());
     let cancel = Arc::clone(&handle.cancel);
-    {
-        let mut handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        handles.insert(root.clone(), handle);
-    }
+    handles.insert(key.clone(), handle);
+    drop(handles);
 
     let app_handle = app.clone();
     let run_root = root.clone();
@@ -846,7 +857,7 @@ pub async fn queue_run(
             }
         };
         if let Ok(mut handles) = state.run_handles.lock() {
-            handles.remove(&run_root);
+            handles.remove(&key);
         };
         emit_run_queue_terminal(&app_handle, &run_root, terminal_message, is_error);
     });
@@ -874,19 +885,15 @@ pub async fn queue_run(
 #[tauri::command]
 pub async fn cancel_run(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
     let root = resolve_root(&state, &path)?;
-
-    let found = {
+    let key = operational_store::project_root(&root);
+    let root = {
         let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-        handles
-            .get(&root)
-            .map(|h| h.cancel.store(true, Ordering::SeqCst))
-            .is_some()
+        let handle = handles
+            .get(&key)
+            .ok_or_else(|| AppError::RunPlan("no run is in progress for this project".into()))?;
+        handle.cancel.store(true, Ordering::SeqCst);
+        handle.root.clone()
     };
-    if !found {
-        return Err(AppError::RunPlan(
-            "no run is in progress for this project".into(),
-        ));
-    }
 
     // Phase sessions run in the isolated worktree, while legacy/manual
     // sessions are keyed by the registered root. Signal both safely so Stop
@@ -909,11 +916,9 @@ pub async fn get_run_status(
     state: State<'_, AppState>,
 ) -> Result<RunQueueStatus, AppError> {
     let root = resolve_root(&state, &path)?;
-    let active = state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root);
+    let key = operational_store::project_root(&root);
+    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    let active = handles.contains_key(&key);
     if !active {
         run_executor::reconcile_running_phases(&root)?;
     }
@@ -956,6 +961,7 @@ pub async fn answer_parked_question(
     state: State<'_, AppState>,
 ) -> Result<crate::runplan::RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
 
@@ -1134,6 +1140,34 @@ fn reconcile_inactive_execution_state(
     Ok(Some(next))
 }
 
+/// Keep inactive plan edits and the executor's start check serialized.
+fn lock_inactive_run<'a>(
+    state: &'a AppState,
+    root: &Path,
+    active_error: &str,
+) -> Result<MutexGuard<'a, HashMap<PathBuf, RunHandle>>, AppError> {
+    let key = operational_store::project_root(root);
+    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
+    if handles.contains_key(&key) {
+        return Err(AppError::RunPlan(active_error.into()));
+    }
+    Ok(handles)
+}
+
+fn edit_inactive_run_plan(
+    state: &AppState,
+    root: &Path,
+    active_error: &str,
+    edit: impl FnOnce(&mut RunPlan) -> Result<(), AppError>,
+) -> Result<RunPlan, AppError> {
+    let _handles = lock_inactive_run(state, root, active_error)?;
+    let mut plan = runplan::load(root)?
+        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
+    edit(&mut plan)?;
+    runplan::save(root, &plan)?;
+    Ok(plan)
+}
+
 /// Change limits on the existing plan without discarding saved progress.
 #[tauri::command]
 pub async fn update_run_budgets(
@@ -1143,17 +1177,15 @@ pub async fn update_run_budgets(
 ) -> Result<RunPlan, AppError> {
     validate_budgets(&budgets)?;
     let root = resolve_root(&state, &path)?;
-    let handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
-    if handles.contains_key(&root) {
-        return Err(AppError::RunPlan(
-            "cannot change budgets while the run is still active".into(),
-        ));
-    }
-    let mut plan = runplan::load(&root)?
-        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
-    plan.budgets = budgets;
-    runplan::save(&root, &plan)?;
-    Ok(plan)
+    edit_inactive_run_plan(
+        &state,
+        &root,
+        "cannot change budgets while the run is still active",
+        |plan| {
+            plan.budgets = budgets;
+            Ok(())
+        },
+    )
 }
 
 /// Requeue one retryable terminal phase and any phases parked only because
@@ -1165,22 +1197,12 @@ pub async fn requeue_run_phase(
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
-    if state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root)
-    {
-        return Err(AppError::RunPlan(
-            "cannot retry a phase while the run is still active".into(),
-        ));
-    }
-
-    let mut plan = runplan::load(&root)?
-        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
-    requeue_terminal_phase(&mut plan, &execution_id)?;
-    runplan::save(&root, &plan)?;
-    Ok(plan)
+    edit_inactive_run_plan(
+        &state,
+        &root,
+        "cannot retry a phase while the run is still active",
+        |plan| requeue_terminal_phase(plan, &execution_id),
+    )
 }
 
 #[tauri::command]
@@ -1191,16 +1213,11 @@ pub async fn relink_delivered_phase(
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
-    if state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root)
-    {
-        return Err(AppError::RunPlan(
-            "cannot relink a phase while the run is still active".into(),
-        ));
-    }
+    let _handles = lock_inactive_run(
+        &state,
+        &root,
+        "cannot relink a phase while the run is still active",
+    )?;
     if execution_id == replacement_id {
         return Err(AppError::RunPlan(
             "choose a different PRD item to relink".into(),
@@ -1322,37 +1339,27 @@ pub async fn relink_delivered_phase(
 /// Requeue every retryable terminal phase at once — the mass-retry path for
 /// a run that died wholesale (e.g. a bootstrap failure that killed the whole
 /// batch). Unlike [`requeue_run_phase`], no dependents cascade is needed:
-/// every terminal phase is requeued regardless of why it stopped, so the
-/// next `queue_run` picks them all up as one combined turn (single session,
-/// one verify→ship) instead of N per-phase re-reads.
+/// every retryable terminal phase is requeued regardless of why it stopped.
 #[tauri::command]
 pub async fn requeue_failed_run_phases(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
-    if state
-        .run_handles
-        .lock()
-        .map_err(|_| AppError::LockError)?
-        .contains_key(&root)
-    {
-        return Err(AppError::RunPlan(
-            "cannot retry phases while the run is still active".into(),
-        ));
-    }
-
-    let mut plan = runplan::load(&root)?
-        .ok_or_else(|| AppError::RunPlan("no run plan exists for this project".into()))?;
-    let requeued = requeue_all_terminal_phases(&mut plan);
-    if requeued == 0 {
-        return Err(AppError::RunPlan(
-            "no retryable phases — nothing is parked, failed, interrupted, or killed".into(),
-        ));
-    }
-    runplan::save(&root, &plan)?;
-    info!("requeued {requeued} terminal phase(s) for mass retry");
-    Ok(plan)
+    edit_inactive_run_plan(
+        &state,
+        &root,
+        "cannot retry phases while the run is still active",
+        |plan| {
+            if requeue_all_terminal_phases(plan) == 0 {
+                return Err(AppError::RunPlan(
+                    "no retryable phases — nothing is parked, failed, interrupted, or killed"
+                        .into(),
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn requeue_terminal_phase(
@@ -1443,6 +1450,7 @@ fn requeue_all_terminal_phases(plan: &mut RunPlan) -> usize {
 /// `depends_on` ancestor that publishes a handoff topic starts a new turn.
 /// Its ancestor's artifact was emitted by an earlier turn, so this turn can
 /// inline it. Phases with no publishing ancestor batch exactly as before.
+/// Recovery also splits batches when their saved provider sessions differ.
 pub(crate) fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
     let indices: Vec<usize> = plan
         .phases
@@ -1454,13 +1462,16 @@ pub(crate) fn next_queued_batch(plan: &RunPlan) -> Option<Vec<usize>> {
     if indices.is_empty() {
         return None;
     }
-    let staffing = plan.phases[indices[0]].assigned_agent_id.clone();
+    let first = &plan.phases[indices[0]];
     let mut batch = vec![indices[0]];
     for &idx in &indices[1..] {
-        if plan.phases[idx].assigned_agent_id != staffing {
+        let phase = &plan.phases[idx];
+        if phase.assigned_agent_id != first.assigned_agent_id
+            || phase.provider_session_id != first.provider_session_id
+        {
             break;
         }
-        if run_executor::consumes_handoff(plan, &plan.phases[idx]) {
+        if run_executor::consumes_handoff(plan, phase) {
             break;
         }
         batch.push(idx);
@@ -1613,6 +1624,7 @@ pub async fn run_phase_interview(
     // Reload rather than reuse the plan loaded before the (possibly long)
     // interview turn — `cancel_run`/the executor could have touched other
     // phases meanwhile; only this phase's fields are ours to set.
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
     let idx = plan
@@ -1729,6 +1741,7 @@ pub async fn run_batch_phase_interviews(
     .await?;
     let answers_by_phase = extract_batch_interview_answers(&response.result);
 
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("run plan disappeared during interview".into()))?;
     for execution_id in ids {
@@ -1804,6 +1817,7 @@ pub async fn skip_phase_interview(
 ) -> Result<RunPlan, AppError> {
     let root = resolve_root(&state, &path)?;
 
+    let _handles = state.run_handles.lock().map_err(|_| AppError::LockError)?;
     let mut plan = runplan::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is queued for this project".into()))?;
     let idx = plan
@@ -1879,10 +1893,13 @@ async fn execute_run(
         return Ok(());
     };
     let _keep_awake = KeepAwake::acquire();
-    let run_started = Instant::now();
+    let clock = RunClock {
+        saved_elapsed: Duration::from_secs(plan.wall_clock_secs),
+        started: Instant::now(),
+    };
     let worktree = ensure_worktree(root, &mut plan)?;
     runplan::save(root, &plan)?;
-    let bootstrap_timeout = resolved_run_timeout(&plan).saturating_sub(run_started.elapsed());
+    let bootstrap_timeout = clock.remaining(resolved_run_timeout(&plan));
     match bootstrap_worktree(&worktree, bootstrap_timeout, cancel).await {
         Ok(BootstrapStop::Completed) => {}
         Ok(BootstrapStop::Cancelled) | Ok(BootstrapStop::TimedOut) => {
@@ -1899,12 +1916,13 @@ async fn execute_run(
                 phase.status = RunPhaseStatus::Killed;
                 phase.park_payload = Some(reason.into());
             }
-            plan.wall_clock_secs = run_started.elapsed().as_secs();
+            plan.wall_clock_secs = clock.elapsed().as_secs();
             plan.environment.worktree_kept = true;
             runplan::save(root, &plan)?;
             return Ok(());
         }
         Err(error) => {
+            plan.wall_clock_secs = clock.elapsed().as_secs();
             if let Some(phase) = plan
                 .phases
                 .iter_mut()
@@ -1947,8 +1965,9 @@ async fn execute_run(
         let Some(batch) = next_queued_batch(&plan) else {
             break;
         };
-        plan.wall_clock_secs = run_started.elapsed().as_secs();
-        if run_started.elapsed() >= resolved_run_timeout(&plan) {
+        let elapsed = clock.elapsed();
+        plan.wall_clock_secs = elapsed.as_secs();
+        if elapsed >= resolved_run_timeout(&plan) {
             kill_batch(&mut plan, &batch, "total run wall-clock budget exceeded");
             run_executor::park_waiting_at_run_end(
                 &mut plan,
@@ -2161,7 +2180,7 @@ async fn execute_run(
         ));
         let token_budget = TokenBudget::new(phase_token_cap);
         let phase_started = Instant::now();
-        let run_remaining = run_timeout.saturating_sub(run_started.elapsed());
+        let run_remaining = clock.remaining(run_timeout);
         let (watchdog_timeout, watchdog_reason) = if run_remaining <= phase_timeout {
             (run_remaining, "total run wall-clock budget exceeded")
         } else {
@@ -2177,15 +2196,8 @@ async fn execute_run(
         // — replaces the default-config spawn, so each phase group runs under
         // its own role. `None` falls back to the default-agent resolution
         // inside the wrapper, unchanged from Phase 2.
-        let resume_session_id = batch
-            .iter()
-            .map(|&idx| plan.phases[idx].provider_session_id.as_deref())
-            .collect::<Option<Vec<_>>>()
-            .and_then(|ids| {
-                ids.first()
-                    .copied()
-                    .filter(|first| ids.iter().all(|id| id == first))
-            });
+        // Batch boundaries preserve each phase's saved provider session.
+        let resume_session_id = plan.phases[batch[0]].provider_session_id.as_deref();
         let turn = start_fresh_and_record_streaming_in_root_with_config_and_resume(
             state,
             &worktree,
@@ -2260,7 +2272,7 @@ async fn execute_run(
         for &idx in &batch {
             plan.phases[idx].wall_clock_secs = per_phase_secs;
         }
-        plan.wall_clock_secs = run_started.elapsed().as_secs();
+        plan.wall_clock_secs = clock.elapsed().as_secs();
         set_batch_token_usage(&mut plan, &batch, token_budget.used(), batch_len);
 
         match outcome {
@@ -2619,7 +2631,7 @@ async fn execute_run(
     // park it so it is visible in the morning report rather than waiting
     // forever unattended (`prd-agent-handoff` Phase 2).
     run_executor::park_waiting_at_run_end(&mut plan, "run ended with an unmet handoff dependency")?;
-    plan.wall_clock_secs = run_started.elapsed().as_secs();
+    plan.wall_clock_secs = clock.elapsed().as_secs();
     finalize_worktree(&mut plan);
     runplan::save(root, &plan)?;
 
@@ -2955,6 +2967,20 @@ mod unattended_tests {
         assert_eq!(next_queued_batch(&plan), None);
     }
 
+    #[test]
+    fn recovered_batches_keep_matching_checkpoints_and_split_at_different_ones() {
+        let mut plan = parked_chain();
+        plan.phases[0].provider_session_id = Some("codex:thread-a".into());
+        plan.phases[1].provider_session_id = plan.phases[0].provider_session_id.clone();
+        assert_eq!(next_queued_batch(&plan), Some(vec![0, 1]));
+
+        plan.phases[1].provider_session_id = Some("codex:thread-b".into());
+        assert_eq!(next_queued_batch(&plan), Some(vec![0]));
+
+        plan.phases[0].status = RunPhaseStatus::Completed;
+        assert_eq!(next_queued_batch(&plan), Some(vec![1]));
+    }
+
     /// Per-phase staffing (`prd-role-foundations` Phase 4): a staffing change
     /// splits the combined turn — dev-builds / QA-verifies queue as two
     /// batches — while consecutive same-staffing (or all-unassigned) phases
@@ -3261,6 +3287,70 @@ mod unattended_tests {
         })
         .is_ok());
         assert!(validate_budgets(&RunBudgets::default()).is_ok());
+    }
+
+    #[test]
+    fn continuation_counts_saved_elapsed_time_against_total_cap() {
+        let clock = RunClock {
+            saved_elapsed: Duration::from_secs(50 * 60),
+            started: Instant::now(),
+        };
+        let cap = Duration::from_secs(60 * 60);
+        assert!(clock.elapsed() >= Duration::from_secs(50 * 60));
+        assert!(clock.remaining(cap) <= Duration::from_secs(10 * 60));
+        assert!(clock.remaining(cap) > Duration::ZERO);
+        assert_eq!(
+            clock.remaining(Duration::from_secs(45 * 60)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn requeue_and_budget_edits_preserve_both_updates() {
+        let directory =
+            std::env::temp_dir().join(format!("loopdeck-budget-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let root = directory.as_path();
+        let state = empty_app_state();
+        let mut initial = parked_chain();
+        initial.phases[0].status = RunPhaseStatus::Interrupted;
+        let execution_id = &initial.phases[0].execution_id;
+        runplan::save(root, &initial).unwrap();
+
+        let (requeue_loaded, wait_for_requeue) = std::sync::mpsc::channel();
+        let (budget_started, wait_for_budget) = std::sync::mpsc::channel();
+        let state = &state;
+        std::thread::scope(|threads| {
+            let requeue = threads.spawn(move || {
+                edit_inactive_run_plan(state, root, "active", |plan| {
+                    requeue_loaded.send(()).unwrap();
+                    wait_for_budget.recv().unwrap();
+                    assert!(matches!(
+                        state.run_handles.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    requeue_terminal_phase(plan, execution_id)
+                })
+                .unwrap();
+            });
+            wait_for_requeue.recv().unwrap();
+            let budget = threads.spawn(move || {
+                budget_started.send(()).unwrap();
+                edit_inactive_run_plan(state, root, "active", |plan| {
+                    plan.budgets.total_run_wall_clock_secs = Some(3600);
+                    Ok(())
+                })
+                .unwrap();
+            });
+            requeue.join().unwrap();
+            budget.join().unwrap();
+        });
+
+        let saved = runplan::load(root).unwrap().unwrap();
+        assert_eq!(saved.phases[0].status, RunPhaseStatus::Queued);
+        assert!(saved.phases[0].recovery_requested);
+        assert_eq!(saved.budgets.total_run_wall_clock_secs, Some(3600));
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
