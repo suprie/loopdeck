@@ -401,6 +401,11 @@ impl CodexSession {
             .thread_id
             .clone()
             .ok_or_else(|| AppError::Agent("Codex thread was not initialized".into()))?;
+        if let Some(sink) = self.run_events.as_mut() {
+            if let Some(event) = sink.normalizer().started(Some(thread_id.clone())) {
+                sink.send(event);
+            }
+        }
         let request_id = self.next_id();
         // Charter injection: a pending charter (set at spawn) is prepended to
         // this first task prompt — role identity first, task second. Consumed

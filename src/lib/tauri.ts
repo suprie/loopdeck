@@ -282,7 +282,9 @@ export async function exportExecutionSummary(path: string): Promise<string> {
  * `handoffTopics` (prd-agent-handoff Phase 1) opts phases into a contract
  * artifact; unlisted phases emit nothing. Each topic is a unique kebab-case
  * slug fixed at queue time.
- * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments, handoff_topics) -> Result<RunPlan, AppError>
+ * `maxConcurrency` (prd-parallel-scheduling Phase 2) bounds concurrent phase
+ * turns; omit to keep the backend's four-phase default.
+ * Rust: create_run_plan(path, execution_ids, stall_policy, draft_pr_authorized, budgets, assignments, handoff_topics, max_concurrency, dependencies) -> Result<RunPlan, AppError>
  */
 export async function createRunPlan(
   path: string,
@@ -292,6 +294,8 @@ export async function createRunPlan(
   budgets: RunBudgets,
   assignments: PhaseAgentAssignment[] = [],
   handoffTopics: PhaseHandoffTopic[] = [],
+  maxConcurrency?: number,
+  dependencies?: Record<string, string[]>,
 ): Promise<RunPlan> {
   return invoke<RunPlan>("create_run_plan", {
     path,
@@ -301,6 +305,8 @@ export async function createRunPlan(
     budgets,
     assignments,
     handoffTopics,
+    maxConcurrency,
+    dependencies,
   });
 }
 
@@ -470,10 +476,10 @@ export async function detectExternalWorktrees(path: string): Promise<ExternalWor
  * The one idempotent retry for a failed delivery: resumes from the recorded
  * stage (push the committed branch, adopt or create the draft PR, finish the
  * bookkeeping) and reports what it did.
- * Rust: retry_delivery(path) -> Result<RetryOutcome, AppError>
+ * Rust: retry_delivery(path, branch) -> Result<RetryOutcome, AppError>
  */
-export async function retryDelivery(path: string): Promise<RetryOutcome> {
-  return invoke<RetryOutcome>("retry_delivery", { path });
+export async function retryDelivery(path: string, branch: string): Promise<RetryOutcome> {
+  return invoke<RetryOutcome>("retry_delivery", { path, branch });
 }
 
 /**

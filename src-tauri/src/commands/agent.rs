@@ -1701,6 +1701,29 @@ pub(crate) fn spawn_fresh_with_config(
     agent_config: &crate::config::AgentConfig,
     force_autonomous: bool,
 ) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
+    spawn_fresh_with_config_resume(
+        state,
+        path,
+        policy_root,
+        agent_config,
+        force_autonomous,
+        None,
+    )
+}
+
+/// Resume-aware counterpart of [`spawn_fresh_with_config`]. Restart
+/// reconciliation (`parallel-scheduling/restart-reconcile`) passes the saved
+/// provider session id so an auto-resumed phase keeps its model context in a
+/// surviving worktree. `None` preserves the fresh-session behavior every
+/// other caller relies on.
+pub(crate) fn spawn_fresh_with_config_resume(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    agent_config: &crate::config::AgentConfig,
+    force_autonomous: bool,
+    resume_session_id: Option<&str>,
+) -> Result<Arc<tokio::sync::Mutex<HarnessSession>>, AppError> {
     // The caller has already performed the busy check / archive steps when it
     // is the normal `spawn_fresh` path. Multi-agent worktrees are unique, so
     // their maps cannot collide with an existing session.
@@ -1710,7 +1733,7 @@ pub(crate) fn spawn_fresh_with_config(
         resolve_permission_policy(state, policy_root)
     };
 
-    let session = HarnessSession::spawn(path, agent_config, None, policy)?;
+    let session = HarnessSession::spawn(path, agent_config, resume_session_id, policy)?;
     let arc = Arc::new(tokio::sync::Mutex::new(session));
     state
         .claude_sessions
@@ -1897,10 +1920,54 @@ pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config(
     force_autonomous: bool,
     plan_mode: bool,
 ) -> Result<AgentResponse, AppError> {
+    start_fresh_and_record_streaming_in_root_with_config_resume(
+        state,
+        path,
+        policy_root,
+        prompt,
+        title,
+        channel,
+        token_budget,
+        run_events,
+        agent_config,
+        control_key,
+        force_autonomous,
+        plan_mode,
+        None,
+    )
+    .await
+}
+
+/// Resume-aware counterpart of
+/// [`start_fresh_and_record_streaming_in_root_with_config`]. The run-queue
+/// executor passes a phase's saved session id only when restart
+/// reconciliation classified it auto-resumable; every other caller goes
+/// through the wrapper above with `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_fresh_and_record_streaming_in_root_with_config_resume(
+    state: &AppState,
+    path: &Path,
+    policy_root: &Path,
+    prompt: &str,
+    title: Option<String>,
+    channel: &Channel<ClaudeEvent>,
+    token_budget: Option<&TokenBudget>,
+    run_events: Option<RunEventChannel>,
+    agent_config: Option<&crate::config::AgentConfig>,
+    control_key: Option<&Path>,
+    force_autonomous: bool,
+    plan_mode: bool,
+    resume_session_id: Option<&str>,
+) -> Result<AgentResponse, AppError> {
     let session_arc = match agent_config {
-        Some(config) => {
-            spawn_fresh_with_config(state, path, policy_root, config, force_autonomous)?
-        }
+        Some(config) => spawn_fresh_with_config_resume(
+            state,
+            path,
+            policy_root,
+            config,
+            force_autonomous,
+            resume_session_id,
+        )?,
         None => spawn_fresh(state, path, policy_root, force_autonomous).await?,
     };
     let mut session = session_arc.lock().await;

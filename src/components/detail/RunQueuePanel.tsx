@@ -299,11 +299,15 @@ export function RunQueuePanel({
     plan?.phases.filter((p) =>
       ["parked", "failed", "interrupted", "killed"].includes(p.status),
     ).length ?? 0;
-  const hasQueuedPhase = plan?.phases.some((p) => p.status === "queued") ?? false;
+  // `waiting` phases are held by the dependency gate but still count as work
+  // the scheduler will run, so Start must stay enabled for them.
+  const isRunnable = (p: { status: string }) =>
+    p.status === "queued" || p.status === "waiting";
+  const hasQueuedPhase = plan?.phases.some(isRunnable) ?? false;
   const hasPendingInterview =
-    plan?.phases.some((p) => p.status === "queued" && p.interview_status === "pending") ?? false;
+    plan?.phases.some((p) => isRunnable(p) && p.interview_status === "pending") ?? false;
   const pendingInterviewCount =
-    plan?.phases.filter((p) => p.status === "queued" && p.interview_status === "pending").length ?? 0;
+    plan?.phases.filter((p) => isRunnable(p) && p.interview_status === "pending").length ?? 0;
   const canStart = !isRunning && hasQueuedPhase && !hasPendingInterview;
   const startDisabledReason = isRunning
     ? "A run is already in progress"

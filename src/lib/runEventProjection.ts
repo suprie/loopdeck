@@ -19,20 +19,23 @@ import type {
   TaskRecord,
   UsageInfo,
 } from "../types";
-import type { RunEvent, RunEventPayload } from "../types/runEvent";
+import type { RunEvent, RunEventEnvelope, RunEventPayload } from "../types/runEvent";
 
 export interface PendingPermissionProjection {
+  controlPath?: string;
   requestId: string;
   toolName: string;
   input: string;
 }
 
 export interface PendingQuestionProjection {
+  controlPath?: string;
   requestId: string;
   questions: AskUserQuestionSpec[];
 }
 
 export interface PendingPlanProjection {
+  controlPath?: string;
   requestId: string;
   plan: string;
 }
@@ -316,4 +319,39 @@ export function projectRunEvent(
       // stays available to consumers that render it (morning report).
       return state;
   }
+}
+
+/** Project-level view for the existing chat pane. Keep the first active
+ * phase in view and route each pending card to its own provider session.
+ */
+export function projectRunQueueEvent(
+  phases: Map<string, RunEventProjectionState>,
+  { execution_id: phaseId, control_path: controlPath, event }: RunEventEnvelope,
+): RunEventProjectionState | undefined {
+  if (phaseId === "" && event.payload.type === "terminal") {
+    const last = Array.from(phases.values()).reverse().find((phase) => phase.result);
+    const closed = projectRunEvent(last ?? emptyRunEventProjection(), event);
+    phases.clear();
+    return { ...closed, result: last?.result ?? closed.result };
+  }
+
+  const previous = phases.get(phaseId) ?? emptyRunEventProjection();
+  const next = projectRunEvent(previous, event);
+  if (next === previous) return;
+  phases.set(phaseId, {
+    ...next,
+    question: next.question && { ...next.question, controlPath },
+    permission: next.permission && { ...next.permission, controlPath },
+    plan: next.plan && { ...next.plan, controlPath },
+  });
+
+  const active = Array.from(phases.values()).filter((phase) => phase.busy);
+  const visible = active[0] ?? next;
+  return {
+    ...visible,
+    busy: active.length > 0,
+    question: active.find((phase) => phase.question)?.question ?? null,
+    permission: active.find((phase) => phase.permission)?.permission ?? null,
+    plan: active.find((phase) => phase.plan)?.plan ?? null,
+  };
 }
