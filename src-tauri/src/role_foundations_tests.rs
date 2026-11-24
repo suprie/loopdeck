@@ -121,14 +121,15 @@ fn default_and_assigned_resolvers_carry_only_their_roles_charter() {
 #[test]
 fn legacy_run_plan_without_assignment_fields_keeps_the_default_agent() {
     let dir = temp_dir("legacy-plan");
-    let path = dir.join("run-plan.yaml");
+    let path = runplan::run_plan_path(&dir);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
         "id: run-legacy\nproject: /repo\ncreated: 2026-07-28T09:00:00Z\nphases:\n  - execution_id: demo/one\n  - execution_id: demo/two\n",
     )
     .unwrap();
 
-    let plan = runplan::load_from_path(&path)
+    let plan = runplan::load(&dir)
         .expect("legacy plan loads")
         .expect("plan present");
     for phase in &plan.phases {

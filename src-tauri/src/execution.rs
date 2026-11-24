@@ -554,7 +554,7 @@ pub struct LoadedExecution {
     pub file_present: bool,
 }
 
-/// Load `.loopdeck/execution.yaml` for `repo_path`. See [`load_from_path`].
+/// Load central execution state, importing the repository snapshot if needed.
 pub fn load(repo_path: &Path) -> Result<LoadedExecution, AppError> {
     let path = execution_path(repo_path);
     let Some(contents) = crate::operational_store::load_document(repo_path, "execution", &path)?
@@ -566,12 +566,11 @@ pub fn load(repo_path: &Path) -> Result<LoadedExecution, AppError> {
             file_present: false,
         });
     };
-    let loaded = load_from_contents(&contents, &path)?;
-    if loaded.source == LoadSource::BackupRecovered {
-        let repaired = serde_yaml::to_string(&loaded.state)?;
-        crate::operational_store::save_document(repo_path, "execution", &repaired)?;
-    }
-    Ok(loaded)
+    let source = format!("the operational database for {}", repo_path.display());
+    let state = serde_yaml::from_str::<ExecutionState>(&contents).map_err(|error| {
+        AppError::ExecutionState(format!("execution state in {source} is malformed: {error}"))
+    })?;
+    load_primary_state(state, source)
 }
 
 /// Load from an explicit path with non-destructive recovery:
@@ -594,27 +593,8 @@ pub fn load_from_path(path: &Path) -> Result<LoadedExecution, AppError> {
     }
 
     let contents = limits::read_bounded_to_string(path, limits::EXECUTION_MAX_BYTES)?;
-    load_from_contents(&contents, path)
-}
-
-fn load_from_contents(contents: &str, path: &Path) -> Result<LoadedExecution, AppError> {
-    match serde_yaml::from_str::<ExecutionState>(contents) {
-        Ok(state) => {
-            // Version compatibility is a hard, read-only event — distinct
-            // from structural defects, which are non-fatal warnings.
-            check_schema_version(state.schema_version, path)?;
-            let warnings = state
-                .validate_invariants()
-                .iter()
-                .map(|i| i.message.clone())
-                .collect();
-            Ok(LoadedExecution {
-                state,
-                source: LoadSource::Primary,
-                warnings,
-                file_present: true,
-            })
-        }
+    match serde_yaml::from_str::<ExecutionState>(&contents) {
+        Ok(state) => load_primary_state(state, path.display()),
         Err(primary_err) => {
             tracing::warn!(
                 "malformed execution state at {}: {primary_err}",
@@ -630,6 +610,24 @@ fn load_from_contents(contents: &str, path: &Path) -> Result<LoadedExecution, Ap
             }
         }
     }
+}
+
+fn load_primary_state(
+    state: ExecutionState,
+    location: impl std::fmt::Display,
+) -> Result<LoadedExecution, AppError> {
+    check_schema_version(state.schema_version, location)?;
+    let warnings = state
+        .validate_invariants()
+        .iter()
+        .map(|issue| issue.message.clone())
+        .collect();
+    Ok(LoadedExecution {
+        state,
+        source: LoadSource::Primary,
+        warnings,
+        file_present: true,
+    })
 }
 
 /// Try the `.bak` for a malformed primary. On success returns a
@@ -657,7 +655,7 @@ fn recover_from_backup(path: &Path) -> Result<LoadedExecution, ()> {
         }
     };
     // A backup with an incompatible version is not a usable recovery.
-    if let Err(e) = check_schema_version(state.schema_version, path) {
+    if let Err(e) = check_schema_version(state.schema_version, path.display()) {
         tracing::warn!("backup at {} cannot be recovered: {e}", backup.display());
         return Err(());
     }
@@ -685,21 +683,23 @@ fn recover_from_backup(path: &Path) -> Result<LoadedExecution, ()> {
 /// Read-only schema-version gate. A newer schema must never be rewritten; an
 /// older one is not auto-migrated in Phase 2 (migration from legacy
 /// `loops.md` arrives in Phase 4).
-fn check_schema_version(version: u32, path: &Path) -> Result<(), AppError> {
+pub(crate) fn check_schema_version(
+    version: u32,
+    location: impl std::fmt::Display,
+) -> Result<(), AppError> {
     if version == CURRENT_SCHEMA_VERSION {
         return Ok(());
     }
-    let where_ = path.display();
     if version > CURRENT_SCHEMA_VERSION {
         Err(AppError::ExecutionState(format!(
-            "execution state at {where_} uses schema_version {version}, newer than this \
-             Selasar supports ({CURRENT_SCHEMA_VERSION}). The file was not modified — \
+            "execution state at {location} uses schema_version {version}, newer than this \
+             Selasar supports ({CURRENT_SCHEMA_VERSION}). The stored state was preserved — \
              upgrade Selasar to read it."
         )))
     } else {
         Err(AppError::ExecutionState(format!(
-            "execution state at {where_} uses schema_version {version}, older than the \
-             current schema ({CURRENT_SCHEMA_VERSION}). The file was not modified — \
+            "execution state at {location} uses schema_version {version}, older than the \
+             current schema ({CURRENT_SCHEMA_VERSION}). The stored state was preserved — \
              migration from a legacy schema is not supported in this version."
         )))
     }
@@ -1045,6 +1045,42 @@ mod tests {
         assert_eq!(loaded.state.revision, 7);
         // The malformed primary is preserved untouched.
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_backup_import_does_not_repair_a_malformed_central_record() {
+        let dir = temp_dir("central_backup_boundary");
+        let path = execution_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "broken: [").unwrap();
+        let backup_state = ExecutionState {
+            revision: 7,
+            ..ExecutionState::default()
+        };
+        fs::write(
+            backup_path(&path),
+            serde_yaml::to_string(&backup_state).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(load(&dir).unwrap().state, backup_state);
+
+        for malformed_record in ["broken central: [", "revision: invalid"] {
+            crate::operational_store::save_document(&dir, "execution", malformed_record).unwrap();
+
+            let err = load(&dir).unwrap_err();
+            assert!(matches!(err, AppError::ExecutionState(_)));
+            assert!(err.to_string().contains("operational database"));
+            assert!(save(&dir, &ExecutionState::default(), 0).is_err());
+            assert_eq!(
+                crate::operational_store::load_document(&dir, "execution", &path)
+                    .unwrap()
+                    .as_deref(),
+                Some(malformed_record)
+            );
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "broken: [");
         fs::remove_dir_all(&dir).unwrap();
     }
 

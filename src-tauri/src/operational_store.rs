@@ -174,10 +174,7 @@ async fn load_document_at(
         "execution" => {
             serde_yaml::to_string(&crate::execution::load_from_path(&legacy_path)?.state)?
         }
-        "run_plan" => {
-            crate::runplan::load_from_path(&legacy_path)?;
-            crate::limits::read_bounded_to_string(&legacy_path, crate::limits::RUN_PLAN_MAX_BYTES)?
-        }
+        "run_plan" => crate::runplan::read_legacy_contents(&legacy_path)?,
         _ => crate::limits::read_bounded_to_string(&legacy_path, 2 * 1024 * 1024)?,
     };
     let imported_at = chrono::Utc::now().to_rfc3339();
@@ -255,17 +252,18 @@ async fn save_revisioned_document_at(
         .transpose()
         .map_err(|error| AppError::OperationalStore(error.to_string()))?
         .map(|yaml| {
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).map_err(|error| {
-                AppError::OperationalStore(format!(
-                    "cannot verify stored execution revision: {error}"
-                ))
-            })?;
-            Ok::<u64, AppError>(
-                value
-                    .get("revision")
-                    .and_then(serde_yaml::Value::as_u64)
-                    .unwrap_or(0),
-            )
+            let state = serde_yaml::from_str::<crate::execution::ExecutionState>(&yaml).map_err(
+                |error| {
+                    AppError::OperationalStore(format!(
+                        "cannot verify stored execution revision: {error}"
+                    ))
+                },
+            )?;
+            crate::execution::check_schema_version(
+                state.schema_version,
+                "the operational database",
+            )?;
+            Ok::<u64, AppError>(state.revision)
         })
         .transpose()?
         .unwrap_or(0);

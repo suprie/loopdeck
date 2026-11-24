@@ -16,6 +16,8 @@ remain repository files.
   Separately registered subdirectories keep their own operational state.
 - A missing central record imports a validated legacy document once. Legacy
   files are retained unchanged; subsequent runtime writes go to SQLite.
+  A valid execution YAML backup can be imported if the legacy primary is
+  malformed. A malformed SQLite record is reported and preserved.
 - Execution revision checks run inside a write transaction. SQLite writes
   have a bounded busy timeout; short in-process operations are serialized.
 - Project identity currently follows the canonical main-checkout path.

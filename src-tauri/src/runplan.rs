@@ -303,16 +303,16 @@ pub fn load(repo_path: &Path) -> Result<Option<RunPlan>, AppError> {
         .map_err(|error| AppError::RunPlan(format!("central run plan is malformed: {error}")))
 }
 
-/// Load from an explicit path. Missing file → `Ok(None)`; malformed file →
-/// `Err` (the file is left untouched — this module never writes on load).
-pub fn load_from_path(path: &Path) -> Result<Option<RunPlan>, AppError> {
-    if !path.exists() {
-        return Ok(None);
-    }
+/// Read and validate the same YAML snapshot that will be imported.
+pub(crate) fn read_legacy_contents(path: &Path) -> Result<String, AppError> {
     let contents = limits::read_bounded_to_string(path, limits::RUN_PLAN_MAX_BYTES)?;
-    serde_yaml::from_str::<RunPlan>(&contents)
-        .map(Some)
-        .map_err(|e| AppError::RunPlan(format!("run plan at {} is malformed: {e}", path.display())))
+    serde_yaml::from_str::<RunPlan>(&contents).map_err(|error| {
+        AppError::RunPlan(format!(
+            "run plan at {} is malformed: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(contents)
 }
 
 /// Persist the mutable run plan centrally. Authored and legacy repository
@@ -551,7 +551,7 @@ phases:
         let path = dir.join("run-plan.yaml");
         std::fs::write(&path, "id: [this is not a valid RunPlan").unwrap();
 
-        let err = load_from_path(&path).unwrap_err();
+        let err = read_legacy_contents(&path).unwrap_err();
         assert!(matches!(err, AppError::RunPlan(_)));
         // The malformed file is left exactly as written — load never rewrites.
         assert_eq!(
