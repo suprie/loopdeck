@@ -14,6 +14,8 @@
 //! or `.bak` recovery here: a run plan has exactly one writer (the in-app
 //! executor), not the mix of CLI + UI callers `execution.yaml` supports.
 
+mod adjudication;
+
 use crate::error::AppError;
 use crate::handoff::HandoffLedgerEntry;
 use crate::limits;
@@ -293,13 +295,18 @@ pub fn run_plan_path(repo_path: &Path) -> PathBuf {
 /// Load the central run plan, importing `.loopdeck/run-plan.yaml` once if
 /// present. `Ok(None)` means there is no plan in either source.
 pub fn load(repo_path: &Path) -> Result<Option<RunPlan>, AppError> {
-    let Some(contents) =
-        crate::operational_store::load_document(repo_path, "run_plan", &run_plan_path(repo_path))?
-    else {
-        return Ok(None);
-    };
-    serde_yaml::from_str::<RunPlan>(&contents)
-        .map(Some)
+    load_contents(repo_path)?
+        .as_deref()
+        .map(parse_plan)
+        .transpose()
+}
+
+fn load_contents(repo_path: &Path) -> Result<Option<String>, AppError> {
+    crate::operational_store::load_document(repo_path, "run_plan", &run_plan_path(repo_path))
+}
+
+fn parse_plan(contents: &str) -> Result<RunPlan, AppError> {
+    serde_yaml::from_str(contents)
         .map_err(|error| AppError::RunPlan(format!("central run plan is malformed: {error}")))
 }
 
@@ -386,6 +393,7 @@ pub struct RunReport {
     pub plan: RunPlan,
     pub phases: Vec<PhaseReportEntry>,
     pub audit: AuditSlice,
+    pub adjudications: Vec<adjudication::Adjudication>,
     /// Handoffs attributed to this run (`prd-agent-handoff` Phase 3), filtered
     /// from the project-wide ledger by `plan.id`.
     #[serde(default)]
@@ -393,6 +401,20 @@ pub struct RunReport {
 }
 
 impl RunReport {
+    pub fn load(repo_path: &Path) -> Result<Option<Self>, AppError> {
+        let Some(contents) = load_contents(repo_path)? else {
+            return Ok(None);
+        };
+        let plan = parse_plan(&contents)?;
+        let adjudications =
+            adjudication::from_snapshot(&contents, &plan.phases).map_err(|error| {
+                AppError::RunPlan(format!("malformed adjudication record: {error}"))
+            })?;
+        let mut report = Self::from_plan(plan, AuditSlice::default());
+        report.adjudications = adjudications;
+        Ok(Some(report))
+    }
+
     /// Build the read model from the on-disk run plan. Verdict labels are
     /// derived from phase status + `park_payload` markers.
     pub fn from_plan(plan: RunPlan, audit: AuditSlice) -> Self {
@@ -418,6 +440,7 @@ impl RunReport {
             plan,
             phases,
             audit,
+            adjudications: Vec::new(),
             handoffs: Vec::new(),
         }
     }

@@ -733,6 +733,26 @@ export interface HandoffLedgerEntry {
   citation: CitationResult;
 }
 
+export interface AdjudicationReportEntry {
+  execution_id: string;
+  decider: string;
+  decision: {
+    options: string[];
+    verdict: { winner: number | null; rationale: string };
+    human_winner: number | null;
+  } | null;
+  reviews: {
+    artifact_topic: string;
+    verdict: { outcome: string; rationale: string };
+  }[];
+  escalation: {
+    trigger: string;
+    reason: string;
+    retry_required: boolean;
+    resolution: string | null;
+  } | null;
+}
+
 /** Morning report read model. Mirrors Rust `RunReport`. */
 export interface RunReport {
   plan: RunPlan;
@@ -740,6 +760,7 @@ export interface RunReport {
   audit: AuditSlice;
   /** Handoffs attributed to this run (filtered from the project ledger). */
   handoffs: HandoffLedgerEntry[];
+  adjudications: AdjudicationReportEntry[];
 }
 
 /**
