@@ -971,13 +971,11 @@ pub async fn get_run_report(
     state: State<'_, AppState>,
 ) -> Result<crate::runplan::RunReport, AppError> {
     let root = resolve_root(&state, &path)?;
-    let plan = runplan::load(&root)?
+    let mut report = runplan::RunReport::load(&root)?
         .ok_or_else(|| AppError::RunPlan("no run plan is available for this project".into()))?;
-    let audit = build_audit_slice(&root, &plan).unwrap_or_default();
-    // Handoff attribution (`prd-agent-handoff` Phase 3): the ledger is
-    // project-wide, so scope it to this plan before handing it to the report.
-    let handoffs = handoff::handoffs_for_run(&root, &plan.id).unwrap_or_default();
-    Ok(crate::runplan::RunReport::from_plan(plan, audit).with_handoffs(handoffs))
+    report.audit = build_audit_slice(&root, &report.plan).unwrap_or_default();
+    let handoffs = handoff::handoffs_for_run(&root, &report.plan.id).unwrap_or_default();
+    Ok(report.with_handoffs(handoffs))
 }
 
 /// Answer a parked phase's `AskUserQuestion`, pin the answers into its

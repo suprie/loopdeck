@@ -2,6 +2,7 @@ import { RunBudgetEditor } from "./RunBudgetEditor";
 import { useCallback, useEffect, useState } from "react";
 import { Activity, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Play, RotateCcw, Shield, Square as StopIcon, XCircle, Zap } from "lucide-react";
 import { AskUserQuestionCard } from "./AskUserQuestionCard";
+import { AdjudicationRecords } from "./AdjudicationRecords";
 import { toast } from "sonner";
 import type { AppError, ContentBlock, RunBudgets, RunPhase, RunPlan, RunReport, StallPolicy } from "../../types";
 import * as api from "../../lib/tauri";
@@ -622,6 +623,8 @@ function MorningReport({
           </tbody>
         </table>
       </div>
+
+      <AdjudicationRecords records={report.adjudications} idToTitle={idToTitle} />
 
       {/* Parked-question inbox */}
       {parked.length > 0 && (

@@ -5,6 +5,7 @@ import { VERDICT_COLOR, VERDICT_LABEL } from "../../lib/nightRun";
 import { useAppStore } from "../../store/appStore";
 import { buildIdToTitle } from "./EpicsPanel";
 import { ParkedQuestionInbox } from "./ParkedQuestionInbox";
+import { AdjudicationRecords } from "./AdjudicationRecords";
 import type { Epic, RunPlan, RunReport } from "../../types";
 
 // Same cadence the drawer's `useRunStatus` poll uses — cheap local IPC that
@@ -214,6 +215,8 @@ export function MorningReportTab({
           </table>
         </div>
       </div>
+
+      <AdjudicationRecords records={report.adjudications} idToTitle={idToTitle} />
 
       {/* Kill callout rows: budget/stall kills pulled out of the table so the
           destructive outcomes can't hide in a row-scroll. */}
